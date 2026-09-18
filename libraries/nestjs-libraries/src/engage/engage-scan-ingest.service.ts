@@ -484,6 +484,20 @@ export class EngageScanIngestService {
    * wrote the row first. Skipped entirely when the scanner sent nothing, which
    * is most posts (`mediaUrls` is absent unless the post has attachments).
    *
+   * The left side is guarded by `jsonb_typeof(...) = 'object'`, NOT by
+   * COALESCE. COALESCE only catches SQL NULL, and a row created with no
+   * archive holds JSON `null` instead (the create branch below wrote a bare
+   * `null` into a Json column, which Prisma stores as the jsonb scalar).
+   * `||` then hits its "concatenating a scalar with an object converts BOTH to
+   * arrays" rule and produces `[null, {...}]` — an ARRAY where every reader
+   * expects an object, so `opportunityMediaUrls` finds no `.mediaUrls` on it
+   * and serves []. Each later merge appended another element
+   * (`[null, {...}, {...}]`), so the images were physically present in the
+   * column and invisible to every client. Measured on a real Reddit row that
+   * was scanned before it could carry images and manually re-imported after.
+   * The type check subsumes the NULL case (`jsonb_typeof(NULL)` is NULL, which
+   * is not 'object'), so nothing else is needed.
+   *
    * `model` is typed to the model accessor but is the full PrismaClient at
    * runtime — same cast as EngageRepository.appendGenerationHistory.
    */
@@ -494,9 +508,10 @@ export class EngageScanIngestService {
     if (rawData == null || Object.keys(rawData).length === 0) return;
     await (this._opportunity.model as unknown as PrismaService).$executeRaw`
       UPDATE "EngageOpportunity"
-      SET "rawData" = COALESCE("rawData", '{}'::jsonb) || ${JSON.stringify(
-        rawData
-      )}::jsonb
+      SET "rawData" = CASE
+                        WHEN jsonb_typeof("rawData") = 'object' THEN "rawData"
+                        ELSE '{}'::jsonb
+                      END || ${JSON.stringify(rawData)}::jsonb
       WHERE "id" = ${opportunityId}
     `;
   }
@@ -664,10 +679,15 @@ export class EngageScanIngestService {
             metricScore: post.metricScore,
             metricUpvoteRatio: post.metricUpvoteRatio ?? null,
             metricComments: post.metricComments,
+            // Prisma.DbNull (SQL NULL), NOT a bare `null` — on a Json column
+            // that writes the jsonb SCALAR null, which is a value, not an
+            // absent one. _mergeRawData above then had to concatenate onto a
+            // scalar, and `||` turned the row's archive into an array. "No
+            // archive" is the absence of one.
             rawData:
               post.rawData != null
                 ? (post.rawData as Prisma.InputJsonValue)
-                : null,
+                : Prisma.DbNull,
           };
           const update = {
             // Store the canonical URL, and refresh the channel audience size so

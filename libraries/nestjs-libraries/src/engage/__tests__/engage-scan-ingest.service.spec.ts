@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { Prisma } from '@prisma/client';
 import {
   EngageScanIngestService,
   normalizeExternalPost,
@@ -241,7 +242,39 @@ describe('EngageScanIngestService.persistOpportunities', () => {
     ]);
     const sql = executeRaw.mock.calls[0][0].join('?');
     expect(sql).toContain('||');
-    expect(sql).toContain(`COALESCE("rawData", '{}'::jsonb)`);
+  });
+
+  it('guards the merge on jsonb_typeof, not COALESCE — JSON null is a value', async () => {
+    // COALESCE only catches SQL NULL. A row created with no archive held the
+    // jsonb SCALAR null instead, which COALESCE passes straight through, and
+    // `||` converts BOTH sides to arrays when one is a scalar:
+    //   null || {"mediaUrls":[…]}  ->  [null, {"mediaUrls":[…]}]
+    // Every later merge appended one more element. The row then holds an ARRAY
+    // where opportunityMediaUrls expects an object, so it reads no .mediaUrls
+    // and serves [] — the images sat in the column, invisible to every client.
+    // Seen on a real Reddit row: scanned before it could carry images, then
+    // manually re-imported three times.
+    const { svc, executeRaw } = build();
+    await svc.persistOpportunities('org1', null, [
+      { ...makeScoredPost(1), platform: 'x', rawData: { mediaUrls: ['a.jpg'] } } as any,
+    ]);
+    const sql = executeRaw.mock.calls[0][0].join('?');
+    expect(sql).toContain(`jsonb_typeof("rawData") = 'object'`);
+    // The left side must never be COALESCE again — that is the exact bug.
+    expect(sql).not.toContain('COALESCE("rawData"');
+  });
+
+  it('creates a row with NO archive as SQL NULL, never as JSON null', async () => {
+    // The source of the array corruption above. Prisma writes a bare `null`
+    // into a Json column as the jsonb SCALAR null — a value, not an absent
+    // one — which the merge then had to concatenate onto. "No archive" has to
+    // be DbNull so the column is genuinely empty.
+    const { svc, oppUpsert } = build();
+    await svc.persistOpportunities('org1', null, [makeScoredPost(1)]);
+    expect(oppUpsert).toHaveBeenCalledOnce();
+    const { create } = oppUpsert.mock.calls[0][0] as any;
+    expect(create.rawData).toBe(Prisma.DbNull);
+    expect(create.rawData).not.toBeNull();
   });
 
   it('skips the extra write when the scanner sent no rawData', async () => {
