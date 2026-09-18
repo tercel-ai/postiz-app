@@ -810,6 +810,24 @@ describe('EngageRepository — two-table reads', () => {
   });
 
   describe('listSentReplies', () => {
+    // The feed is "most recently SENT first". Post.publishDate is re-stamped to
+    // the real send time on every publish-success commit, so a reply drafted days
+    // ago and sent today belongs at the top — ordering on the row's own createdAt
+    // would bury it under newer-but-unsent rows.
+    it('orders by the reply post publishDate desc with id desc as tiebreaker', async () => {
+      const { repo, sentFindMany, sentCount, stateFindMany } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+      sentCount.mockResolvedValue(0);
+      stateFindMany.mockResolvedValue([]);
+
+      await repo.listSentReplies('org1', {} as any);
+
+      expect(sentFindMany.mock.calls[0][0].orderBy).toEqual([
+        { post: { publishDate: 'desc' } },
+        { id: 'desc' },
+      ]);
+    });
+
     it('selects lastMetricsFetchAt on every returned post', async () => {
       const { repo, sentFindMany, sentCount, stateFindMany } = buildRepo();
       sentFindMany.mockResolvedValue([]);
@@ -5485,5 +5503,90 @@ describe('opportunityContentType', () => {
     expect(opportunityContentType({ tweet: { full_text: 'x' } })).toBeNull();
     expect(opportunityContentType({ postContentType: 'video' })).toBeNull();
     expect(opportunityContentType({ postContentType: '' })).toBeNull();
+  });
+});
+
+// `locateSentReply` answers "which page of /sent is this reply on", so it has to
+// count preceding rows under the SAME ordering the list uses — publishDate desc,
+// id desc. Counting under any other key silently sends the client to a page the
+// reply is not on.
+describe('locateSentReply', () => {
+  const PUBLISH_DATE = new Date('2026-09-10T08:00:00.000Z');
+
+  it('reads the target publishDate through the post relation', async () => {
+    const { repo, sentFindFirst, sentCount } = buildRepo();
+    sentFindFirst.mockResolvedValue({
+      id: 's1',
+      post: { publishDate: PUBLISH_DATE },
+    });
+    sentCount.mockResolvedValue(0);
+
+    await repo.locateSentReply('org1', { sentReplyId: 's1' } as any);
+
+    expect(sentFindFirst.mock.calls[0][0].select).toEqual({
+      id: true,
+      post: { select: { publishDate: true } },
+    });
+  });
+
+  it('counts preceding rows by publishDate then by id, keeping the date window intact', async () => {
+    const { repo, sentFindFirst, sentCount } = buildRepo();
+    sentFindFirst.mockResolvedValue({
+      id: 's1',
+      post: { publishDate: PUBLISH_DATE },
+    });
+    // 21 strictly-newer + 1 same-date-higher-id → position 23 → page 2 at limit 20.
+    sentCount
+      .mockResolvedValueOnce(21)
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(58);
+
+    const res = await repo.locateSentReply('org1', {
+      sentReplyId: 's1',
+      date: 'month',
+    } as any);
+
+    const [newer, ties] = sentCount.mock.calls;
+    // The publishDate predicate rides in AND, so the `date` window's own
+    // publishDate filter on `post` survives untouched.
+    expect(newer[0].where.AND).toEqual([
+      { post: { publishDate: { gt: PUBLISH_DATE } } },
+    ]);
+    expect(newer[0].where.post.publishDate).toEqual({
+      gte: expect.any(Date),
+    });
+    expect(ties[0].where.AND).toEqual([
+      { post: { publishDate: PUBLISH_DATE } },
+    ]);
+    expect(ties[0].where.id).toEqual({ gt: 's1' });
+
+    expect(res).toEqual({
+      found: true,
+      page: 2,
+      position: 23,
+      total: 58,
+      limit: 20,
+      totalPages: 3,
+    });
+  });
+
+  it('reports not-found without counting positions when the reply misses the filters', async () => {
+    const { repo, sentFindFirst, sentCount } = buildRepo();
+    sentFindFirst.mockResolvedValue(null);
+    sentCount.mockResolvedValue(58);
+
+    const res = await repo.locateSentReply('org1', {
+      sentReplyId: 'nope',
+    } as any);
+
+    expect(sentCount).toHaveBeenCalledTimes(1);
+    expect(res).toEqual({
+      found: false,
+      page: null,
+      position: null,
+      total: 58,
+      limit: 20,
+      totalPages: 3,
+    });
   });
 });

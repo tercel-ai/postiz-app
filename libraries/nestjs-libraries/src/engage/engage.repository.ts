@@ -4870,9 +4870,15 @@ export class EngageRepository {
             },
           },
         },
-        // Stable tiebreaker so `locateSentReply` can reproduce the exact page
-        // index for replies sharing the same createdAt.
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        // Newest reply FIRST by when the reply actually went out, not by when the
+        // row was created: every publish-success commit re-stamps Post.publishDate
+        // to the real send time, so a reply drafted days ago and sent today belongs
+        // at the top — createdAt would bury it. QUEUE rows keep their scheduled
+        // (future) publishDate and therefore lead the list, which is what the
+        // "upcoming first" reading of a sent feed expects; DRAFT rows sort on the
+        // date they were saved with. Stable tiebreaker so `locateSentReply` can
+        // reproduce the exact page index for replies sharing the same publishDate.
+        orderBy: [{ post: { publishDate: 'desc' } }, { id: 'desc' }],
         skip: offset,
         take: limit,
       }),
@@ -5339,7 +5345,12 @@ export class EngageRepository {
             },
           },
         },
-        // Stable tiebreaker (id) mirrors listSentReplies for deterministic pages.
+        // Deliberately NOT the org-facing listSentReplies ordering: that one sorts
+        // on the reply post's publishDate (when it went out), which is the right
+        // axis for a user's feed. The admin console is a triage tool — an operator
+        // asks "what came in around the time of the report", and `sortOrder` flips
+        // the window open at either end — so it stays on the row's own createdAt.
+        // Stable tiebreaker (id) keeps pages deterministic.
         orderBy: [{ createdAt: sortOrder }, { id: 'desc' }],
         skip: offset,
         take: pageSize,
@@ -5401,7 +5412,7 @@ export class EngageRepository {
 
     const target = await this._sentReply.model.engageSentReply.findFirst({
       where: { ...where, id: dto.sentReplyId },
-      select: { id: true, createdAt: true },
+      select: { id: true, post: { select: { publishDate: true } } },
     });
 
     if (!target) {
@@ -5418,23 +5429,30 @@ export class EngageRepository {
       };
     }
 
-    const [precedingByCreatedAt, precedingById, total] = await Promise.all([
-      // Replies with strictly newer createdAt come before target in desc order.
-      this._sentReply.model.engageSentReply.count({
-        where: { ...where, createdAt: { gt: target.createdAt } },
-      }),
-      // Ties on createdAt: id desc, so higher id = earlier in list.
+    // The publishDate predicates go through `AND` rather than being merged into
+    // the `post` filter: a `date` window already put a `publishDate: { gte }` on
+    // that same object, and spreading a second one would silently drop the window.
+    const targetPublishDate = target.post.publishDate;
+    const [precedingByPublishDate, precedingById, total] = await Promise.all([
+      // Replies with a strictly newer publishDate come before target in desc order.
       this._sentReply.model.engageSentReply.count({
         where: {
           ...where,
-          createdAt: target.createdAt,
+          AND: [{ post: { publishDate: { gt: targetPublishDate } } }],
+        },
+      }),
+      // Ties on publishDate: id desc, so higher id = earlier in list.
+      this._sentReply.model.engageSentReply.count({
+        where: {
+          ...where,
           id: { gt: target.id },
+          AND: [{ post: { publishDate: targetPublishDate } }],
         },
       }),
       this._sentReply.model.engageSentReply.count({ where }),
     ]);
 
-    const position = precedingByCreatedAt + precedingById + 1;
+    const position = precedingByPublishDate + precedingById + 1;
     const page = Math.ceil(position / limit);
 
     return {

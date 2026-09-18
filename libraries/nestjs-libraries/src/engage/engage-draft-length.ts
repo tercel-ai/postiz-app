@@ -41,6 +41,119 @@ export function outputLengthForLength(
   return normalized === 'x' ? target.x : target.reddit;
 }
 
+/** The length vocabulary a reference-post generation for X is written against. */
+export type ReferencePostLengthTier = 'short' | 'medium' | 'long';
+
+/**
+ * X generation targets for REFERENCE POSTS, which is a different problem from
+ * a reply: the reference can be a Medium essay or a Quora answer, so the model
+ * is compressing 20x rather than answering in kind, and a numeric budget is
+ * the one instruction an LLM cannot verify about its own output.
+ *
+ * So the tiers are spaced to leave DRIFT HEADROOM under X's 280 ceiling rather
+ * than to use as much of it as possible — 65/130 sit at 4.3x/2.15x, wide
+ * enough that a model that misjudges its own length still publishes. `long` is
+ * the only tier that trades headroom for a fuller post, and it is also the
+ * only one that has ever overrun in practice, which is what the downgrade
+ * ladder below exists for.
+ *
+ * These are the numbers a client's Short/Medium/Long picker already resolves
+ * to before calling, which is why `xReferencePostTierFor` can read an incoming
+ * `outputLength` back as the tier it was — but the values are OWNED here, and
+ * a number that matches none of them still lands on a tier.
+ */
+const X_REFERENCE_POST_TARGETS: Record<ReferencePostLengthTier, number> = {
+  short: 65,
+  medium: 130,
+  long: X_WEIGHTED_CHAR_LIMIT,
+};
+
+/**
+ * `long` for a THREAD part, rather than the 260 a single post gets.
+ *
+ * Every part independently faces the 280 ceiling, so a 4-post thread is four
+ * independent chances to overshoot rather than one — and it is asked for
+ * through a longer prompt (part separator, exact post count, per-part ceiling)
+ * that leaves the model less attention for any one of them. Buying headroom
+ * back costs 40 characters a part, which on X is not a visible difference.
+ */
+const X_REFERENCE_POST_THREAD_LONG_TARGET = 220;
+
+export function xReferencePostTarget(
+  tier: ReferencePostLengthTier,
+  threadPosts: number
+): number {
+  if (tier === 'long' && threadPosts > 1) {
+    return X_REFERENCE_POST_THREAD_LONG_TARGET;
+  }
+  return X_REFERENCE_POST_TARGETS[tier];
+}
+
+// Widest last, so a scan from the end finds the largest tier that fits.
+const TIER_ORDER: readonly ReferencePostLengthTier[] = [
+  'short',
+  'medium',
+  'long',
+] as const;
+
+/**
+ * Which tier a requested character count means.
+ *
+ * `outputLength` is advisory — a client's Short/Medium/Long picker resolved to
+ * a number — so it selects a TIER rather than becoming the target verbatim.
+ * That is what keeps the tier adjustments reachable: a request for 260 with a
+ * thread lands on `long`, which is 220 per part, where an honoured 260 would
+ * have skipped the adjustment entirely.
+ *
+ * Snaps DOWN — the largest tier at or below the request, floored at `short`.
+ * Down rather than nearest because the direction that matters is the one away
+ * from the ceiling: 270 means `long` (260), and 200 means `medium` rather than
+ * being rounded up into the tier with the least headroom.
+ *
+ * Resolved against the targets in force for THIS request, so a thread's
+ * 220 is what 220 matches, not `medium`.
+ */
+export function xReferencePostTierFor(
+  requestedCharacters: number,
+  threadPosts: number
+): ReferencePostLengthTier {
+  for (let i = TIER_ORDER.length - 1; i >= 0; i--) {
+    const tier = TIER_ORDER[i];
+    if (requestedCharacters >= xReferencePostTarget(tier, threadPosts)) {
+      return tier;
+    }
+  }
+  return 'short';
+}
+
+/**
+ * The next tier down from whatever target is in force, or `null` at the floor.
+ *
+ * Answers the retry question "how much shorter" with a NUMBER the prompt can
+ * be rebuilt around, instead of the words "make it shorter" — a model that
+ * just overran a budget it could not measure has no way to act on the words.
+ *
+ * Takes the current target rather than a tier so an explicit caller-supplied
+ * `outputLength` steps down the same ladder: it snaps to the largest tier
+ * strictly below whatever was asked for.
+ *
+ * Needs no `threadPosts`, unlike its siblings: `long` is the only tier whose
+ * value depends on it, and `long` can never be a downgrade DESTINATION.
+ *
+ * X only. The other platforms' overruns are a different shape — they have
+ * budgets in the thousands that the model rarely reaches at all — and
+ * inventing a ladder for them here would be a second, unvalidated policy next
+ * to the one this was actually measured for.
+ */
+export function downgradedReferencePostTarget(
+  platform: string,
+  currentTarget: number
+): number | null {
+  if (normalizeEngagePlatform(platform) !== 'x') return null;
+  const steps = [X_REFERENCE_POST_TARGETS.medium, X_REFERENCE_POST_TARGETS.short];
+  return steps.find((step) => step < currentTarget) ?? null;
+}
+
 /**
  * The hard character ceiling this module ENFORCES for a platform, or `null`
  * where it enforces none.
@@ -101,23 +214,32 @@ export function assertDraftWithinPlatformLimit(
   // rather than inventing a limit for it.
   const hardLimit = platformHardCeilingFor(normalized);
   if (hardLimit === null) return;
+  // The MEASURED length rides along in every message. A model told only that
+  // it went over has no idea whether it missed by 5 characters or 400, and
+  // that is the difference between trimming a clause and rewriting the post —
+  // the reference-post retry quotes this message straight back to it. It is
+  // equally the number that was missing from the logs when asking how badly
+  // a platform actually overruns in production.
   if (normalized === 'x') {
-    if (weightedLength(draft) > hardLimit) {
+    const measured = weightedLength(draft);
+    if (measured > hardLimit) {
       throw new Error(
-        `Generated X draft exceeded ${hardLimit} Twitter-weighted characters.`
+        `Generated X draft exceeded ${hardLimit} Twitter-weighted characters (measured ${measured}).`
       );
     }
     return;
   }
   if (normalized === 'reddit') {
     if (draft.length > hardLimit) {
-      throw new Error(`Generated Reddit draft exceeded ${hardLimit} characters.`);
+      throw new Error(
+        `Generated Reddit draft exceeded ${hardLimit} characters (measured ${draft.length}).`
+      );
     }
     return;
   }
   if (draft.length > hardLimit) {
     throw new Error(
-      `Generated ${normalized} draft exceeded ${hardLimit} characters.`
+      `Generated ${normalized} draft exceeded ${hardLimit} characters (measured ${draft.length}).`
     );
   }
 }

@@ -62,13 +62,19 @@ Known gaps vs this design (tracked, not silently dropped):
   explicitly warned against), pending the product decision.
 - §6's similarity thresholds (12-word run / 25% shingle overlap) are the
   starting numbers from this doc, unvalidated against real generations.
-- Length targets/ceilings only really exist for X and Reddit
+- ~~Length targets/ceilings only really exist for X and Reddit
   (`engage-draft-length.ts`): every other platform gets X's 260-character
-  target in the prompt and no hard ceiling check at all. Pre-dates thread
-  support and applies equally to single posts, but it bites harder now that
-  LinkedIn and Hacker News — both long-form-friendly — can produce chains.
-  Fixing it means per-platform targets sourced from the provider's own
-  `maxLength()`, the way `operation-plan.service.ts` already does it.
+  target in the prompt and no hard ceiling check at all.~~ **Resolved** —
+  revision 3 gave every platform its own target (`targetFor`) and extended
+  `assertDraftWithinPlatformLimit` to all seven (§6.4); revision 4 then
+  replaced X's single number with tiers and a downgrade ladder (§6.6).
+- The tier values in §6.6 (65/130/260, 220 threaded) and
+  `DENSE_REFERENCE_TARGET_MULTIPLE` are reasoned from X's 280 ceiling, not
+  measured against real long-form→X generations. The ladder is what makes an
+  over-long draft recoverable, so a wrong tier costs an extra paid retry
+  rather than a failure — but the numbers should be revisited once there is
+  overrun data (the `(measured N)` in the assertion message exists partly so
+  the logs can answer that).
 
 Design revision 3 (**cross-platform generation** — `a→any`):
 - `/generate-post` takes an optional `targetPlatform`. Omitting it is exactly
@@ -79,6 +85,22 @@ Design revision 3 (**cross-platform generation** — `a→any`):
   `providerIdentifier`/`Post.settings`, and thread capability all follow the
   TARGET. `settings.referenceOpportunity.platform` and the reference-provenance
   row keep naming the SOURCE — the two were never the same question.
+
+Design revision 4 (**X length tiers + a downgrade ladder** — see §6.6):
+- Revision 3 made a Medium essay or a Quora answer a legitimate reference for
+  an X post, which turns generation into a 20x COMPRESSION job. X's prompted
+  target was a single number — 260 against a 280 ceiling, 7% headroom on the
+  one instruction an LLM cannot verify about its own output.
+- X now generates against tiers (`short` 65 / `medium` 130 / `long` 260, and
+  220 per part for a thread), a long reference starts one tier down, and a
+  draft that overruns is retried at a SMALLER target with its own text handed
+  back — not at the same target with sterner wording.
+- `outputLength` became advisory on an `x` target: it SELECTS a tier (snapping
+  down — 270 means `long`, 200 means `medium`) instead of being honoured
+  verbatim. Without that, a client sending its own resolved number bypassed
+  every tier-keyed rule — a threaded request for 260 was budgeted at 260 a
+  post rather than the 220 the thread tier exists to give. Behaviourally
+  visible to existing callers, though no request starts failing.
 
 ## 1. Overview
 
@@ -1046,6 +1068,107 @@ title lives in settings is per-platform (Reddit nests it under
 already has exactly one home. It also means `x`/`linkedin`/`quora` need no
 branch here at all: their settings carry no title, so the field is simply
 absent and their response frame is unchanged.
+
+### 6.6 X length tiers and the downgrade ladder
+
+A character budget is the one instruction a model cannot check its own output
+against. It can be told to write "under 280 Twitter-weighted characters (CJK
+and emoji count as 2, URLs as 23)" and comply most of the time, but nothing in
+the response tells it whether it complied — which is why §6's gate is an
+output-side assertion rather than prompt wording alone.
+
+Revision 3 made that worse rather than better. A Medium essay or a Quora
+answer as the reference turns generation into a 20x compression, with the long
+source sitting in the prompt pulling the output longer for the whole call —
+and X's prompted target was one number, 260, against a 280 ceiling. 7%
+headroom on an instruction the model cannot verify.
+
+**Tiers, sized for headroom rather than for using the budget**
+(`X_REFERENCE_POST_TARGETS` in `engage-draft-length.ts`):
+
+| Tier | Target | Headroom under 280 |
+|---|---|---|
+| `short` | 65 | 4.3x |
+| `medium` | 130 | 2.15x |
+| `long` | 260 single post / **220 per thread part** | 1.08x / 1.27x |
+
+`long` is the only tier that trades headroom for a fuller post, and the only
+one that has ever overrun. A THREAD tightens it to 220 because every part
+independently faces the ceiling — a 4-post chain is four independent chances
+to overshoot, not one — and is asked for through a longer prompt (part
+separator, exact post count, per-part ceiling) that leaves less attention for
+any single part. The 40 characters are not a visible difference on X.
+
+**`outputLength` selects a tier; it is not the target.** A client's
+Short/Medium/Long picker resolves to a number before it reaches the API, so the
+number is a tier by another name. It snaps DOWN to the largest tier at or below
+it (270 → `long`/260, 200 → `medium`/130, anything under 65 → `short`), matched
+against the targets in force for THIS request so a threaded 220 reads as `long`
+rather than falling through to `medium`. Snapping down rather than to the
+nearest tier is deliberate: 200 is arithmetically closer to 260, and rounding
+up would put it in the tier with the least headroom.
+
+This is what keeps every rule below reachable. An honoured raw number skipped
+all of them — a client sending 260 with `thread: true` got 260 per part, not
+220. The six non-X targets keep `outputLength` as the literal target it has
+always been; they have no tiers to snap onto, and inventing some to make this
+uniform would change the field's meaning on six platforms to fix something
+measured on one.
+
+**A long reference starts one tier down** (`DENSE_REFERENCE_TARGET_MULTIPLE`,
+4x the target in force), whoever asked for the wider one — after the snap there
+is no "the caller said so" left to respect, only a tier, and the tier that
+overruns is the one this rule exists to avoid starting from. It caps at
+`medium` rather than stepping down blindly, so an explicit `short` stays
+`short`. Measured on the reference's own LENGTH, deliberately
+NOT on its platform's `form: 'long'` flag: that flag answers "must the OUTPUT
+have a floor" and marks `quora` as `short`, yet a Quora answer is exactly the
+essay this guard is for — while a three-sentence Medium post is not a
+compression job just because of where it was published.
+
+**The retry downgrades the target instead of restating it.** A model that just
+overran a budget it could not measure cannot act on "fit the limit you missed";
+it can act on a budget it is unlikely to reach at all. So `downgradedReferencePostTarget`
+steps to the largest tier strictly below whatever was in force (which also
+snaps an explicit caller `outputLength` onto the ladder), and the whole budget
+is rebuilt around it — `max_tokens`, the stated ceiling, the article floor, and
+both prompts. Setting the number in the corrective alone would leave the model
+a token budget sized for the length it just overran.
+
+The ladder is **X's alone**. The other platforms' budgets run to the
+thousands and are rarely reached at all; inventing a ladder for them here
+would be a second, unvalidated policy beside the one this was measured for.
+They still get the corrective and their own draft back, at an unchanged target.
+
+**The draft goes back with it.** The retry used to be blind — the model was
+told it ran long but shown neither its own text nor by how much it missed, so
+it re-read the reference and wrote from scratch against the same budget, from
+the very anchor that had just pulled it long. It now receives its draft in a
+`<previous_draft>` element and the MEASURED length in the assertion message
+(`assertDraftWithinPlatformLimit` reports `(measured N)` on every platform),
+which turns the retry into an edit of something concrete. The draft is
+sanitized and XML-escaped like any other embedded text: it is the model's own
+output, but its content came out of an attacker-controlled reference, so
+anything echoed from there must not be able to close the element or pose as an
+instruction.
+
+**Only ONE downgrade is ever available**, since `MAX_ATTEMPTS = 2` and the
+retry is shared with the similarity and part-count correctives (§6.2). That is
+what makes the dense-reference rule load-bearing rather than a nicety: a
+compression job started at `long` spends its single retry reaching `medium`,
+while one started at `medium` reaches `short`, the tier that effectively
+cannot overrun. Past that the existing salvage is unchanged — a thread
+truncates to its valid prefix, a single post fails with a typed frame.
+
+**Not done: inferring `thread`/`maxThreadParts` from the reference.** Keeping
+a long reference's substance is what threads are for, but a thread is a
+different artifact from a single post (§6.2) and the caller never asked for
+one. Turning one post into five because the source was long would be handing
+back something nobody requested; the count would also have to be driven by how
+many independent points the reference carries, not by `length / target`, which
+on a 5000-character essay computes 22 posts against a ceiling of 5 and fills
+the difference with padding. If this is ever wanted, the shape is a SUGGESTED
+count returned to the client, decided before generation by the user.
 
 ## 7. Billing
 

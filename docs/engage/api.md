@@ -2145,6 +2145,8 @@ Clear browser-extension reply history. Deletes all rows, or only those older tha
 
 Retrieve the list of sent replies (includes original post summary and metrics data).
 
+**Ordering** — `post.publishDate` **descending**, with `id` descending as the tiebreaker. `Post.publishDate` is re-stamped to the real send time on every publish-success commit, so this is "most recently sent first", not "most recently created first". Consequences worth knowing on the client: a `QUEUE` (scheduled) reply carries its *future* publish time and therefore sorts **above** everything already sent, and a `DRAFT` sorts on the date it was saved with. `GET /sent/locate` computes its page index under this exact ordering.
+
 **Query Params**
 
 | Parameter | Type | Default | Description |
@@ -2321,7 +2323,7 @@ Returns `404` when the sent reply does not exist for the current organization.
 
 ### GET `/api/engage/sent/locate`
 
-Locate which page a given sent reply lives on within `/sent`, using **the same filters**. Use this to jump directly to the right page when navigating back to a specific reply.
+Locate which page a given sent reply lives on within `/sent`, using **the same filters** and the same ordering (`post.publishDate` desc, `id` desc). Use this to jump directly to the right page when navigating back to a specific reply.
 
 **Query Params**
 

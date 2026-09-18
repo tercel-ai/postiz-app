@@ -19,7 +19,7 @@ function escapeXmlAttr(value: string): string {
   );
 }
 
-function escapeXmlText(value: string): string {
+export function escapeXmlText(value: string): string {
   return value.replace(
     /[&<>]/g,
     (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]!)

@@ -1210,6 +1210,16 @@ export class GenerateReferencePostDto {
   @ArrayMaxSize(20)
   mentions?: string[];
 
+  // Advisory target length. On an `x` TARGET it selects a length TIER rather
+  // than being honoured verbatim: it snaps down to the largest of
+  // short/medium/long at or below it (270 means long/260; 200 means
+  // medium/130), and the tier's own rules then apply — notably that `long`
+  // is 220 per post in a thread, not 260. See reference-post-generation.md
+  // §6.6. An honoured raw number bypassed those rules entirely, which is how
+  // a threaded request came back budgeted as a single post.
+  //
+  // Every other target keeps it as the literal target it has always been:
+  // there are no tiers to snap onto there.
   @IsOptional()
   @IsInt()
   @Min(2)

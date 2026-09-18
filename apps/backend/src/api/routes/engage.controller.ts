@@ -1290,7 +1290,7 @@ export class EngageController {
 
   @ApiOperation({
     summary:
-      "Paginated list of Engage replies. Optional status filter: published | scheduled | manual | error | draft, plus rollups — settled (published + scheduled) and awaiting (draft + manual link-pending + failed publishes) — and awaiting's own sub-filters for the Awaiting-review tabs: awaiting-draft (still-actionable draft), awaiting-expired (draft whose opportunity aged out), awaiting-link (link-pending or failed publish)",
+      "Paginated list of Engage replies, ordered by the reply's post.publishDate DESC (the real send time, re-stamped on every publish success) with id DESC as tiebreaker — so scheduled QUEUE replies, which carry a future publishDate, lead the list. Optional status filter: published | scheduled | manual | error | draft, plus rollups — settled (published + scheduled) and awaiting (draft + manual link-pending + failed publishes) — and awaiting's own sub-filters for the Awaiting-review tabs: awaiting-draft (still-actionable draft), awaiting-expired (draft whose opportunity aged out), awaiting-link (link-pending or failed publish)",
   })
   @Get('/sent')
   listSentReplies(
