@@ -100,7 +100,7 @@ export class UsersService {
 
     // API failed or no active package — hard block
     if (pkg === null) {
-      this.logger.warn(`No credit package for user=${userId}, blocking channels and posts`);
+      this.logger.warn(`No credit package found for user=${userId}, blocking channels and posts`);
       return { postChannelLimit: 0, postSendLimit: 0, noActiveSubscription: true };
     }
 
@@ -111,8 +111,8 @@ export class UsersService {
     // definition, so a periodEnd test cut off exactly the users aisee-core says
     // to keep serving. Read the status it already sends us instead.
     if (!VALID_SUBSCRIPTION_STATUSES.has(String(pkg.status).toLowerCase())) {
-      this.logger.warn(`Credit package status=${pkg.status} for user=${userId}, blocking channels and posts`);
-      return { postChannelLimit: 0, postSendLimit: 0, noActiveSubscription: true };
+      this.logger.warn(`Inactive subscription status=${pkg.status} for user=${userId}, blocking channels and posts`);
+      return { postChannelLimit: 0, postSendLimit: 0, noActiveSubscription: true, status: pkg.status };
     }
 
     // periodEnd is now a staleness backstop rather than the verdict. Renewal
@@ -125,9 +125,9 @@ export class UsersService {
     const periodEndMs = pkg.periodEnd ? new Date(pkg.periodEnd).getTime() : NaN;
     if (Number.isNaN(periodEndMs) || periodEndMs + RENEWAL_GRACE_MS < Date.now()) {
       this.logger.error(
-        `Credit package status=${pkg.status} but periodEnd=${pkg.periodEnd} is beyond the renewal grace window for user=${userId} — renewal likely missed; blocking channels and posts`
+        `Subscription expired or periodEnd invalid status=${pkg.status} but periodEnd=${pkg.periodEnd} is beyond the renewal grace window for user=${userId} — renewal likely missed; blocking channels and posts`
       );
-      return { postChannelLimit: 0, postSendLimit: 0, noActiveSubscription: true };
+      return { postChannelLimit: 0, postSendLimit: 0, noActiveSubscription: true, status: pkg.status };
     }
 
     // post_plan_limits (Settings) REPLACES the package's raw numbers once the
