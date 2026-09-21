@@ -152,10 +152,6 @@ import {
   EngageAuthorProfile,
 } from '@gitroom/nestjs-libraries/engage/engage-author';
 import { parseRedditCommentId } from '@gitroom/nestjs-libraries/engage/reddit-url';
-import {
-  getRedditToken,
-  redditAuthHeaders,
-} from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import {
   isRedditBackendReadAvailable,
@@ -1128,25 +1124,22 @@ export class EngageService implements OnApplicationBootstrap {
   ): Promise<{ results: SearchedChannel[]; needsExtension: boolean }> {
     if (platform !== 'reddit') return { results: [], needsExtension: false };
 
-    const userToken = await this._engageRepository.getRedditIntegrationToken(
-      org.id
-    );
-    // A user-level OAuth token reaches oauth.reddit.com, which is a different
-    // route from the public .json endpoints the breaker models — so it is worth
-    // trying even when public reads are known to be down.
-    if (!userToken && !isRedditBackendReadAvailable()) {
+    // One route to check, because there is now one route: the breaker models
+    // exactly what _searchRedditSubreddits uses (see the note there on why the
+    // OAuth branch is gone).
+    if (!isRedditBackendReadAvailable()) {
       this.logger.log(
         `[redditSearch] no Reddit egress (${redditBackendReadBlockedReason()}); handing off to the extension`
       );
       return { results: [], needsExtension: true };
     }
 
-    const results = await this._searchRedditSubreddits(query, userToken);
+    const results = await this._searchRedditSubreddits(query);
     // An empty result from a REACHABLE Reddit is a real answer; an empty result
     // from a route that just broke is not. Re-checking the breaker after the
     // call is what tells them apart — _searchRedditSubreddits swallows its own
     // failures, so its return value alone cannot.
-    if (!results.length && !userToken && !isRedditBackendReadAvailable()) {
+    if (!results.length && !isRedditBackendReadAvailable()) {
       return { results: [], needsExtension: true };
     }
     return { results, needsExtension: false };
@@ -2753,8 +2746,7 @@ export class EngageService implements OnApplicationBootstrap {
   // ─── Private helpers ──────────────────────────────────────────────────────
 
   private async _searchRedditSubreddits(
-    query: string,
-    userToken?: string | null
+    query: string
   ): Promise<SearchedChannel[]> {
     // Strip leading "r/" so users can type either "SEO" or "r/SEO".
     // Trim BEFORE stripping as well as after: a leading space stops `^r/`
@@ -2765,47 +2757,47 @@ export class EngageService implements OnApplicationBootstrap {
     const normalized = query.trim().replace(/^\/?r\//i, '').trim();
     if (!normalized) return [];
 
-    // Prefer user-level OAuth token (from a connected Reddit account). The
-    // app-level client_credentials token (getRedditToken) is unavailable for
-    // "web app" type apps — Reddit forbids that grant (403) — so it falls back
-    // to the public JSON API, which works from a clean (non-blocked) IP.
-    const appToken = userToken ? null : await getRedditToken();
-    const token = userToken || appToken;
     this.logger.log(
-      `[redditSearch] query="${query}" normalized="${normalized}" tokenSource=${
-        userToken
-          ? 'user-oauth'
-          : appToken
-          ? 'app-client-credentials'
-          : 'none(public-json)'
-      }`
+      `[redditSearch] query="${query}" normalized="${normalized}"`
     );
 
-    // Fetch a reddit URL with OAuth headers when a token is available, or the
-    // public .json API otherwise. The public path uses redditPublicGet, which
-    // carries the loid cookie (clears Reddit's anti-bot WAF) and applies the
-    // tiered proxy strategy: proxy → rotate-IP on 403/429 → direct fallback.
-    const redditFetch = async (
+    // ONE route: the public .json API through redditPublicGet, which carries the
+    // loid cookie (clears Reddit's anti-bot WAF) and owns its proxy strategy
+    // (fresh exit IP per retry on 403/429).
+    //
+    // There used to be an OAuth branch, preferred whenever the org had a
+    // connected Reddit account, and it was strictly worse in three ways at once:
+    //
+    //  1. It reached oauth.reddit.com over a PLAIN fetch(), i.e. the process's
+    //     global dispatcher. That dispatcher silently degrades Reddit traffic to
+    //     a DIRECT connection the moment the proxy has a connection-level blip
+    //     (ProxyFallbackDispatcher) — and a direct connection from this
+    //     deployment's datacenter IP is blocked by Reddit outright. The symptom
+    //     was Reddit's own IP-block page ("whoa there, pardner", ~1522 bytes),
+    //     which reads like a ban and is really a routing accident.
+    //  2. It sent no loid, so it could not clear the WAF even where the IP was
+    //     acceptable.
+    //  3. Taking it RETURNED, so a connected account removed the only route that
+    //     actually worked. An org with a Reddit integration searched worse than
+    //     an org without one.
+    //
+    // The app-level client_credentials token is gone with it: Reddit forbids
+    // that grant for "web app" type apps (403), and REDDIT_CLIENT_ID/SECRET are
+    // unset in this deployment anyway, so it was never anything but null.
+    //
+    // What is given up: nothing this feature uses. Public search returns the
+    // same communities; OAuth would only add private/restricted subreddits the
+    // token's own account can see, which are not candidates for a monitored
+    // channel in the first place.
+    const redditFetch = (
       url: string
-    ): Promise<{ status: number; ok: boolean; text(): Promise<string> }> => {
-      if (token) {
-        const res = await fetch(url, {
-          headers: redditAuthHeaders(token),
-          signal: AbortSignal.timeout(8000),
-        });
-        return { status: res.status, ok: res.ok, text: () => res.text() };
-      }
-      return redditPublicGet(url, {}, { log: (m) => this.logger.warn(m) });
-    };
+    ): Promise<{ status: number; ok: boolean; text(): Promise<string> }> =>
+      redditPublicGet(url, {}, { log: (m) => this.logger.warn(m) });
 
-    const searchBase = token
-      ? `https://oauth.reddit.com/subreddits/search`
-      : `https://www.reddit.com/subreddits/search.json`;
+    const searchBase = `https://www.reddit.com/subreddits/search.json`;
 
     const aboutBase = (name: string) =>
-      token
-        ? `https://oauth.reddit.com/r/${encodeURIComponent(name)}/about`
-        : `https://www.reddit.com/r/${encodeURIComponent(name)}/about.json`;
+      `https://www.reddit.com/r/${encodeURIComponent(name)}/about.json`;
 
     const mapSubreddit = (d: Record<string, unknown>) => ({
       platform: 'reddit' as const,
