@@ -214,9 +214,21 @@ export class RedditScanAdapter implements PlatformScanAdapter {
     const publicBase = subreddit
       ? `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/search.json?q=${q}&restrict_sr=on&sort=new&limit=${REDDIT_LIMIT}&type=link${afterParam}`
       : `https://www.reddit.com/search.json?q=${q}&sort=new&limit=${REDDIT_LIMIT}&type=link${afterParam}`;
-    const res = await this._publicGet(publicBase, REDDIT_BROWSER_EXTRA, {
-      log: (m) => log.warn(m),
-    });
+    // redditPublicGet THROWS when this process has no route to Reddit at all —
+    // the egress breaker is open, or no proxy is configured on a host that
+    // cannot reach reddit.com directly (see engage/reddit-egress.ts). That is a
+    // scan unit that cannot run, not a scan that should crash: every other exit
+    // from this method reports "no listing" and lets the caller keep whatever it
+    // already collected, so this one does too.
+    let res: Awaited<ReturnType<typeof redditPublicGet>>;
+    try {
+      res = await this._publicGet(publicBase, REDDIT_BROWSER_EXTRA, {
+        log: (m) => log.warn(m),
+      });
+    } catch (err) {
+      log.warn(`Reddit public search unavailable: ${(err as Error).message}`);
+      return { listing: null, rate: { limited: false } };
+    }
     if (!res.ok) {
       log.warn(`Reddit public search ${res.status}`);
       return { listing: null, rate: { limited: res.status === 429 } };

@@ -32,6 +32,8 @@ import {
 } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
 import { EngageService } from '@gitroom/nestjs-libraries/engage/engage.service';
 import { EngageScanTasksService } from '@gitroom/nestjs-libraries/engage/engage-scan-tasks.service';
+import { RedditTargetResolutionService } from '@gitroom/nestjs-libraries/engage/reddit-target-resolution.service';
+import { RedditTargetResolveDto } from '@gitroom/nestjs-libraries/dtos/engage/reddit-target-resolve.dto';
 import {
   EngageScanSyncDto,
   scanIngestPostToRawPost,
@@ -114,7 +116,8 @@ export class EngageController {
     private _scanTasksService: EngageScanTasksService,
     private _engageAutoReplyService: EngageAutoReplyService,
     private _platformPacing: PlatformPacingConfigService,
-    private _ingestQuota: EngageIngestQuotaService
+    private _ingestQuota: EngageIngestQuotaService,
+    private _redditTargets: RedditTargetResolutionService
   ) {}
 
   // ─── Extension scan loop ──────────────────────────────────────────────────
@@ -425,6 +428,12 @@ export class EngageController {
 
   @ApiOperation({
     summary: 'Search for channels to add (e.g. Reddit subreddit search)',
+    description:
+      'Returns { results, needsExtension }. needsExtension:true means this ' +
+      'server has no route to Reddit right now — the caller should re-run the ' +
+      'search through the browser extension, which reads Reddit with the ' +
+      "user's own session. It is NOT the same as an empty result set, which " +
+      'means Reddit answered and matched nothing.',
   })
   @Post('/monitored-channels/search')
   searchChannels(
@@ -432,6 +441,53 @@ export class EngageController {
     @Body() body: SearchChannelsDto
   ) {
     return this._engageService.searchChannels(org, body.platform, body.query);
+  }
+
+  // ─── Parked Reddit targets (extension resolver) ───────────────────────────
+
+  @ApiOperation({
+    summary:
+      'Operation-plan Reddit posts still waiting for a community, for the ' +
+      'extension to resolve with the user\'s Reddit session',
+    description:
+      'Plan generation parks a Reddit post instead of dropping it whenever ' +
+      'nothing server-side could pick a subreddit. A parked post is held out ' +
+      'of the publish queue until it is resolved through /resolve below.',
+  })
+  @Get('/reddit-targets/pending')
+  listPendingRedditTargets(
+    @GetOrgFromRequest() org: Organization,
+    @Query('limit') limit?: string
+  ) {
+    const parsed = Number(limit);
+    return this._redditTargets.listPending(
+      org.id,
+      Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+    );
+  }
+
+  @ApiOperation({
+    summary: 'How many Reddit posts are parked — the extension\'s poll gate',
+  })
+  @Get('/reddit-targets/pending/count')
+  async countPendingRedditTargets(@GetOrgFromRequest() org: Organization) {
+    return { pending: await this._redditTargets.countPending(org.id) };
+  }
+
+  @ApiOperation({
+    summary: 'Commit the communities the extension resolved (or retire a post)',
+    description:
+      'Each item either names a subreddit or sets unresolvable:true. The ' +
+      'subreddit is re-validated server-side before it is written, and an item ' +
+      'for a post that is no longer parked is skipped rather than applied — so ' +
+      'a stale answer can never overwrite a community a human chose.',
+  })
+  @Post('/reddit-targets/resolve')
+  resolveRedditTargets(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: RedditTargetResolveDto
+  ) {
+    return this._redditTargets.resolve(org.id, body.items);
   }
 
   // ─── Tracked Accounts ─────────────────────────────────────────────────────

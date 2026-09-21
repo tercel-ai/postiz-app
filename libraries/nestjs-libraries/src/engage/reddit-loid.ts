@@ -17,6 +17,12 @@
 import { Agent, Dispatcher, ProxyAgent, request } from 'undici';
 import { hostname } from 'os';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
+import {
+  recordRedditEgressFailure,
+  recordRedditEgressSuccess,
+  redditBackendReadBlockedReason,
+  RedditEgressUnavailableError,
+} from '@gitroom/nestjs-libraries/engage/reddit-egress';
 
 interface LoidCache {
   cookie: string; // e.g. "loid=000000002fl2...".
@@ -34,16 +40,30 @@ function directAgent(): Agent {
   return _directAgent;
 }
 
-let _proxyAgent: Dispatcher | null = null;
-let _proxyResolved = false;
-function redditProxyAgent(): Dispatcher | null {
-  if (!_proxyResolved) {
-    _proxyResolved = true;
-    const url =
-      process.env.REDDIT_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
-    _proxyAgent = url ? new ProxyAgent(url) : null;
-  }
-  return _proxyAgent;
+function redditProxyUrl(): string | undefined {
+  return (
+    process.env.REDDIT_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY
+  );
+}
+
+/**
+ * A FRESH ProxyAgent, or null when no proxy is configured.
+ *
+ * The retry ladder in redditPublicGet exists to rotate the exit IP of a
+ * rotating residential proxy, and its comment used to claim that "each retry is
+ * a fresh connection". It was not: undici pools connections per Dispatcher, so
+ * every attempt through the shared agent above reused the one open CONNECT
+ * tunnel and therefore the SAME exit IP. Measured directly against the
+ * configured proxy — four attempts, one IP (111.92.124.162) every time — which
+ * made the whole 403/429 ladder pure added latency.
+ *
+ * Building a new agent per attempt is what actually re-runs CONNECT and asks
+ * the provider for a new exit. The caller closes each one; a leaked agent would
+ * hold its socket open for the pool's keep-alive window.
+ */
+function freshRedditProxyAgent(): Dispatcher | null {
+  const url = redditProxyUrl();
+  return url ? new ProxyAgent(url) : null;
 }
 
 // Tiered-retry knobs for the proxy → rotate-IP → direct strategy.
@@ -315,24 +335,58 @@ export async function redditPublicGet(
   extra: Record<string, string> = {},
   deps: RedditGetDeps = {}
 ): Promise<RedditResponse> {
-  const proxy = deps.proxy !== undefined ? deps.proxy : redditProxyAgent();
+  // Fail fast when this process already knows it has no route to Reddit. The
+  // ladder below costs up to maxAttempts × (8s timeout + backoff) before it
+  // reaches the same verdict, and callers that can route work to the browser
+  // extension ask isRedditBackendReadAvailable() rather than paying for it.
+  //
+  // Skipped when a transport is injected: that is the test seam, and a caller
+  // who supplies its own dispatcher has already decided what the route is. Tying
+  // those calls to the ambient REDDIT_PROXY/REDDIT_EGRESS_MODE would make the
+  // suite pass or fail on whether a .env happened to be loaded.
+  const transportInjected = deps.proxy !== undefined || deps.direct !== undefined;
+  if (!transportInjected) {
+    const blocked = redditBackendReadBlockedReason();
+    if (blocked) throw new RedditEgressUnavailableError(blocked);
+  }
+
+  // An explicitly injected proxy is used as given (test seam, and the only way
+  // to pin one dispatcher); the default path builds a fresh agent per attempt so
+  // a rotating proxy actually rotates — see freshRedditProxyAgent.
+  const fixedProxy = deps.proxy !== undefined ? deps.proxy : null;
+  const rotating = deps.proxy === undefined && !!redditProxyUrl();
   const direct = deps.direct ?? directAgent();
   const log = deps.log ?? ((m: string) => console.warn(m));
   const buildHeaders = deps.buildHeaders ?? redditPublicHeaders;
   const maxAttempts = Math.max(1, deps.maxAttempts ?? PROXY_MAX_ATTEMPTS);
   const backoffMs = deps.backoffMs ?? PROXY_RETRY_BACKOFF_MS;
 
-  const wrap = (r: { status: number; body: string }, viaDirect: boolean): RedditResponse => ({
-    status: r.status,
-    ok: r.status >= 200 && r.status < 300,
-    text: async () => r.body,
-    viaDirect,
-  });
+  const wrap = (r: { status: number; body: string }, viaDirect: boolean): RedditResponse => {
+    // A blocked status after the whole ladder means the egress is refused, not
+    // that the resource is missing — that is breaker evidence. Any other status
+    // (2xx, 404, 5xx) is Reddit answering us, which proves the route works.
+    if (BLOCKED_STATUSES.has(r.status)) {
+      recordRedditEgressFailure(`HTTP ${r.status} after all tiers`);
+    } else {
+      recordRedditEgressSuccess();
+    }
+    return {
+      status: r.status,
+      ok: r.status >= 200 && r.status < 300,
+      text: async () => r.body,
+      viaDirect,
+    };
+  };
 
-  // No proxy configured → a single direct request (the global default path).
-  if (!proxy) {
+  // No proxy at all → a single direct request (the global default path).
+  if (!fixedProxy && !rotating) {
     const headers = await buildHeaders(extra);
-    return wrap(await doGet(url, headers, direct), true);
+    try {
+      return wrap(await doGet(url, headers, direct), true);
+    } catch (err) {
+      recordRedditEgressFailure(`direct: ${(err as Error).message}`);
+      throw err;
+    }
   }
 
   let lastProxy: { status: number; body: string } | null = null;
@@ -340,6 +394,9 @@ export async function redditPublicGet(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const headers = await buildHeaders(extra);
+    // Fresh tunnel per attempt when rotating; the injected agent otherwise.
+    const proxy = fixedProxy ?? freshRedditProxyAgent();
+    if (!proxy) break;
     try {
       const r = await doGet(url, headers, proxy);
       if (!BLOCKED_STATUSES.has(r.status)) {
@@ -370,6 +427,12 @@ export async function redditPublicGet(
         break;
       }
       throw err; // a non-connection error (e.g. bad URL) — surface it
+    } finally {
+      // Only agents built here are ours to close; an injected one belongs to the
+      // caller and may be reused across calls.
+      if (proxy !== fixedProxy) {
+        await (proxy as { close?: () => Promise<void> }).close?.().catch(() => undefined);
+      }
     }
   }
 
@@ -379,7 +442,11 @@ export async function redditPublicGet(
     const r = await doGet(url, headers, direct);
     return wrap(r, true);
   } catch (err) {
+    // Both routes are gone. This is the exact condition the breaker exists for,
+    // and it is recorded on BOTH exits below: returning the proxy's 403 still
+    // means we never reached Reddit.
     if (lastProxy) return wrap(lastProxy, false); // direct also failed — return last proxy result
+    recordRedditEgressFailure(`proxy and direct both failed: ${(err as Error).message}`);
     throw err;
   }
 }

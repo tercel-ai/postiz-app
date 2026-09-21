@@ -2128,15 +2128,23 @@ export class OperationPlanService implements OnApplicationBootstrap {
       this.redditResolverDeps(organizationId)
     );
 
-    // Apply resolution: attach the header, or mark the entry for removal.
+    // Apply resolution. Three outcomes, not two: a resolved header, a PARKED
+    // post the extension will finish (no header yet, but the post survives), or
+    // removal — which now happens only when Reddit itself said the community is
+    // unusable. See RedditTargetOutput.pending.
     const drop = new Set<unknown>();
     outputs.forEach((output, index) => {
       const { post } = redditEntries[index];
-      if (!output.target) {
-        drop.add(post);
+      if (output.target) {
+        (post as { redditTarget?: unknown }).redditTarget = output.target;
         return;
       }
-      (post as { redditTarget?: unknown }).redditTarget = output.target;
+      if (output.pending) {
+        (post as { redditTargetPending?: unknown }).redditTargetPending =
+          output.pending;
+        return;
+      }
+      drop.add(post);
     });
 
     if (drop.size) {

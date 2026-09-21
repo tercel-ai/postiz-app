@@ -5,6 +5,7 @@ import useSWR from 'swr';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { useToaster } from '@gitroom/react/toaster/toaster';
 import { invalidateEngageRefresh } from '@gitroom/frontend/components/engage/signal-feed/use-engage-visit-refresh';
+import { requestRedditChannelSearch } from '@gitroom/frontend/components/engage/settings/request-reddit-channel-search';
 
 const PLATFORM_COLORS: Record<string, string> = {
   reddit: 'bg-orange-500/20 text-orange-400',
@@ -74,8 +75,38 @@ export function MonitoredChannelManager() {
         toaster.show('Search failed', 'warning');
         return;
       }
-      const results = await res.json();
-      setSearchResults(results);
+      const body = await res.json();
+      // The endpoint used to return a bare array. Tolerate both shapes so a
+      // frontend deployed ahead of the backend still works.
+      const results = Array.isArray(body) ? body : body?.results ?? [];
+      const needsExtension = !Array.isArray(body) && !!body?.needsExtension;
+
+      if (!needsExtension) {
+        setSearchResults(results);
+        return;
+      }
+
+      // The server has no route to Reddit right now — its public JSON is behind
+      // an anti-bot WAF and the proxy that clears it is down. The extension can
+      // still answer: it reads Reddit as the user's own logged-in session.
+      // Deliberately NOT a silent fallback — a search that quietly takes seconds
+      // longer, or fails for a reason the user cannot see, is worse than saying
+      // which half is unavailable.
+      try {
+        const viaExtension = await requestRedditChannelSearch(searchQuery);
+        setSearchResults(viaExtension);
+        if (!viaExtension.length) {
+          toaster.show('No communities matched that search', 'warning');
+        }
+      } catch (e) {
+        setSearchResults([]);
+        toaster.show(
+          e instanceof Error
+            ? e.message
+            : 'Reddit search is unavailable — install the browser extension',
+          'warning'
+        );
+      }
     } catch {
       toaster.show('Search failed', 'warning');
     } finally {

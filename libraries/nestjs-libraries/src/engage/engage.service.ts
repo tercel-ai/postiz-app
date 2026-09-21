@@ -158,6 +158,10 @@ import {
 } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import {
+  isRedditBackendReadAvailable,
+  redditBackendReadBlockedReason,
+} from '@gitroom/nestjs-libraries/engage/reddit-egress';
+import {
   dispatchReplyMetricsSync,
   buildReplyMetricsFromRaw,
   REPLY_METRICS_PLATFORMS,
@@ -259,6 +263,24 @@ export interface ReferencePostResult {
    * the length gate dropped it (see `droppedParts`).
    */
   requestedParts?: number;
+}
+
+/**
+ * A community the user can add as a monitored channel. Shaped to match the body
+ * `POST /engage/monitored-channels` accepts, so a search hit can be added
+ * verbatim — and so the extension, which produces these from Reddit's own JSON
+ * when this server cannot, has one shape to target.
+ */
+export interface SearchedChannel {
+  platform: 'reddit';
+  channelId: string;
+  channelName: string;
+  audienceSize: number;
+  metadata: {
+    description?: unknown;
+    url: string;
+    avatar: string | null;
+  };
 }
 
 @Injectable()
@@ -1085,14 +1107,49 @@ export class EngageService implements OnApplicationBootstrap {
     return this._engageRepository.removeMonitoredChannel(org.id, id);
   }
 
-  async searchChannels(org: Organization, platform: string, query: string) {
-    if (platform === 'reddit') {
-      const userToken = await this._engageRepository.getRedditIntegrationToken(
-        org.id
+  /**
+   * Channel search, with an explicit "ask the extension instead" answer.
+   *
+   * The response shape carries `needsExtension` rather than just an empty list
+   * because those two cases need opposite handling in the UI and were
+   * indistinguishable before: "Reddit has no community matching this" is a dead
+   * end the user should see, while "this server cannot reach Reddit" is a
+   * retry the browser can satisfy on its own. Returning [] for both is what made
+   * a blocked egress look like a bad search term.
+   *
+   * The backend is still tried FIRST when it has a working route: it answers in
+   * one request, needs no extension installed, and does not drive a tab. The
+   * extension is the fallback, not the default.
+   */
+  async searchChannels(
+    org: Organization,
+    platform: string,
+    query: string
+  ): Promise<{ results: SearchedChannel[]; needsExtension: boolean }> {
+    if (platform !== 'reddit') return { results: [], needsExtension: false };
+
+    const userToken = await this._engageRepository.getRedditIntegrationToken(
+      org.id
+    );
+    // A user-level OAuth token reaches oauth.reddit.com, which is a different
+    // route from the public .json endpoints the breaker models — so it is worth
+    // trying even when public reads are known to be down.
+    if (!userToken && !isRedditBackendReadAvailable()) {
+      this.logger.log(
+        `[redditSearch] no Reddit egress (${redditBackendReadBlockedReason()}); handing off to the extension`
       );
-      return this._searchRedditSubreddits(query, userToken);
+      return { results: [], needsExtension: true };
     }
-    return [];
+
+    const results = await this._searchRedditSubreddits(query, userToken);
+    // An empty result from a REACHABLE Reddit is a real answer; an empty result
+    // from a route that just broke is not. Re-checking the breaker after the
+    // call is what tells them apart — _searchRedditSubreddits swallows its own
+    // failures, so its return value alone cannot.
+    if (!results.length && !userToken && !isRedditBackendReadAvailable()) {
+      return { results: [], needsExtension: true };
+    }
+    return { results, needsExtension: false };
   }
 
   // ─── Tracked Accounts ─────────────────────────────────────────────────────
@@ -2698,9 +2755,14 @@ export class EngageService implements OnApplicationBootstrap {
   private async _searchRedditSubreddits(
     query: string,
     userToken?: string | null
-  ) {
+  ): Promise<SearchedChannel[]> {
     // Strip leading "r/" so users can type either "SEO" or "r/SEO".
-    const normalized = query.replace(/^r\//i, '').trim();
+    // Trim BEFORE stripping as well as after: a leading space stops `^r/`
+    // matching, so "  r/  " would survive as the literal query "r/". The
+    // extension's searchRedditChannels does the same — the two sides must agree
+    // on what a query means, or the same input returns different results
+    // depending on which of them happened to answer.
+    const normalized = query.trim().replace(/^\/?r\//i, '').trim();
     if (!normalized) return [];
 
     // Prefer user-level OAuth token (from a connected Reddit account). The

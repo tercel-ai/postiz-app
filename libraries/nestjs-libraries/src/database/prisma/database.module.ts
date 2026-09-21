@@ -62,6 +62,7 @@ import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage
 import { EngageScanLeaseService } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
 import { EngageScanIngestService } from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
 import { EngageScanTasksService } from '@gitroom/nestjs-libraries/engage/engage-scan-tasks.service';
+import { RedditTargetResolutionService } from '@gitroom/nestjs-libraries/engage/reddit-target-resolution.service';
 import { EngageIngestQuotaService } from '@gitroom/nestjs-libraries/engage/engage-ingest-quota.service';
 import { ApiRateLimitService } from '@gitroom/nestjs-libraries/throttler/rate-limit-settings';
 import { RiskControlTickService } from '@gitroom/nestjs-libraries/risk-control/risk-control-tick.service';
@@ -146,6 +147,7 @@ import { AutomationService } from '@gitroom/nestjs-libraries/automation/automati
     EngageScanLeaseService,
     EngageScanIngestService,
     EngageScanTasksService,
+    RedditTargetResolutionService,
     EngageIngestQuotaService,
     ApiRateLimitService,
     RiskControlTickService,

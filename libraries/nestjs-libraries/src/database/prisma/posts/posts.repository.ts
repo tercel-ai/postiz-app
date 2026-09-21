@@ -7,6 +7,7 @@ import { PostSource } from '@gitroom/nestjs-libraries/dtos/posts/post-source';
 import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
 import { LocatePostInListDto } from '@gitroom/nestjs-libraries/dtos/posts/locate.post-in-list.dto';
 import { titleFromSettings } from '@gitroom/nestjs-libraries/database/prisma/posts/settings-title';
+import { REDDIT_TARGET_PENDING_KEY } from '@gitroom/nestjs-libraries/engage/reddit-pending-target';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import weekOfYear from 'dayjs/plugin/weekOfYear';
@@ -2633,12 +2634,26 @@ export class PostsRepository {
       deletedAt: null,
       state: State.QUEUE,
       parentPostId: null, // roots only — children ride along as segments
-      // Engage replies must NEVER be offered to the extension publish queue:
-      // the due-item shape carries no reply target, so the extension would
-      // publish one as a brand-NEW post (X) or reject it forever for lacking a
-      // subreddit (Reddit). They are stamped publishMethod=API at creation now,
-      // but legacy rows predate the stamp — exclude by source as the backstop.
-      NOT: { source: 'engage' },
+      // Two exclusions, both for the same failure mode: a post the extension
+      // would be handed and could never complete stays QUEUE and is re-offered
+      // on every poll, forever.
+      //
+      //  • Engage replies — the due-item shape carries no reply target, so the
+      //    extension would publish one as a brand-NEW post (X) or reject it for
+      //    lacking a subreddit (Reddit). Stamped publishMethod=API at creation
+      //    now, but legacy rows predate the stamp, so exclude by source too.
+      //  • Reddit posts still PARKED awaiting a community. `settings` is a JSON
+      //    string column, so this matches the marker's key as a raw substring —
+      //    the key is a shared constant (REDDIT_TARGET_PENDING_KEY) precisely
+      //    because this filter and the writer must agree on its spelling.
+      //    Resolution REPLACES the marker with `subreddit` in one write, so a
+      //    post becomes eligible the moment it is genuinely publishable.
+      NOT: {
+        OR: [
+          { source: 'engage' },
+          { settings: { contains: `"${REDDIT_TARGET_PENDING_KEY}"` } },
+        ],
+      },
       // Exclude recurring ORIGINALS (intervalInDays > 0): they are permanent
       // QUEUE templates published via the clone-per-cycle mechanism, which is a
       // Temporal-only path. Handing one to the extension would loop — the

@@ -37,6 +37,28 @@ export const EXTENSION_MESSAGE = {
   postsMetricsRefresh: `${EXTENSION_BRAND}:posts-metrics-refresh`,
   /** extension → page: run summary ({due, fetched, ingested, stoppedReason}) for the posts-metrics-refresh request */
   postsMetricsRefreshResult: `${EXTENSION_BRAND}:posts-metrics-refresh-result`,
+  /**
+   * page → extension: search Reddit communities with the user's own logged-in
+   * session. The page asks the BACKEND first and only sends this when the
+   * backend answered `needsExtension` — see EngageService.searchChannels. The
+   * result items are shaped exactly like the backend's, so the "Add" button
+   * that follows is the same code either way.
+   */
+  redditChannelSearch: `${EXTENSION_BRAND}:reddit-channel-search`,
+  /** extension → page: subreddit search results, or an error */
+  redditChannelSearchResult: `${EXTENSION_BRAND}:reddit-channel-search-result`,
+  /**
+   * page → extension: resolve operation-plan Reddit posts that were parked
+   * without a community (GET /engage/reddit-targets/pending → search with the
+   * user's session → POST /engage/reddit-targets/resolve).
+   *
+   * A nudge, not the schedule: the extension also runs this on its own alarm,
+   * so a page that never sends it only affects how SOON a freshly generated
+   * plan gets its communities, never whether it does.
+   */
+  redditTargetResolve: `${EXTENSION_BRAND}:reddit-target-resolve`,
+  /** extension → page: resolver run summary ({pending, resolved, retired}) or error */
+  redditTargetResolveResult: `${EXTENSION_BRAND}:reddit-target-resolve-result`,
   /** legacy page → extension: open X and fill a draft (dormant) */
   extensionTask: `${EXTENSION_BRAND}:extension-task`,
   /** page → extension: presence probe */

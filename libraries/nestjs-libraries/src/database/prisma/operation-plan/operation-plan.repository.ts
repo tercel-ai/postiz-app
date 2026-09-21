@@ -7,6 +7,10 @@ import { stripDuplicatedTitleFromContent } from '@gitroom/nestjs-libraries/integ
 import { TITLE_REQUIRED_PLATFORMS } from '@gitroom/helpers/extension/post-publish';
 import { COMMUNITY_TITLE_PLATFORMS } from '@gitroom/nestjs-libraries/database/prisma/posts/settings-title';
 import type { ResolvedRedditTarget as ResolverRedditTarget } from './reddit-target-resolver';
+import {
+  REDDIT_TARGET_PENDING_KEY,
+  RedditTargetPending,
+} from '@gitroom/nestjs-libraries/engage/reddit-pending-target';
 
 // Fixed namespace for deriving a materialized Post.id from a (plan, payload id)
 // pair. The generation payload's ids are minted by the LLM, which only guarantees
@@ -111,6 +115,11 @@ type GeneratedPlatformPost = {
   thread?: GeneratedThreadPart[] | null;
   // Resolved Reddit target (subreddit/title/type). See ResolvedRedditTarget.
   redditTarget?: ResolvedRedditTarget | null;
+  // Set INSTEAD of redditTarget when no component that ran during generation
+  // could pick a community. The post is still materialized — parked, with
+  // this marker in place of settings.subreddit — and the browser extension
+  // finishes it later. See reddit-pending-target.ts.
+  redditTargetPending?: RedditTargetPending | null;
   // Dev.to only: topic tags for its tag feeds. See normalizeDevtoTags.
   tags?: string[] | null;
 };
@@ -433,6 +442,10 @@ export class OperationPlanRepository {
           platform: post.platform,
           node,
           redditTarget: post.redditTarget ?? null,
+          // Rides the whole chain for the same reason redditTarget does: a
+          // thread's parts share one community, so they must be parked and
+          // resolved together.
+          redditTargetPending: post.redditTargetPending ?? null,
           devtoTags: normalizeDevtoTags(post.tags),
         }));
       })
@@ -494,12 +507,22 @@ export class OperationPlanRepository {
 
     const postsToCreate = materializedPosts
       .filter(({ node }) => !existingById.has(node.id))
-      // A Reddit post that reached materialization WITHOUT a resolved target is a
-      // resolver contract violation (or a legacy payload generated before this
-      // feature). Drop it here rather than persist an unpublishable Reddit draft
-      // that would throw at submit on `undefined.subreddit`.
-      .filter(({ platform, redditTarget }) => platform !== 'reddit' || !!redditTarget)
-      .map(({ item, platform, node, redditTarget, devtoTags }) => {
+      // A Reddit post needs EITHER a resolved target or a parked marker. Having
+      // neither is a resolver contract violation (or a legacy payload generated
+      // before this feature), so drop it rather than persist a Reddit draft that
+      // would throw at submit on `undefined.subreddit`.
+      //
+      // A PARKED post is deliberately kept. It is equally unpublishable right
+      // now, but it is unpublishable in a way the system knows about and can
+      // finish — the marker keeps it out of the publish queue (see
+      // settingsHavePendingRedditTarget) until the extension fills the community
+      // in. Dropping it instead is what used to make a plan silently lose its
+      // Reddit half whenever this server could not reach reddit.com.
+      .filter(
+        ({ platform, redditTarget, redditTargetPending }) =>
+          platform !== 'reddit' || !!redditTarget || !!redditTargetPending
+      )
+      .map(({ item, platform, node, redditTarget, redditTargetPending, devtoTags }) => {
         // integrationId is intentionally left null at generation time: publishing
         // is by platform (the plugin reads settings.__type), and binding a
         // specific account is deferred to schedule time — same as
@@ -607,6 +630,14 @@ export class OperationPlanRepository {
                     },
                   ],
                 }
+              : {}),
+            // Parked instead of resolved: there is no `subreddit` to write yet.
+            // This marker is what the extension's resolver looks for, and what
+            // keeps the post out of the extension publish queue in the meantime
+            // (PostsRepository.extensionRoutedWhere matches it as a substring,
+            // which is why the key is a shared constant rather than a literal).
+            ...(platform === 'reddit' && !redditTarget && redditTargetPending
+              ? { [REDDIT_TARGET_PENDING_KEY]: redditTargetPending }
               : {}),
             // Dev.to's tag feeds are its distribution, so a generated article
             // ships with tags. Shaped to DevToSettingsDto.tags — the provider's

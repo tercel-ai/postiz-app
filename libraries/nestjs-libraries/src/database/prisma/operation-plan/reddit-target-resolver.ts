@@ -4,6 +4,11 @@ import {
   matchRedditFlairLabel,
   RedditChannelCapability,
 } from '@gitroom/nestjs-libraries/engage/reddit-channel-capability';
+import { isRedditBackendReadAvailable } from '@gitroom/nestjs-libraries/engage/reddit-egress';
+import {
+  RedditTargetPending,
+  RedditTargetPendingReason,
+} from '@gitroom/nestjs-libraries/engage/reddit-pending-target';
 
 // Reddit posting is not "content-only" like X: the submit API (reddit.provider
 // `post()`) hard-requires a target subreddit, a title, and a post `type`, and
@@ -186,6 +191,17 @@ export interface RedditTargetResolverDeps {
    * probe above — which is all this module can do on its own — cannot read one.
    */
   getCapability?: (subreddit: string) => Promise<RedditChannelCapability>;
+  /**
+   * Whether this process can read Reddit at all right now. When it cannot, Tier
+   * 2 parks every post for the browser extension instead of probing — the probe
+   * would walk the full proxy-then-direct ladder per post only to time out.
+   *
+   * Defaults to the real breaker, EXCEPT when `fetchPublic` is injected: a test
+   * that supplies its own transport has already said what the route is, and
+   * tying it to the ambient REDDIT_PROXY would make the suite pass or fail on
+   * whether a .env happened to be loaded.
+   */
+  backendReadAvailable?: () => boolean;
 }
 
 async function readJson(
@@ -330,8 +346,19 @@ export interface RedditTargetInput {
 
 export interface RedditTargetOutput {
   key: string;
-  // null = drop this Reddit post (no valid target).
+  // null = not resolved here. Read `pending` to tell the two cases apart.
   target: ResolvedRedditTarget | null;
+  /**
+   * Set when `target` is null but the post must be KEPT — nothing here could
+   * verify a community, and the browser extension can (it reads Reddit with the
+   * user's own session). The post materializes as a parked DRAFT carrying this
+   * marker; see reddit-pending-target.ts.
+   *
+   * null target AND no `pending` still means DROP, and that now happens only on
+   * a POSITIVE verdict: the probe reached Reddit and the community is gone,
+   * private, or link-only. "Could not check" no longer costs the post.
+   */
+  pending?: RedditTargetPending;
 }
 
 export interface ResolveRedditTargetsResult {
@@ -362,6 +389,31 @@ export async function resolveRedditTargets(
   // Same injectable clock probeSubreddit uses, so the rule TTL below is as
   // deterministic in tests as the 48h activity window.
   const now = deps.now ?? Date.now;
+
+  // See RedditTargetResolverDeps.backendReadAvailable for why an injected
+  // transport implies "available" rather than consulting the ambient breaker.
+  const backendReadAvailable =
+    deps.backendReadAvailable ??
+    (deps.fetchPublic ? () => true : () => isRedditBackendReadAvailable());
+
+  /** The parked marker for a post this module could not resolve. */
+  const park = (
+    input: RedditTargetInput,
+    candidate: string | null,
+    reason: RedditTargetPendingReason
+  ): RedditTargetPending => {
+    const flairLabel = input.llmFlairLabel?.trim() || '';
+    return {
+      candidate,
+      // Tagged and clamped HERE so the extension writes back exactly the title
+      // the resolved path would have produced — the tag is a community filing
+      // rule, not something the extension should have to re-derive.
+      title: applyTitleTag(input.title, input.llmTitleTag),
+      ...(flairLabel ? { flairLabel } : {}),
+      reason,
+      since: new Date(now()).toISOString(),
+    };
+  };
 
   // Tier-1 pool: enabled channels with a valid subreddit name, ordered by reach
   // (largest audience first) so the highest-value communities are used first,
@@ -512,18 +564,53 @@ export async function resolveRedditTargets(
 
     // Tier 2: validate the LLM's proposal against the public API.
     const candidate = normalizeSubreddit(input.llmSubreddit);
+
+    // Park rather than drop whenever nothing here could reach a verdict. The
+    // extension resolves these with the user's Reddit session — including the
+    // no-candidate case, where it has a title to search with and this module
+    // has no search of its own (channel search is the same blocked read).
     if (!candidate) {
-      deps.log?.(`[reddit-target] ${input.key}: no valid subreddit proposed; dropping`);
-      outputs.push({ key: input.key, target: null });
+      deps.log?.(
+        `[reddit-target] ${input.key}: no valid subreddit proposed; parking for the extension`
+      );
+      outputs.push({ key: input.key, target: null, pending: park(input, null, 'no-candidate') });
       continue;
     }
+    if (!backendReadAvailable()) {
+      deps.log?.(
+        `[reddit-target] ${input.key}: no Reddit egress; parking r/${candidate} for the extension`
+      );
+      outputs.push({
+        key: input.key,
+        target: null,
+        pending: park(input, candidate, 'egress-unavailable'),
+      });
+      continue;
+    }
+
     const p = await probe(candidate);
-    const accepted =
-      p.reachable && p.exists && p.isPublic && p.allowsSelf && p.active48h;
+    if (!p.reachable) {
+      // Unverified, NOT rejected — the two were conflated before, so a dead
+      // proxy looked exactly like a dead subreddit and cost the post.
+      deps.log?.(
+        `[reddit-target] ${input.key}: could not reach Reddit to verify r/${candidate}; ` +
+          `parking for the extension`
+      );
+      outputs.push({
+        key: input.key,
+        target: null,
+        pending: park(input, candidate, 'probe-unreachable'),
+      });
+      continue;
+    }
+    const accepted = p.exists && p.isPublic && p.allowsSelf && p.active48h;
     if (!accepted) {
+      // A positive verdict from Reddit itself: this community cannot take the
+      // post. Dropping stays the answer here — parking would ask the extension
+      // to re-confirm something already confirmed.
       deps.log?.(
         `[reddit-target] ${input.key}: r/${candidate} failed validation ` +
-          `(reachable=${p.reachable} exists=${p.exists} public=${p.isPublic} ` +
+          `(exists=${p.exists} public=${p.isPublic} ` +
           `self=${p.allowsSelf} active48h=${p.active48h}); dropping`
       );
       outputs.push({ key: input.key, target: null });

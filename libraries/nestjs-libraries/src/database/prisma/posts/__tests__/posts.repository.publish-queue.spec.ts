@@ -48,8 +48,17 @@ describe('getDueExtensionPublishPosts', () => {
     // An engage reply offered to the extension would be published as a brand-NEW
     // post (X) or rejected forever for lacking a subreddit (Reddit). Replies are
     // stamped publishMethod=API at creation; this excludes legacy null-method rows.
+    //
+    // A Reddit post still PARKED without a community is excluded for the same
+    // reason and in the same clause: the extension cannot publish it, so it
+    // would sit in QUEUE and be re-offered on every poll forever.
     const where = findMany.mock.calls[0][0].where;
-    expect(where.NOT).toEqual({ source: 'engage' });
+    expect(where.NOT).toEqual({
+      OR: [
+        { source: 'engage' },
+        { settings: { contains: '"redditTargetPending"' } },
+      ],
+    });
   });
 
   it('adds the legacy publishMethod=null + extension-integration branch when providers are given', async () => {
@@ -494,7 +503,12 @@ describe('countDueExtensionPublishPosts', () => {
     expect(where.state).toBe('QUEUE');
     expect(where.parentPostId).toBeNull();
     expect(where.intervalInDays).toBeNull();
-    expect(where.NOT).toEqual({ source: 'engage' });
+    expect(where.NOT).toEqual({
+      OR: [
+        { source: 'engage' },
+        { settings: { contains: '"redditTargetPending"' } },
+      ],
+    });
     expect(where.OR).toHaveLength(3);
     // Not yet due means not yet leasable — the lease predicate has no business
     // narrowing this one.
