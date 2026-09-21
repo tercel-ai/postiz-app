@@ -1,9 +1,12 @@
 import 'reflect-metadata'; // reddit.dto.ts uses class-validator decorators
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { RedditProvider } from '../reddit.provider';
+import { REDDIT_BROWSER_UA } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 
 // Regression guard: Reddit blocks the undici default User-Agent ("node") with
-// HTTP 403. RedditProvider.fetch must inject a descriptive UA on every request.
+// HTTP 403, so RedditProvider.fetch must inject one on every request — and it
+// must be the BROWSER string shared with the loid path, not the script-shaped
+// format Reddit's docs recommend. See the second test for why the two differ.
 describe('RedditProvider — User-Agent injection', () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -28,7 +31,7 @@ describe('RedditProvider — User-Agent injection', () => {
     expect(headers['Authorization']).toBe('Bearer token');
   });
 
-  it('uses a Reddit-compliant UA format on requests with no headers', async () => {
+  it('sends a BROWSER UA, not the script-shaped one Reddit documents', async () => {
     const spy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}', { status: 200 }));
@@ -38,8 +41,32 @@ describe('RedditProvider — User-Agent injection', () => {
       method: 'POST',
     });
 
-    // Format: <platform>:<app id>:<version> (by /u/<username>)
-    expect(headersOf(spy)['User-Agent']).toMatch(/^[^:]+:[^:]+:.+\(by \/u\/.+\)$/);
+    const ua = headersOf(spy)['User-Agent'];
+
+    // This assertion is the INVERSE of what it used to be, deliberately.
+    // Reddit's docs (and its own block page) ask for
+    // `<platform>:<app id>:<version> (by /u/<username>)`, and that was the
+    // default here. It is the wrong trade for this deployment: it announces the
+    // caller as a script and names an account, which is what anti-abuse scoring
+    // keys on — and a flag on that one account takes every org's publishing with
+    // it. Reddit serves this infrastructure a WAF page regardless of UA, so the
+    // documented format buys nothing and costs attributable identification.
+    expect(ua).not.toMatch(/^[^:]+:[^:]+:.+\(by \/u\/.+\)$/);
+    expect(ua).toMatch(/^Mozilla\/5\.0 /);
+  });
+
+  it('shares ONE UA definition with the loid path', async () => {
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    const provider = new RedditProvider();
+    await provider.fetch('https://oauth.reddit.com/api/v1/me');
+
+    // The publishing path and the read path must present this server the same
+    // way. Two copies of the string would let them drift, and the difference
+    // would only ever show up as one of them getting blocked.
+    expect(headersOf(spy)['User-Agent']).toBe(REDDIT_BROWSER_UA);
   });
 });
 

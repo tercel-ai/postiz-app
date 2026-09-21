@@ -20,18 +20,30 @@ import { lookup } from 'mime-types';
 import axios from 'axios';
 import WebSocket from 'ws';
 import { fetch as undiciFetch, ProxyAgent } from 'undici';
+import { REDDIT_BROWSER_UA } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import { Tool } from '@gitroom/nestjs-libraries/integrations/tool.decorator';
 import { Integration } from '@prisma/client';
 
 // @ts-ignore
 global.WebSocket = WebSocket;
 
-// Reddit requires every request to carry a unique, descriptive User-Agent.
-// Missing or generic UAs (e.g. undici's default "node") are blocked with HTTP
-// 403 ("whoa there, pardner!"). Format recommended by Reddit:
-//   <platform>:<app id>:<version> (by /u/<reddit username>)
-const REDDIT_USER_AGENT =
-  process.env.REDDIT_USER_AGENT || 'web:postiz:v1.0 (by /u/postiz-app)';
+// Reddit blocks a missing or generic User-Agent (undici's default "node") with
+// HTTP 403 ("whoa there, pardner!"), so every request needs one.
+//
+// It is a BROWSER string, not the `<platform>:<app id>:<version> (by /u/<user>)`
+// format Reddit's own docs recommend. That format was the default here and it is
+// the wrong trade for this deployment: it announces the caller as a script and
+// names a specific account, which is precisely what anti-abuse scoring keys on —
+// and the account it names can be flagged, taking every org's publishing with it.
+// The browser UA is also the one empirically verified to clear Reddit's WAF from
+// this infrastructure; it is what mints the loid and what every successful read
+// in engage/ already sends.
+//
+// Shared with reddit-loid.ts rather than re-declared, so the publishing path and
+// the read path can never disagree about how this server presents itself.
+// REDDIT_USER_AGENT still overrides, for a deployment that wants the documented
+// format.
+const REDDIT_USER_AGENT = process.env.REDDIT_USER_AGENT || REDDIT_BROWSER_UA;
 
 export class RedditProvider extends SocialAbstract implements SocialProvider {
   override maxConcurrentJob = 1; // Reddit has strict rate limits (1 request per second)

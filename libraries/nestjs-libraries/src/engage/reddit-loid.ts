@@ -113,8 +113,20 @@ let _inflight: Promise<string | null> | null = null;
 
 const REFRESH_MS = Number(process.env.REDDIT_LOID_TTL_MS ?? 6 * 60 * 60 * 1000); // 6h
 const REFRESH_SECONDS = Math.max(1, Math.floor(REFRESH_MS / 1000));
-const MINT_UA =
+/**
+ * The User-Agent every Reddit call should carry, exported as the ONE definition
+ * so the OAuth provider and this module cannot drift apart.
+ *
+ * A browser string, deliberately. Reddit's API docs ask for
+ * `<platform>:<app id>:<version> (by /u/<user>)` and its block page even
+ * suggests it — but that string announces "this is a script" and names an
+ * account, which is exactly what anti-abuse scoring looks for. The browser UA
+ * is the one empirically verified to clear the WAF on this deployment (it is
+ * what mints the loid and what every successful read here uses).
+ */
+export const REDDIT_BROWSER_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const MINT_UA = REDDIT_BROWSER_UA;
 
 // ── L2: per-server shared loid cache (Redis) ───────────────────────────────
 // The in-memory _cache above is L1 (per process). This is L2: a host-scoped copy

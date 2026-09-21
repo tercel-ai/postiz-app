@@ -11,10 +11,15 @@
  * pins down WHICH of the differences is responsible, because they were never
  * varied independently:
  *
+ *   - LOID      with vs without. The decisive one, and the one an earlier
+ *               version of this script forgot: Reddit's WAF refuses EVERY caller
+ *               that has no loid cookie, so a run without it returns the same
+ *               403 for every host and cannot tell a blocked endpoint from a
+ *               reachable one. reddit.provider.ts sends no loid, so the
+ *               "NO loid" rows are what production does today.
  *   - HOST      oauth.reddit.com vs www.reddit.com (different IP-reputation rules)
- *   - UA        the provider's Reddit-style UA vs a browser UA. Reddit's own
- *               block page singles out User-Agent, and the provider is the only
- *               caller that sets REDDIT_USER_AGENT, so it has never been tested.
+ *   - UA        the browser UA the provider now sends vs the Reddit-documented
+ *               `<platform>:<app id>:<version> (by /u/<user>)` format it used to.
  *   - TRANSPORT globalThis.fetch (what the provider uses, subject to whatever
  *               setGlobalDispatcher does to it) vs an explicit npm-undici
  *               ProxyAgent (what redditPublicGet uses, which demonstrably works)
@@ -43,13 +48,18 @@ import { setupHttpDispatcher } from '../libraries/helpers/src/proxy/setup-dispat
 setupHttpDispatcher();
 
 import { ProxyAgent, request } from 'undici';
+import {
+  getRedditLoidCookie,
+  REDDIT_BROWSER_UA,
+} from '../libraries/nestjs-libraries/src/engage/reddit-loid';
 
-// The provider's own default (reddit.provider.ts). Reddit's API docs ask for
-// `<platform>:<app id>:<version> (by /u/<username>)`.
-const PROVIDER_UA =
-  process.env.REDDIT_USER_AGENT || 'web:postiz:v1.0 (by /u/postiz-app)';
-const BROWSER_UA =
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+// What reddit.provider.ts actually sends now: the shared browser UA.
+const PROVIDER_UA = process.env.REDDIT_USER_AGENT || REDDIT_BROWSER_UA;
+// The format Reddit's API docs (and its block page) ask for, kept purely as the
+// comparison arm. It used to be the provider's default and was changed because
+// it self-identifies as a script and names an account — the exact shape
+// anti-abuse scoring keys on. This row shows whether that trade is real.
+const SCRIPT_UA = 'web:postiz:v1.0 (by /u/postiz-app)';
 
 const PROXY_URL =
   process.env.REDDIT_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
@@ -87,10 +97,14 @@ function verdict(p: Probe): string {
 }
 
 /** The provider's transport: plain globalThis.fetch, one UA header. */
-async function viaProviderFetch(url: string, ua: string): Promise<Probe> {
+async function viaProviderFetch(
+  url: string,
+  ua: string,
+  cookie?: string | null
+): Promise<Probe> {
   try {
     const res = await fetch(url, {
-      headers: { 'User-Agent': ua },
+      headers: { 'User-Agent': ua, ...(cookie ? { Cookie: cookie } : {}) },
       signal: AbortSignal.timeout(20_000),
     });
     return { status: res.status, body: await res.text(), note: '' };
@@ -100,12 +114,16 @@ async function viaProviderFetch(url: string, ua: string): Promise<Probe> {
 }
 
 /** redditPublicGet's transport: npm undici with an explicit ProxyAgent. */
-async function viaExplicitProxy(url: string, ua: string): Promise<Probe> {
+async function viaExplicitProxy(
+  url: string,
+  ua: string,
+  cookie?: string | null
+): Promise<Probe> {
   if (!PROXY_URL) return { status: 'ERR', body: '', note: 'no proxy configured' };
   const agent = new ProxyAgent(PROXY_URL);
   try {
     const res = await request(url, {
-      headers: { 'User-Agent': ua },
+      headers: { 'User-Agent': ua, ...(cookie ? { Cookie: cookie } : {}) },
       dispatcher: agent,
       headersTimeout: 20_000,
       bodyTimeout: 20_000,
@@ -132,36 +150,55 @@ async function main() {
   console.log('=== reddit.provider.ts route diagnostic ===');
   console.log('REDDIT_PROXY  :', PROXY_URL ? '(set)' : '(none)');
   console.log('provider UA   :', PROVIDER_UA);
-  console.log('(no token is used — we are testing reachability, not auth)\n');
+  console.log('(no token is used — we are testing reachability, not auth)');
+
+  // The loid is its OWN dimension, and the most important one: Reddit's WAF
+  // refuses every caller without it, so a run that omits it returns an
+  // identical 403 for every host and makes a reachable endpoint
+  // indistinguishable from a blocked one. The provider does NOT send a loid
+  // (its fetch override injects only a User-Agent), so the "no loid" rows are
+  // what production actually does — and the "loid" rows show what it would get
+  // if it did.
+  const loid = await getRedditLoidCookie();
+  console.log('loid          :', loid ? `minted (len=${loid.length})` : 'NOT minted');
+  console.log();
 
   for (const [label, url] of TARGETS) {
     console.log(`── ${label} ──`);
     console.log(
-      '  globalThis.fetch + provider UA  →',
+      '  fetch + providerUA, NO loid  (= production)  →',
       verdict(await viaProviderFetch(url, PROVIDER_UA))
     );
     console.log(
-      '  globalThis.fetch + browser  UA  →',
-      verdict(await viaProviderFetch(url, BROWSER_UA))
+      '  fetch + providerUA, loid                     →',
+      verdict(await viaProviderFetch(url, PROVIDER_UA, loid))
     );
     console.log(
-      '  explicit proxy   + provider UA  →',
-      verdict(await viaExplicitProxy(url, PROVIDER_UA))
+      '  fetch + scriptUA,   loid  (old default)      →',
+      verdict(await viaProviderFetch(url, SCRIPT_UA, loid))
+    );
+    console.log(
+      '  explicit proxy + providerUA, loid            →',
+      verdict(await viaExplicitProxy(url, PROVIDER_UA, loid))
     );
   }
 
   console.log('\n=== How to read this ===');
-  console.log('Any row REACHED on oauth /api/v1/me');
-  console.log('    → the provider CAN talk to Reddit; API publishing is viable.');
-  console.log('    If only the browser-UA row reached, REDDIT_USER_AGENT is the');
-  console.log('    problem — set it to a browser string and the provider works.');
-  console.log('    If only the explicit-proxy row reached, the provider needs its');
-  console.log('    own dispatcher (authenticate() already does this; the other');
-  console.log('    methods do not).');
-  console.log('Every oauth row BLOCKED but www REACHED');
-  console.log('    → Reddit refuses oauth.reddit.com from this exit regardless of');
-  console.log('      UA or transport. API publishing cannot work from this host;');
-  console.log('      Reddit posts must go out through the browser extension.');
+  console.log('FIRST check the www control rows. If even those are BLOCKED, the');
+  console.log('    run proves nothing — the exit IP is being refused outright');
+  console.log('    right now. Re-run; residential exits rotate.');
+  console.log('');
+  console.log('NO-loid blocked but loid REACHED (on any host)');
+  console.log('    → the missing loid is what stops the provider, not the host or');
+  console.log('      the UA. Fix: send the loid from the provider, the same way');
+  console.log('      redditPublicGet does.');
+  console.log('oauth blocked WITH loid but www reached WITH loid');
+  console.log('    → Reddit refuses oauth.reddit.com from this exit regardless.');
+  console.log('      API publishing cannot work from this host; Reddit posts must');
+  console.log('      go out through the browser extension.');
+  console.log('oauth REACHED (json 401/403) with loid');
+  console.log('    → the host is fine and only the credential is at issue; the');
+  console.log('      provider is viable once it sends a loid.');
 }
 
 main().catch((e) => {
