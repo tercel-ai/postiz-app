@@ -69,15 +69,22 @@ export function MonitoredChannelManager() {
     try {
       const res = await fetch('/engage/monitored-channels/search', {
         method: 'POST',
-        body: JSON.stringify({ platform: searchPlatform, query: searchQuery }),
+        // Opt in to the richer shape: this client knows how to act on
+        // needsExtension. Callers that do not ask keep getting a bare array.
+        body: JSON.stringify({
+          platform: searchPlatform,
+          query: searchQuery,
+          version: 'v2',
+        }),
       });
       if (!res.ok) {
         toaster.show('Search failed', 'warning');
         return;
       }
       const body = await res.json();
-      // The endpoint used to return a bare array. Tolerate both shapes so a
-      // frontend deployed ahead of the backend still works.
+      // Tolerate the array too: a frontend can meet a backend old enough to
+      // ignore `version`, and an unrecognised shape must degrade to "no
+      // extension hand-off", never to a crash.
       const results = Array.isArray(body) ? body : body?.results ?? [];
       const needsExtension = !Array.isArray(body) && !!body?.needsExtension;
 

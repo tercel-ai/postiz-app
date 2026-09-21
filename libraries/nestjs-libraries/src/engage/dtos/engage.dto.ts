@@ -354,6 +354,28 @@ export class SearchChannelsDto {
   @IsString()
   @MinLength(1)
   query: string;
+
+  /**
+   * Which response shape the caller wants. Absent (the default) means the
+   * original bare ARRAY of channels; 'v2' means
+   * `{ results, needsExtension }`.
+   *
+   * OPT-IN, and that direction is the whole design. This endpoint shipped for a
+   * long time returning an array, and every client types it that way and maps
+   * over it — so changing the shape for everyone broke them all at once, with
+   * the worst possible symptom: an object where an array was expected reads as
+   * "no results", so a perfectly good search silently became "no subreddit
+   * found". Letting the CALLER declare what it can parse means a client that
+   * has not been updated cannot be broken by this endpoint evolving.
+   *
+   * Why not a response header (the first attempt): not every HTTP client
+   * surfaces them. aisee-app's wrapper returns the parsed body only, so a
+   * header-borne signal is unreachable there — it would have been a signal that
+   * exists but cannot be read by the client that most needs it.
+   */
+  @IsOptional()
+  @IsIn(['v2'])
+  version?: 'v2';
 }
 
 // ─── Tracked Accounts (追踪账号 — external, no OAuth) ─────────────────────────

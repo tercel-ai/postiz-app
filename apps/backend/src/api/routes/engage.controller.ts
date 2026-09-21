@@ -429,18 +429,28 @@ export class EngageController {
   @ApiOperation({
     summary: 'Search for channels to add (e.g. Reddit subreddit search)',
     description:
-      'Returns { results, needsExtension }. needsExtension:true means this ' +
-      'server has no route to Reddit right now — the caller should re-run the ' +
-      'search through the browser extension, which reads Reddit with the ' +
-      "user's own session. It is NOT the same as an empty result set, which " +
-      'means Reddit answered and matched nothing.',
+      'Default: a bare ARRAY of channels (unchanged since this endpoint ' +
+      'shipped). Send `version: "v2"` to get ' +
+      '`{ results, needsExtension }` instead, where needsExtension:true means ' +
+      'this server has no route to Reddit and the caller should re-run the ' +
+      "search through the browser extension, which reads Reddit with the user's " +
+      'own session. That is NOT the same as an empty result set, which means ' +
+      'Reddit answered and matched nothing. The shape is opt-in so a client ' +
+      'that has not been updated cannot be broken by this endpoint evolving.',
   })
   @Post('/monitored-channels/search')
-  searchChannels(
+  async searchChannels(
     @GetOrgFromRequest() org: Organization,
     @Body() body: SearchChannelsDto
   ) {
-    return this._engageService.searchChannels(org, body.platform, body.query);
+    const result = await this._engageService.searchChannels(
+      org,
+      body.platform,
+      body.query
+    );
+    // The CALLER decides the shape. See SearchChannelsDto.version for why this
+    // is opt-in rather than a header or a new default.
+    return body.version === 'v2' ? result : result.results;
   }
 
   // ─── Parked Reddit targets (extension resolver) ───────────────────────────

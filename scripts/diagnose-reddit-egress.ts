@@ -32,6 +32,11 @@
  *
  * Read-only. Nothing is persisted, and no credential is ever printed.
  *
+ * Scope: this answers "does this host have a ROUTE to Reddit at all" — direct
+ * vs proxy, exit IP, and whether a loid can be minted on each. For "which
+ * ENDPOINTS answer, under what conditions" (read + write paths, loid/UA/transport
+ * matrix) run scripts/diagnose-reddit-provider.ts instead.
+ *
  * Usage:
  *   npx tsx scripts/diagnose-reddit-egress.ts
  *

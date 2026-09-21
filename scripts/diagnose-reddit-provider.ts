@@ -1,10 +1,12 @@
 /**
- * Can reddit.provider.ts actually reach oauth.reddit.com from this host?
+ * Which Reddit endpoints can this host reach, and under what conditions?
  *
- * That provider is the API publishing route: post(), comment(), media upload,
- * /api/v1/me and analytics all call `this.fetch('https://oauth.reddit.com/...')`,
- * which lands on the base class's plain `globalThis.fetch` (social.abstract.ts)
- * with one header of its own — REDDIT_USER_AGENT.
+ * Covers BOTH paths in one matrix:
+ *   READ  — subreddits/search.json, about.json, new.json: channel search and the
+ *           operation-plan subreddit resolver, via redditPublicGet.
+ *   WRITE — oauth.reddit.com: reddit.provider.ts, whose post(), comment(),
+ *           media upload, /api/v1/me and analytics all go through the base
+ *           class's plain `globalThis.fetch` (social.abstract.ts).
  *
  * A previous probe found the oauth host returning an HTML block page from this
  * deployment while www.reddit.com returned JSON through the same proxy. This
@@ -136,13 +138,32 @@ async function viaExplicitProxy(
   }
 }
 
-// /api/v1/me is the cheapest oauth endpoint and the one EVERY provider path
-// starts from (authenticate, refreshToken and the analytics pass all call it),
-// so if it is blocked the whole provider is. www.reddit.com/api/v1/me.json is
-// the control: same question, host that is known to work.
+// Every Reddit endpoint this backend actually depends on, READ and WRITE paths
+// in one matrix.
+//
+// They were split across two scripts before, and the split cost real time: an
+// earlier version of THIS file forgot the loid, and because the other script
+// (which always sent one) lived elsewhere, the two were never compared
+// side by side — nine identical 403s read as "oauth is IP-blocked" when they
+// only meant "no cookie". One matrix, one run, one place for that mistake to
+// be visible.
 const TARGETS: Array<[string, string]> = [
+  // ── READ path: what EngageService._searchRedditSubreddits and the
+  //    operation-plan subreddit resolver call, through redditPublicGet.
+  [
+    'www  /subreddits/search.json',
+    'https://www.reddit.com/subreddits/search.json?q=mcp&limit=10&type=sr',
+  ],
+  ['www  /r/<sub>/about.json', 'https://www.reddit.com/r/ClaudeAI/about.json'],
+  ['www  /r/<sub>/new.json', 'https://www.reddit.com/r/ClaudeAI/new.json?limit=1'],
+  // ── WRITE path: reddit.provider.ts. /api/v1/me is the cheapest oauth
+  //    endpoint and the one EVERY provider path starts from (authenticate,
+  //    refreshToken and the analytics pass all call it), so if it is blocked
+  //    the whole provider is.
   ['oauth /api/v1/me', 'https://oauth.reddit.com/api/v1/me'],
   ['oauth /api/submit', 'https://oauth.reddit.com/api/submit'],
+  // ── Control: same question as the oauth rows, on the host already known to
+  //    answer. If this one fails the run proves nothing.
   ['www  /api/v1/me.json', 'https://www.reddit.com/api/v1/me.json'],
 ];
 
@@ -199,6 +220,11 @@ async function main() {
   console.log('oauth REACHED (json 401/403) with loid');
   console.log('    → the host is fine and only the credential is at issue; the');
   console.log('      provider is viable once it sends a loid.');
+  console.log('');
+  console.log('This script answers "which ENDPOINTS answer, under what conditions".');
+  console.log('For "does this host have a route to Reddit AT ALL" — direct vs proxy,');
+  console.log('exit IP, whether a loid can even be minted — run the other one:');
+  console.log('    npx tsx scripts/diagnose-reddit-egress.ts');
 }
 
 main().catch((e) => {
