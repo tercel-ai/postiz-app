@@ -259,6 +259,46 @@ export async function getRedditLoidCookie(): Promise<string | null> {
 }
 
 /**
+ * Mint the loid at startup so no user request ever pays for it.
+ *
+ * The cache makes a miss rare — L1 per process, L2 shared per host, 6h TTL — but
+ * "rare" is not "never": the first call after a deploy, and the first after each
+ * TTL lapse, still mints. That call now sits in front of PUBLISHING (the
+ * provider attaches a loid to every Reddit request), so the cost lands on
+ * whichever post happens to go out first, and a slow mint delays it by up to the
+ * 10s timeout.
+ *
+ * Moving it to boot costs one request per process and removes that tail
+ * entirely. It is deliberately fire-and-forget: returning void rather than a
+ * promise makes "this must never block boot" structural instead of a rule every
+ * caller has to remember. A failure is silent by design — getRedditLoidCookie
+ * already degrades to null, so the only consequence is that the first real call
+ * mints after all, exactly as it did before this existed.
+ *
+ * Idempotent: getRedditLoidCookie checks L1 then L2 first, so on a process that
+ * restarts into a warm Redis this is a single GET and no network call at all.
+ */
+export function warmRedditLoidCache(
+  log: (msg: string) => void = () => {}
+): void {
+  void getRedditLoidCookie()
+    .then((cookie) => {
+      log(
+        cookie
+          ? '[reddit] loid cache warm'
+          : '[reddit] loid warm-up produced no cookie; the first request will retry'
+      );
+    })
+    .catch((error: unknown) => {
+      log(
+        `[reddit] loid warm-up failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    });
+}
+
+/**
  * Drops BOTH cache layers so the next getRedditLoidCookie() re-mints. Call this
  * when a request still returns 403 despite carrying the cookie (the id was
  * rotated/flagged by Reddit BEFORE its TTL elapsed — a value Redis still holds).

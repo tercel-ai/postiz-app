@@ -20,7 +20,10 @@ import { lookup } from 'mime-types';
 import axios from 'axios';
 import WebSocket from 'ws';
 import { fetch as undiciFetch, ProxyAgent } from 'undici';
-import { REDDIT_BROWSER_UA } from '@gitroom/nestjs-libraries/engage/reddit-loid';
+import {
+  getRedditLoidCookie,
+  REDDIT_BROWSER_UA,
+} from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import { Tool } from '@gitroom/nestjs-libraries/integrations/tool.decorator';
 import { Integration } from '@prisma/client';
 
@@ -44,6 +47,69 @@ global.WebSocket = WebSocket;
 // REDDIT_USER_AGENT still overrides, for a deployment that wants the documented
 // format.
 const REDDIT_USER_AGENT = process.env.REDDIT_USER_AGENT || REDDIT_BROWSER_UA;
+
+/**
+ * The loid cookie for `url`, or null when it must not be sent.
+ *
+ * Host-scoped on purpose. This provider does not only talk to Reddit: an image
+ * upload finishes by PUTting to the storage URL Reddit hands back
+ * (uploadFileToReddit), and a cookie minted for reddit.com has no business
+ * travelling to a third party. Attaching it by hostname keeps "send it on every
+ * Reddit call" from quietly meaning "send it everywhere".
+ *
+ * Never throws: getRedditLoidCookie already swallows its own failures and
+ * returns null, and this adds a guard for a malformed URL. Publishing must not
+ * fail because an anti-bot cookie could not be fetched — without it the request
+ * is merely as likely to be blocked as it was before this existed.
+ */
+async function redditLoidCookieFor(url: string): Promise<string | null> {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  if (host !== 'reddit.com' && !host.endsWith('.reddit.com')) return null;
+  try {
+    return await getRedditLoidCookie();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reddit's user-authorized API is unusable without app credentials, so every
+ * entry point that needs them refuses UP FRONT rather than sending a request
+ * that cannot succeed.
+ *
+ * Without this guard the three callers below still ran: `generateAuthUrl` built
+ * `...authorize?client_id=undefined`, and `authenticate`/`refreshToken` sent
+ * Basic auth over the literal strings "undefined:undefined" / ":". Reddit
+ * answers those with a 4xx whose body says nothing about the real cause, so a
+ * deployment that simply never configured Reddit looked like a broken
+ * integration — and the user was walked through an OAuth flow that could not
+ * complete.
+ *
+ * Deliberately NOT applied to post()/comment()/postAnalytics(): those take an
+ * already-issued accessToken and do not read these variables, so an integration
+ * connected while credentials WERE configured keeps working. This guards the
+ * calls that are provably doomed, not the whole provider.
+ */
+function requireRedditAppCredentials(action: string): {
+  clientId: string;
+  clientSecret: string;
+} {
+  const clientId = process.env.REDDIT_CLIENT_ID;
+  const clientSecret = process.env.REDDIT_CLIENT_SECRET;
+  if (!clientId || !clientSecret) {
+    throw new Error(
+      `Reddit ${action} is unavailable: REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET ` +
+        `are not configured on this deployment. Reddit posting and account ` +
+        `connection require them; publish through the browser extension instead.`
+    );
+  }
+  return { clientId, clientSecret };
+}
 
 export class RedditProvider extends SocialAbstract implements SocialProvider {
   override maxConcurrentJob = 1; // Reddit has strict rate limits (1 request per second)
@@ -112,22 +178,48 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
   // undici default ("node") with HTTP 403, so this must be set on all calls —
   // token exchange, OAuth, posting and analytics alike. Caller-supplied headers
   // win, but none set User-Agent, so REDDIT_USER_AGENT always applies.
-  override fetch(
+  override async fetch(
     url: string,
     options: RequestInit = {},
     identifier = '',
     totalRetries = 0,
     ignoreConcurrency = false
   ): Promise<Response> {
+    // The loid cookie, on top of the User-Agent. Both are here for the same
+    // reason — every Reddit call needs them and no call site should have to
+    // remember — but the loid is the one that was missing, and it is the one
+    // Reddit actually gates on.
+    //
+    // Measured on this deployment, same host, same UA, same moment:
+    //   GET oauth.reddit.com/api/v1/me  without loid → 403, Imperva WAF page
+    //   GET oauth.reddit.com/api/v1/me  with    loid → 200, JSON
+    // So an OAuth token was never enough: Reddit's anti-bot layer sits in FRONT
+    // of authentication and refuses an unrecognised client before it ever looks
+    // at the Bearer header. Every publish, comment and analytics call this
+    // provider made was being turned away there — which reads as a credential
+    // or permissions failure and is neither.
+    //
+    // This mirrors what redditPublicGet has always sent on the read path; the
+    // publish path simply never got it. Sharing getRedditLoidCookie (rather
+    // than minting one here) also shares its cache, so this costs nothing per
+    // request.
+    const headers: Record<string, string> = {
+      'User-Agent': REDDIT_USER_AGENT,
+      ...(options.headers as Record<string, string> | undefined),
+    };
+
+    const loid = await redditLoidCookieFor(url);
+    if (loid) {
+      // Append rather than assign: a caller-supplied Cookie is theirs to keep,
+      // and clobbering it would be a silent change to a request we do not own.
+      headers['Cookie'] = headers['Cookie']
+        ? `${headers['Cookie']}; ${loid}`
+        : loid;
+    }
+
     return super.fetch(
       url,
-      {
-        ...options,
-        headers: {
-          'User-Agent': REDDIT_USER_AGENT,
-          ...(options.headers as Record<string, string> | undefined),
-        },
-      },
+      { ...options, headers },
       identifier,
       totalRetries,
       ignoreConcurrency
@@ -135,12 +227,13 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
   }
 
   async refreshToken(refreshToken: string): Promise<AuthTokenDetails> {
+    const { clientId, clientSecret } = requireRedditAppCredentials('token refresh');
     const tokenRes = await this.fetch('https://www.reddit.com/api/v1/access_token', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         Authorization: `Basic ${Buffer.from(
-          `${process.env.REDDIT_CLIENT_ID}:${process.env.REDDIT_CLIENT_SECRET}`
+          `${clientId}:${clientSecret}`
         ).toString('base64')}`,
       },
       body: new URLSearchParams({
@@ -190,11 +283,14 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
   }
 
   async generateAuthUrl() {
+    // Before building the URL, not after: an authorize link carrying
+    // `client_id=undefined` sends the user to Reddit to be told nothing useful.
+    const { clientId } = requireRedditAppCredentials('account connection');
     const state = makeId(6);
     const codeVerifier = makeId(30);
     const redirectUri = `${process.env.FRONTEND_URL}/integrations/social/reddit`;
     const url = `https://www.reddit.com/api/v1/authorize?client_id=${
-      process.env.REDDIT_CLIENT_ID
+      clientId
     }&response_type=code&state=${state}&redirect_uri=${encodeURIComponent(
       redirectUri
     )}&duration=permanent&scope=${encodeURIComponent(this.scopes.join(' '))}&approval_prompt=force`;
@@ -207,8 +303,11 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
 
   async authenticate(params: { code: string; codeVerifier: string }) {
     const redirectUri = `${process.env.FRONTEND_URL}/integrations/social/reddit`;
-    const clientId = process.env.REDDIT_CLIENT_ID || '';
-    const clientSecret = process.env.REDDIT_CLIENT_SECRET || '';
+    // `|| ''` used to turn a missing credential into Basic auth over ":",
+    // which Reddit rejects with an opaque 4xx. Fail with the real reason.
+    const { clientId, clientSecret } = requireRedditAppCredentials(
+      'account connection'
+    );
 
     // Use npm undici's fetch with an explicit ProxyAgent so the proxy is guaranteed
     // regardless of global dispatcher state. globalThis.fetch in Node.js 22 uses a

@@ -16,7 +16,11 @@ vi.mock('undici', async (importActual) => {
 
 import { request } from 'undici';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
-import { getRedditLoidCookie, clearRedditLoidCache } from '../reddit-loid';
+import {
+  getRedditLoidCookie,
+  clearRedditLoidCache,
+  warmRedditLoidCache,
+} from '../reddit-loid';
 
 const requestMock = request as unknown as ReturnType<typeof vi.fn>;
 
@@ -106,5 +110,94 @@ describe('reddit-loid — L1/L2 cache + 403 eviction', () => {
 
     expect(cookie).toBe('loid=FRESH'); // swallowed the Redis error, minted anyway
     getSpy.mockRestore();
+  });
+});
+
+// The warm-up exists so that the one unavoidable mint — first call after a
+// deploy or after the TTL lapses — happens at boot rather than in front of a
+// user's post. The provider attaches a loid to every Reddit request now, so
+// that mint sits on the PUBLISH path; the properties below are what keep it
+// from ever costing a request or a boot.
+describe('warmRedditLoidCache', () => {
+  beforeEach(async () => {
+    requestMock.mockReset();
+    await clearRedditLoidCache();
+    requestMock.mockReset();
+  });
+
+  afterEach(async () => {
+    await clearRedditLoidCache();
+  });
+
+  /**
+   * A deterministic completion signal for a function that deliberately returns
+   * no promise. The warm-up always logs exactly once when it finishes, so the
+   * log callback IS the handle — waiting on a timer instead would race the
+   * mint's several await points (Redis read, network, Redis write).
+   */
+  function logSignal() {
+    let resolve!: () => void;
+    const done = new Promise<void>((r) => (resolve = r));
+    const log = vi.fn(() => resolve());
+    return { log, done };
+  }
+
+  it('returns synchronously — it can never delay boot', () => {
+    requestMock.mockResolvedValue(mintResponse('warm-1'));
+    // The signature is the guarantee: there is no promise to accidentally await,
+    // and no way for a caller to make this blocking.
+    expect(warmRedditLoidCache()).toBeUndefined();
+  });
+
+  it('populates the cache, so the next caller pays nothing', async () => {
+    requestMock.mockResolvedValue(mintResponse('warm-2'));
+    const { log, done } = logSignal();
+
+    warmRedditLoidCache(log);
+    await done;
+
+    const mintsAfterWarm = requestMock.mock.calls.length;
+    expect(mintsAfterWarm).toBe(1);
+
+    // The request that would otherwise have paid for the mint now hits cache.
+    expect(await getRedditLoidCookie()).toBe('loid=warm-2');
+    expect(requestMock.mock.calls.length).toBe(mintsAfterWarm);
+  });
+
+  it('does NOT mint when the cache is already warm', async () => {
+    requestMock.mockResolvedValue(mintResponse('warm-3'));
+    await getRedditLoidCookie(); // prime
+    requestMock.mockClear();
+    const { log, done } = logSignal();
+
+    warmRedditLoidCache(log);
+    await done;
+
+    // A restart into a warm Redis must cost a GET, not a network round trip.
+    expect(requestMock).not.toHaveBeenCalled();
+  });
+
+  it('swallows a mint failure — boot and publishing are unaffected', async () => {
+    requestMock.mockRejectedValue(new Error('reddit unreachable'));
+    const { log, done } = logSignal();
+
+    expect(() => warmRedditLoidCache(log)).not.toThrow();
+    await done;
+
+    // Degrades to exactly the pre-warm-up behaviour: no cookie, and the first
+    // real request will mint again.
+    expect(log).toHaveBeenCalled();
+  });
+
+  it('reports when Reddit issued no cookie, rather than failing silently', async () => {
+    // A 200 that sets no loid is not an error, but it IS the case where every
+    // later request keeps re-minting — worth a line in the log.
+    requestMock.mockResolvedValue({ headers: {}, body: { text: async () => '' } });
+    const { log, done } = logSignal();
+
+    warmRedditLoidCache(log);
+    await done;
+
+    expect(log.mock.calls.flat().join(' ')).toMatch(/no cookie/i);
   });
 });

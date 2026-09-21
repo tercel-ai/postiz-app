@@ -152,7 +152,10 @@ import {
   EngageAuthorProfile,
 } from '@gitroom/nestjs-libraries/engage/engage-author';
 import { parseRedditCommentId } from '@gitroom/nestjs-libraries/engage/reddit-url';
-import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
+import {
+  redditPublicGet,
+  warmRedditLoidCache,
+} from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import {
   isRedditBackendReadAvailable,
   redditBackendReadBlockedReason,
@@ -329,6 +332,12 @@ export class EngageService implements OnApplicationBootstrap {
   // Auto-start global workflows on every app boot so pnpm dev / Docker restart
   // never leaves the system in a state where no workflow is running.
   async onApplicationBootstrap() {
+    // Not awaited, and first: it is the one piece of boot work whose whole point
+    // is to finish before a user request needs it, and it must not be able to
+    // delay the two below (or boot) if reddit.com is slow. warmRedditLoidCache
+    // returns void and swallows its own failures, so there is nothing here to
+    // handle.
+    warmRedditLoidCache((m) => this.logger.log(m));
     await this._seedDefaultSettings();
     await this._ensureGlobalWorkflowsRunning();
   }

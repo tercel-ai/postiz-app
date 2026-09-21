@@ -3,6 +3,22 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { RedditProvider } from '../reddit.provider';
 import { REDDIT_BROWSER_UA } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 
+// The provider now attaches a loid cookie to every Reddit call, and minting one
+// is a REAL network request through npm undici's request() — which spying on
+// globalThis.fetch does not intercept. Left unmocked, every test here would sit
+// on a live reddit.com call until it timed out. The constant is re-exported from
+// the real module so the UA assertions still check the production value.
+const TEST_LOID = 'loid=test-loid-value';
+vi.mock('@gitroom/nestjs-libraries/engage/reddit-loid', async () => {
+  const actual = await vi.importActual<
+    typeof import('@gitroom/nestjs-libraries/engage/reddit-loid')
+  >('@gitroom/nestjs-libraries/engage/reddit-loid');
+  return {
+    ...actual,
+    getRedditLoidCookie: vi.fn(async () => TEST_LOID),
+  };
+});
+
 // Regression guard: Reddit blocks the undici default User-Agent ("node") with
 // HTTP 403, so RedditProvider.fetch must inject one on every request — and it
 // must be the BROWSER string shared with the loid path, not the script-shaped
@@ -67,6 +83,142 @@ describe('RedditProvider — User-Agent injection', () => {
     // way. Two copies of the string would let them drift, and the difference
     // would only ever show up as one of them getting blocked.
     expect(headersOf(spy)['User-Agent']).toBe(REDDIT_BROWSER_UA);
+  });
+});
+
+// Reddit's anti-bot layer sits in FRONT of authentication: measured on this
+// deployment, the same authenticated request is refused with an Imperva page
+// without a loid cookie and answered with JSON with one. So the loid is not an
+// optimisation on the publish path — without it every publish, comment and
+// analytics call is turned away before Reddit reads the Bearer header.
+describe('RedditProvider — loid cookie', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function headersOf(spy: ReturnType<typeof vi.spyOn>): Record<string, string> {
+    return (spy.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+  }
+
+  it('attaches the loid to Reddit requests', async () => {
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    await new RedditProvider().fetch('https://oauth.reddit.com/api/submit', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer t' },
+    });
+
+    expect(headersOf(spy)['Cookie']).toBe(TEST_LOID);
+    // The caller's own headers survive.
+    expect(headersOf(spy)['Authorization']).toBe('Bearer t');
+  });
+
+  it('does NOT send the loid to a non-Reddit host', async () => {
+    // uploadFileToReddit finishes by PUTting to the storage URL Reddit hands
+    // back. A cookie minted for reddit.com has no business reaching a third
+    // party, so "attach it to every Reddit call" must not become "attach it
+    // everywhere".
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    await new RedditProvider().fetch('https://s3.amazonaws.com/some-bucket/x');
+
+    expect(headersOf(spy)['Cookie']).toBeUndefined();
+  });
+
+  it('is not fooled by a hostname that merely ends in the brand', async () => {
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    await new RedditProvider().fetch('https://notreddit.com/api');
+
+    expect(headersOf(spy)['Cookie']).toBeUndefined();
+  });
+
+  it('appends to a caller-supplied Cookie instead of replacing it', async () => {
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    await new RedditProvider().fetch('https://oauth.reddit.com/api/v1/me', {
+      headers: { Cookie: 'session=abc' },
+    });
+
+    expect(headersOf(spy)['Cookie']).toBe(`session=abc; ${TEST_LOID}`);
+  });
+});
+
+// Reddit's user-authorized API needs app credentials this deployment may simply
+// not have. The guard exists so a missing credential fails with its real reason
+// instead of a request that Reddit rejects opaquely — and, for account
+// connection, before the user is walked through an OAuth flow that cannot
+// complete.
+describe('RedditProvider — missing app credentials', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  function withoutCredentials() {
+    vi.stubEnv('REDDIT_CLIENT_ID', '');
+    vi.stubEnv('REDDIT_CLIENT_SECRET', '');
+  }
+
+  it('refuses to build an auth URL, without contacting Reddit', async () => {
+    withoutCredentials();
+    const spy = vi.spyOn(globalThis, 'fetch');
+
+    await expect(new RedditProvider().generateAuthUrl()).rejects.toThrow(
+      /REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET are not configured/
+    );
+    // The point of guarding here rather than downstream: no link is produced,
+    // so nobody is sent to Reddit to be told nothing useful.
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('refuses to exchange an auth code, without contacting Reddit', async () => {
+    withoutCredentials();
+    const spy = vi.spyOn(globalThis, 'fetch');
+
+    await expect(
+      new RedditProvider().authenticate({ code: 'c', codeVerifier: 'v' })
+    ).rejects.toThrow(/not configured/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('refuses to refresh a token, without contacting Reddit', async () => {
+    withoutCredentials();
+    const spy = vi.spyOn(globalThis, 'fetch');
+
+    await expect(new RedditProvider().refreshToken('rt')).rejects.toThrow(
+      /not configured/
+    );
+    // Previously this sent Basic auth over the literal "undefined:undefined".
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('still allows a token-bearing request through — the guard is not a kill switch', async () => {
+    // The guard covers only the calls that READ the credentials. Everything that
+    // publishes (post/comment/postAnalytics) goes through provider.fetch with an
+    // already-issued accessToken, so an integration connected while the
+    // credentials WERE configured has to keep working. Asserting on fetch itself
+    // rather than on one publishing method keeps this independent of any single
+    // method's argument shape.
+    withoutCredentials();
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    await new RedditProvider().fetch('https://oauth.reddit.com/api/v1/me', {
+      headers: { Authorization: 'Bearer existing-access-token' },
+    });
+
+    expect(spy).toHaveBeenCalledOnce();
+    expect(
+      (spy.mock.calls[0][1] as RequestInit).headers as Record<string, string>
+    ).toMatchObject({ Authorization: 'Bearer existing-access-token' });
   });
 });
 
