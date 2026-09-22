@@ -2219,10 +2219,26 @@ Retrieve the list of sent replies (includes original post summary and metrics da
         "impressions": 1240,
         "trafficScore": 87.5,
         "analytics": [
-          { "label": "Likes", "data": [42] },
-          { "label": "Retweets", "data": [8] },
-          { "label": "Replies", "data": [3] }
+          { "label": "Likes",    "percentageChange": 0, "data": [{ "total": "42", "date": "2026-05-22" }] },
+          { "label": "Retweets", "percentageChange": 0, "data": [{ "total": "8",  "date": "2026-05-22" }] },
+          { "label": "Replies",  "percentageChange": 0, "data": [{ "total": "3",  "date": "2026-05-22" }] }
         ],
+        "metrics": {
+          "trafficScore": 87.5,
+          "visibility": "visible",
+          "impressions": 1240,
+          "likes": 42,
+          "retweets": 8,
+          "replies": 3,
+          "quotes": 0,
+          "bookmarks": 0
+        },
+        "replyAuthor": {
+          "handle": "mycompany_x",
+          "id": "internal-id",
+          "name": "My Company",
+          "avatarUrl": "https://.../avatar.jpg"
+        },
         "integration": {
           "id": "integration-uuid",
           "name": "mycompany_x",
@@ -2250,6 +2266,16 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 ```
 
 > `inputData` contains the generation metadata saved at reply time. Use it to pre-populate the edit form for scheduled replies. Fields: `strategy` (`ReplyStrategy`), `brandStrength` (0–3), `mentions` (optional string array).
+
+> **`post.metrics` is platform-shaped.** The example above is the **X** key set. A Reddit reply
+> returns `{ trafficScore, visibility, upvotes, comments, estReach }` instead — keys from another
+> platform's branch are **absent from the JSON**, not `0`. `trafficScore` and `visibility` are the
+> only two present on every platform. Full matrix, derivation rules and the "why is it all zero"
+> triage: [`reply-metrics-reference.md`](./reply-metrics-reference.md).
+>
+> `post.analytics` is the raw, verbose `AnalyticsData[]` the metrics were flattened from; prefer
+> `post.metrics`. `post.settings` is stripped from the response — the reply author it carried is
+> surfaced as `replyAuthor`.
 
 **`post.state` Meanings**
 
@@ -2305,17 +2331,14 @@ The response is the same shape as one object from `GET /api/engage/sent`
       "avatarUrl": "https://..."
     },
     "metrics": {
+      "trafficScore": 87.5,
+      "visibility": "visible",
+      "impressions": 1240,
       "likes": 42,
-      "replies": 3,
       "retweets": 8,
+      "replies": 3,
       "quotes": 0,
-      "bookmarks": 0,
-      "views": 1240,
-      "score": 0,
-      "comments": 0,
-      "shares": 0,
-      "saves": 0,
-      "upvoteRatio": null
+      "bookmarks": 0
     }
   },
   "opportunity": {
@@ -2728,6 +2751,7 @@ Candidate set = sent replies whose `Post.trafficScore` is non-null. Ranking metr
         },
         "metrics": {                    // this reply's own normalized metrics (platform-shaped)
           "trafficScore": 30,
+          "visibility": "visible",      // every platform; 'unknown' means never checked
           "impressions": 1200,
           "likes": 7,                   // X: likes/retweets/replies/quotes/bookmarks
           "retweets": 1,
@@ -2743,7 +2767,7 @@ Candidate set = sent replies whose `Post.trafficScore` is non-null. Ranking metr
 }
 ```
 
-- `metrics` is platform-shaped: X replies carry `{ trafficScore, impressions, likes, retweets, replies, quotes, bookmarks }`; Reddit replies carry `{ trafficScore, upvotes, comments, estReach }` instead.
+- `metrics` is platform-shaped: X replies carry `{ trafficScore, visibility, impressions, likes, retweets, replies, quotes, bookmarks }`; Reddit carries `{ trafficScore, visibility, upvotes, comments, estReach }`, Hacker News `{ trafficScore, visibility, upvotes, comments }`, and Dev.to `{ trafficScore, visibility, reactions, comments? }`. Keys from another platform's branch are **absent**, not `0`. Full matrix: [`reply-metrics-reference.md`](./reply-metrics-reference.md).
 - `replyAuthor` is resolved from the reply's stored `engageAuthor` settings first, then the connected integration; `id`/`name`/`avatarUrl` are present only when known. It is the account that **sent** the reply, not the original post's author.
 - `total` is the count of eligible replies (non-null `trafficScore`) before the `limit` slice — not a sum of any metric.
 

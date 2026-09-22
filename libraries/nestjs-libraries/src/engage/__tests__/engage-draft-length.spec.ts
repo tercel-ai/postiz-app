@@ -1,12 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import {
   assertDraftWithinPlatformLimit,
+  outputLengthForLength,
   downgradedReferencePostTarget,
   normalizeEngagePlatform,
   xReferencePostTarget,
   xReferencePostTierFor,
   REDDIT_HARD_CHAR_LIMIT,
   X_HARD_CHAR_LIMIT,
+  X_WEIGHTED_CHAR_LIMIT,
+  platformHardCeilingFor,
 } from '@gitroom/nestjs-libraries/engage/engage-draft-length';
 import { hardLimitFor } from '@gitroom/nestjs-libraries/integrations/platform-content-profile';
 
@@ -185,5 +188,129 @@ describe('downgradedReferencePostTarget', () => {
     expect(downgradedReferencePostTarget('reddit', 1000)).toBeNull();
     expect(downgradedReferencePostTarget('medium', 2550)).toBeNull();
     expect(downgradedReferencePostTarget('linkedin', 3000)).toBeNull();
+  });
+});
+
+// X's ceiling belongs to the ACCOUNT's subscription, not to X: 280 weighted
+// characters without one, 25000 with one (measured on x.com, 2026-09-22, by
+// filling the composer and reading its countdown ring and Post button). These
+// tests pin the two things that must stay true of that: a caller who has not
+// resolved an account keeps exactly the behaviour it had, and a caller who has
+// gets a target and a ceiling that agree with each other.
+describe('a per-account X ceiling', () => {
+  it('leaves every existing caller on the free tier', () => {
+    // The default is the whole safety story: an unresolved account is held to
+    // the limit every X account has.
+    expect(xReferencePostTarget('long', 1)).toBe(X_WEIGHTED_CHAR_LIMIT);
+    expect(platformHardCeilingFor('x')).toBe(X_HARD_CHAR_LIMIT);
+    expect(() =>
+      assertDraftWithinPlatformLimit('x', 'a'.repeat(281))
+    ).toThrow(/280/);
+  });
+
+  it('gives a long-form account its own ladder, not a widened top tier', () => {
+    // Moving only `long` would leave a 30x hole between `medium` (130) and
+    // `long` that no picker setting can land in.
+    expect(xReferencePostTarget('short', 1, 25000)).toBe(280);
+    expect(xReferencePostTarget('medium', 1, 25000)).toBe(1500);
+    expect(xReferencePostTarget('long', 1, 25000)).toBe(4096);
+  });
+
+  it('keeps `long` at the last target that still has 2x prompt headroom', () => {
+    // resolveGenerationBudget states a ceiling back to the model derived from
+    // max_tokens, and that ceiling stops growing at 8192 characters. Measured:
+    // target 4096 -> ceiling 8192 (2.00x); target 8192 -> 8192 (1.00x);
+    // target 22500 -> 8192 (0.36x), i.e. a ceiling BELOW the target, which
+    // comes back truncated. 4096 is the last one with full headroom.
+    expect(xReferencePostTarget('long', 1, 25000)).toBeLessThanOrEqual(4096);
+  });
+
+  it('gives REPLIES a ladder about a third the size', () => {
+    // A reply is a reply. Several thousand characters aimed at someone else's
+    // post is a different social act from a long-form original.
+    expect(outputLengthForLength('x', 'short', 25000)).toBe(200);
+    expect(outputLengthForLength('x', 'medium', 25000)).toBe(600);
+    expect(outputLengthForLength('x', 'long', 25000)).toBe(2000);
+    // Every rung strictly below the original-post rung of the same name.
+    for (const tier of ['short', 'medium', 'long'] as const) {
+      expect(outputLengthForLength('x', tier, 25000)).toBeLessThan(
+        xReferencePostTarget(tier, 1, 25000)
+      );
+    }
+  });
+
+  it('leaves every free-tier caller exactly where it was', () => {
+    expect(xReferencePostTarget('short', 1)).toBe(65);
+    expect(xReferencePostTarget('medium', 1)).toBe(130);
+    expect(xReferencePostTarget('long', 1)).toBe(X_WEIGHTED_CHAR_LIMIT);
+    expect(outputLengthForLength('x', 'short')).toBe(120);
+    expect(outputLengthForLength('x', 'medium')).toBe(200);
+    expect(outputLengthForLength('x', 'long')).toBe(255);
+  });
+
+  it('leaves the unattended auto-reply driver on the free tier', () => {
+    // engage-auto-reply.service.ts calls this WITHOUT a ceiling, and the
+    // operation-plan track is deliberately outside this feature: it generates
+    // ahead of time and the browser may have switched X accounts by then.
+    expect(outputLengthForLength('x', 'long')).toBe(255);
+    expect(outputLengthForLength('twitter', 'long')).toBe(255);
+  });
+
+  it('does not widen reply targets on other platforms', () => {
+    expect(outputLengthForLength('reddit', 'long', 25000)).toBe(
+      outputLengthForLength('reddit', 'long')
+    );
+  });
+
+  it('keeps a thread a thread on a long-form account', () => {
+    // Every part is still an individual post readers scroll through, and
+    // someone who wanted one long post would not have asked for a thread.
+    expect(xReferencePostTarget('long', 4, 25000)).toBe(
+      xReferencePostTarget('long', 4)
+    );
+  });
+
+  it('snaps a requested length onto the ladder in force for the account', () => {
+    // Without the ceiling, 1500 would read as `long` (>= 260) on an account
+    // whose `long` is really 4096.
+    expect(xReferencePostTierFor(1500, 1, 25000)).toBe('medium');
+    expect(xReferencePostTierFor(4096, 1, 25000)).toBe('long');
+    expect(xReferencePostTierFor(1500, 1)).toBe('long');
+  });
+
+  it('steps DOWN the account"s own ladder on a retry', () => {
+    // Handing a long-form generation the free tier's 130 would not be a
+    // downgrade, it would be a collapse.
+    expect(downgradedReferencePostTarget('x', 4096, 25000)).toBe(1500);
+    expect(downgradedReferencePostTarget('x', 1500, 25000)).toBe(280);
+    expect(downgradedReferencePostTarget('x', 280, 25000)).toBeNull();
+    // Unchanged for a free account.
+    expect(downgradedReferencePostTarget('x', 260)).toBe(130);
+  });
+
+  it('raises the hard ceiling to the account ceiling', () => {
+    expect(platformHardCeilingFor('x', 25000)).toBe(25000);
+    // 12500 Han = 25000 weighted = MEASURED as the last draft X's Post button
+    // still enabled for.
+    expect(() =>
+      assertDraftWithinPlatformLimit('x', '中'.repeat(12500), 25000)
+    ).not.toThrow();
+    expect(() =>
+      assertDraftWithinPlatformLimit('x', '中'.repeat(12501), 25000)
+    ).toThrow(/25000/);
+  });
+
+  it('never lets an account ceiling LOWER what X already allows', () => {
+    // A garbled or under-reported reading must not start refusing ordinary
+    // 280-character posts that have always been publishable.
+    expect(platformHardCeilingFor('x', 0)).toBe(X_HARD_CHAR_LIMIT);
+    expect(platformHardCeilingFor('x', 100)).toBe(X_HARD_CHAR_LIMIT);
+  });
+
+  it('does not touch any other platform', () => {
+    expect(platformHardCeilingFor('reddit', 25000)).toBe(REDDIT_HARD_CHAR_LIMIT);
+    expect(() =>
+      assertDraftWithinPlatformLimit('reddit', 'a'.repeat(2001), 25000)
+    ).toThrow(/2000/);
   });
 });

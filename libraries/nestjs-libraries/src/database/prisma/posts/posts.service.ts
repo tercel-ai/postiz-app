@@ -2067,6 +2067,15 @@ export class PostsService {
     return this._postRepository.logError(id, err, body);
   }
 
+  async logRetryableFailure(
+    id: string,
+    platform?: string,
+    err?: any,
+    body?: any
+  ) {
+    return this._postRepository.logRetryableFailure(id, platform, err, body);
+  }
+
   async changeState(id: string, state: State, err?: any, body?: any) {
     // For recurring posts, don't set ERROR on the original — it needs to stay
     // QUEUE so that subsequent scheduled sends can proceed. The error is

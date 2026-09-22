@@ -154,6 +154,11 @@ describe('EngageService.generateReferencePost', () => {
         outputLength: 260,
         thread: false,
         maxThreadParts: undefined,
+        // The X account's post ceiling, resolved per request. 280 here because
+        // this build wires no integration service, which is the same fallback
+        // an org with no reported reading gets — X's free tier, and the safe
+        // direction to be wrong in.
+        maxWeighted: 280,
         signal: undefined,
       }
     );
@@ -177,6 +182,41 @@ describe('EngageService.generateReferencePost', () => {
         usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 },
       },
     ]);
+  });
+
+  it("writes to the ACCOUNT's ceiling when the request carries one", async () => {
+    // X grants 280 weighted characters without a subscription and 25000 with
+    // one, so the same request has to produce a different post depending on
+    // which account will publish it. The web app reads that live from the
+    // extension and sends it; nothing here looks it up.
+    const { service, referencePost } = buildService();
+
+    await service.generateReferencePost(ORG, 'user1', 'opp1', {
+      ...GEN_DTO,
+      maxWeighted: 25000,
+    });
+
+    expect(referencePost.generate).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ maxWeighted: 25000 })
+    );
+  });
+
+  it('ignores a ceiling past anything X grants', async () => {
+    // Client-supplied, so it is bounded rather than trusted: a value outside
+    // the range X is known to hand out is a bug or a stale client, never a more
+    // generous account, and honouring it would write a post that cannot send.
+    const { service, referencePost } = buildService();
+
+    await service.generateReferencePost(ORG, 'user1', 'opp1', {
+      ...GEN_DTO,
+      maxWeighted: 1_000_000,
+    });
+
+    expect(referencePost.generate).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ maxWeighted: 280 })
+    );
   });
 
   it('still returns the generated text when billing itself fails (best-effort)', async () => {

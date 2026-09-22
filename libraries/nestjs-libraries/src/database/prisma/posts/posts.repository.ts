@@ -1989,6 +1989,53 @@ export class PostsRepository {
     } catch (_) {}
   }
 
+  /**
+   * Log a failure WITHOUT touching Post.state — for retryable failures where
+   * the queue item stays exactly as it was and may still succeed on a later
+   * poll (engage's extension replies, currently). Deliberately NOT logError:
+   * that method reads platform off `post.integration.providerIdentifier`,
+   * which throws for any post with no bound integration — routine for
+   * extension-posted rows (browser-session platforms), whose platform lives
+   * on `providerIdentifier` instead (see that column's comment on the Post
+   * model). Falls back to the caller-supplied `platform` only if neither
+   * column has one.
+   */
+  async logRetryableFailure(
+    id: string,
+    platform: string | undefined,
+    err?: any,
+    body?: any
+  ) {
+    const errorMessage = err ? this.extractErrorMessage(err) : undefined;
+    const post = await this._post.model.post.findUnique({
+      where: { id },
+      select: {
+        organizationId: true,
+        providerIdentifier: true,
+        integration: { select: { providerIdentifier: true } },
+      },
+    });
+    if (!post) return;
+
+    try {
+      await this._errors.model.errors.create({
+        data: {
+          message: errorMessage || '',
+          organizationId: post.organizationId,
+          platform:
+            post.integration?.providerIdentifier ||
+            post.providerIdentifier ||
+            platform ||
+            'unknown',
+          postId: id,
+          body: body
+            ? typeof body === 'string' ? body : JSON.stringify(body)
+            : '',
+        },
+      });
+    } catch (_) {}
+  }
+
   async changeDate(orgId: string, id: string, date: string) {
     return this._post.model.post.update({
       where: {

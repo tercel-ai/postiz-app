@@ -1,4 +1,8 @@
 import {
+  X_FREE_MAX_WEIGHTED,
+  X_SUBSCRIBED_MAX_WEIGHTED,
+} from '@gitroom/nestjs-libraries/integrations/x-account-ceiling';
+import {
   ArrayMaxSize,
   ArrayMinSize,
   IsArray,
@@ -1113,6 +1117,29 @@ export class GenerateDraftDto {
   @Type(() => Number)
   outputLength?: number;
 
+  /**
+   * The X ACCOUNT's own post ceiling in WEIGHTED characters — 280 without a
+   * subscription, 25000 with one (measured 2026-09-22).
+   *
+   * Sent by the web app, which reads it live from the browser extension over
+   * the social-sessions bridge (`XSessionInfo.maxWeighted`). It is NOT stored
+   * server-side: the only client that generates is the one already holding the
+   * current value, so a copy here could only ever be staler.
+   *
+   * Absent means "not known", which resolves to X's free-tier 280 — the limit
+   * every X account has, and the safe direction to be wrong in. Bounded rather
+   * than trusted: a value outside the range X is known to grant is a bug or a
+   * stale client, not a more generous account.
+   *
+   * Ignored on every other platform, which have ceilings of their own.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(X_FREE_MAX_WEIGHTED)
+  @Max(X_SUBSCRIBED_MAX_WEIGHTED)
+  @Type(() => Number)
+  maxWeighted?: number;
+
   // Reply length tier — the credit-pricing dimension (Short/Medium/Long →
   // base × multiplier). Also drives the generation target when outputLength is
   // not given explicitly. Defaults to 'medium' server-side when omitted.
@@ -1283,6 +1310,29 @@ export class GenerateReferencePostDto {
   @Min(2)
   @Type(() => Number)
   outputLength?: number;
+
+  /**
+   * The X ACCOUNT's own post ceiling in WEIGHTED characters — 280 without a
+   * subscription, 25000 with one (measured 2026-09-22).
+   *
+   * Sent by the web app, which reads it live from the browser extension over
+   * the social-sessions bridge (`XSessionInfo.maxWeighted`). It is NOT stored
+   * server-side: the only client that generates is the one already holding the
+   * current value, so a copy here could only ever be staler.
+   *
+   * Absent means "not known", which resolves to X's free-tier 280 — the limit
+   * every X account has, and the safe direction to be wrong in. Bounded rather
+   * than trusted: a value outside the range X is known to grant is a bug or a
+   * stale client, not a more generous account.
+   *
+   * Ignored on every other platform, which have ceilings of their own.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(X_FREE_MAX_WEIGHTED)
+  @Max(X_SUBSCRIBED_MAX_WEIGHTED)
+  @Type(() => Number)
+  maxWeighted?: number;
 
   @IsOptional()
   @IsString()

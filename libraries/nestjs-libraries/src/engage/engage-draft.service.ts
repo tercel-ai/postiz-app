@@ -123,6 +123,39 @@ const REDDIT_COMMUNITY_GUARDRAILS = `Reddit rules (these OVERRIDE the brand inst
 - No low-effort comments: a bare agreement, a restatement of the post, or a generic tip is removed as spam on the larger subreddits.
 - At most one external link, only when it is not yours and genuinely helps. Two links, or one of your own, reads as promotion.`;
 
+/**
+ * Output-token budget for one reply draft, derived from the length actually
+ * asked for.
+ *
+ * This used to be a hardcoded 400, which was fine while every reply target sat
+ * under 260 characters and became wrong the moment a subscribed X account
+ * could be written for at 2000: the prompt would ask for a long reply and the
+ * response would be cut off mid-sentence, having been charged for.
+ *
+ * Two characters per token, sized for CJK where a character can cost MORE than
+ * one token — the same rate, and the same reasoning, as
+ * TOKENS_PER_CEILING_CHARACTER in the reference-post service: a budget tuned to
+ * English truncates every Chinese draft.
+ *
+ * The 400 floor is kept so nothing gets SMALLER than it was, and the reasoning
+ * reserve is added unconditionally because both OpenRouter and the Anthropic
+ * SDK charge a reasoning model's hidden thinking against `max_tokens` — with
+ * one of those configured, a bare 400 is spent entirely on thinking and the
+ * request returns no draft at all. `max_tokens` is a ceiling, so unused
+ * headroom is never billed.
+ */
+const REPLY_TOKENS_PER_CHARACTER = 2;
+const REPLY_MIN_OUTPUT_TOKENS = 400;
+const REPLY_REASONING_TOKEN_RESERVE = 4000;
+
+function replyMaxTokens(outputLimit: number): number {
+  const forContent = Math.max(
+    REPLY_MIN_OUTPUT_TOKENS,
+    Math.ceil((outputLimit || 0) * REPLY_TOKENS_PER_CHARACTER)
+  );
+  return forContent + REPLY_REASONING_TOKEN_RESERVE;
+}
+
 @Injectable()
 export class EngageDraftService {
   private readonly logger = new Logger(EngageDraftService.name);
@@ -158,6 +191,13 @@ export class EngageDraftService {
     mentions?: string[],
     signal?: AbortSignal,
     outputLength?: number,
+    /**
+     * The X ACCOUNT's own ceiling in weighted units, when the caller resolved
+     * one. Only the hard-reject threshold uses it — the prompt still TARGETS
+     * `outputLength`. Absent means X's free-tier 280, which is what the
+     * unattended auto-reply driver gets.
+     */
+    maxWeighted?: number,
   ): AsyncGenerator<string> {
     const platform = normalizePlatform(opportunity.platform);
     const outputLimit = outputLength ?? defaultOutputLimitForPlatform(platform);
@@ -190,7 +230,15 @@ export class EngageDraftService {
       // (e.g. 65) must not fail the whole generation when the model returns a
       // slightly longer but still platform-valid reply; the model rarely hits a
       // tight target exactly, and a usable reply beats a hard error.
-      const hardLimit = Math.max(outputLimit, X_HARD_CHAR_LIMIT);
+      // The ceiling is the ACCOUNT's, not X's: a subscribed account is
+      // targeted at 2000 weighted characters, and `Math.max(outputLimit, 280)`
+      // would then hard-reject at exactly the target — destroying the slack
+      // this split exists to provide, and failing a reply that overran by one
+      // character after burning its retry.
+      const hardLimit = Math.max(
+        outputLimit,
+        maxWeighted ?? X_HARD_CHAR_LIMIT
+      );
       yield* this._generateDraftWithConstraints({
         systemPrompt,
         userPrompt,
@@ -199,6 +247,7 @@ export class EngageDraftService {
         isWithinLimit: (draft) => weightedLength(draft) <= hardLimit,
         allowLengthRetry: true,
         requiredMentions,
+        outputLimit,
         signal,
       });
     } else if (platform === "reddit") {
@@ -213,6 +262,7 @@ export class EngageDraftService {
         isWithinLimit: (draft) => draft.length <= hardLimit,
         allowLengthRetry: false,
         requiredMentions,
+        outputLimit,
         signal,
       });
     } else {
@@ -225,6 +275,7 @@ export class EngageDraftService {
         isWithinLimit: () => true,
         allowLengthRetry: false,
         requiredMentions,
+        outputLimit,
         signal,
       });
     }
@@ -245,6 +296,8 @@ export class EngageDraftService {
     isWithinLimit: (draft: string) => boolean;
     allowLengthRetry: boolean;
     requiredMentions: string[];
+    /** The requested length, which sizes the model's output budget. */
+    outputLimit: number;
     signal?: AbortSignal;
   }): AsyncGenerator<string> {
     const {
@@ -255,6 +308,7 @@ export class EngageDraftService {
       isWithinLimit,
       allowLengthRetry,
       requiredMentions,
+      outputLimit,
       signal,
     } = options;
 
@@ -265,7 +319,12 @@ export class EngageDraftService {
     let draft = "";
 
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      draft = await this._generateRaw(attemptSystemPrompt, userPrompt, signal);
+      draft = await this._generateRaw(
+        attemptSystemPrompt,
+        userPrompt,
+        signal,
+        replyMaxTokens(outputLimit)
+      );
 
       const overLimit = !isWithinLimit(draft);
       const missingMention =
@@ -333,12 +392,23 @@ export class EngageDraftService {
     systemPrompt: string,
     userPrompt: string,
     signal?: AbortSignal,
+    maxTokens: number = replyMaxTokens(0),
   ): Promise<string> {
     if (this.useOpenRouter && this.openRouterClient) {
-      return this._generateViaOpenRouter(systemPrompt, userPrompt, signal);
+      return this._generateViaOpenRouter(
+        systemPrompt,
+        userPrompt,
+        signal,
+        maxTokens,
+      );
     }
     if (this.anthropicClient) {
-      return this._generateViaAnthropic(systemPrompt, userPrompt, signal);
+      return this._generateViaAnthropic(
+        systemPrompt,
+        userPrompt,
+        signal,
+        maxTokens,
+      );
     }
     throw new Error(
       "No LLM provider configured. Set OPENROUTER_API_KEY or ANTHROPIC_API_KEY.",
@@ -349,12 +419,13 @@ export class EngageDraftService {
     systemPrompt: string,
     userPrompt: string,
     signal?: AbortSignal,
+    maxTokens: number = replyMaxTokens(0),
   ): Promise<string> {
     const generate = (model: string) =>
       this.openRouterClient!.chat.completions.create(
         {
           model,
-          max_tokens: 400,
+          max_tokens: maxTokens,
           messages: [
             { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt },
@@ -401,11 +472,12 @@ export class EngageDraftService {
     systemPrompt: string,
     userPrompt: string,
     signal?: AbortSignal,
+    maxTokens: number = replyMaxTokens(0),
   ): Promise<string> {
     const response = await this.anthropicClient!.messages.create(
       {
         model: "claude-sonnet-4-6",
-        max_tokens: 400,
+        max_tokens: maxTokens,
         system: systemPrompt,
         messages: [{ role: "user", content: userPrompt }],
       },

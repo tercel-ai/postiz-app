@@ -147,6 +147,7 @@ import { socialIntegrationList } from '@gitroom/nestjs-libraries/integrations/in
 import { referencePostTitle } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { titleFromSettings } from '@gitroom/nestjs-libraries/database/prisma/posts/settings-title';
 import { normalizeEngagePlatform } from '@gitroom/nestjs-libraries/engage/engage-draft-length';
+import { resolveRequestedXCeiling } from '@gitroom/nestjs-libraries/integrations/x-account-ceiling';
 import {
   fetchRedditAuthorProfile,
   EngageAuthorProfile,
@@ -1336,6 +1337,43 @@ export class EngageService implements OnApplicationBootstrap {
   }
 
   /**
+   * The extension reporting an ORDINARY (retryable) send failure — signed
+   * out, rate limited, a selector that moved, a transient network error.
+   * Unlike closeUnconfirmedReply/markOpportunity*, this makes no claim the
+   * reply is unrecoverable: the record is left exactly as it was (still
+   * QUEUE, still offered on the next poll) and — deliberately, see
+   * _notifyRepliesFailed's comment on closeUnconfirmedReply — no
+   * notification-centre event fires, because the failure it would announce
+   * has not actually happened yet.
+   *
+   * Purely a telemetry sink: before this, every failure that was not
+   * target-gone/replies-disabled was invisible to the backend. Each attempt
+   * now lands in the same Errors table the core publish pipeline already
+   * writes to, so failure-rate stats (by platform/org) work for engage the
+   * same way they already do for everything else.
+   */
+  async reportReplyFailed(
+    org: Organization,
+    sentReplyId: string,
+    platform?: string,
+    reason?: string
+  ) {
+    const ctx = await this._engageRepository.getSentReplyContext(
+      org.id,
+      sentReplyId
+    );
+    if (!ctx) throw new NotFoundException('Sent reply not found');
+
+    await this._postsService.logRetryableFailure(
+      ctx.postId,
+      platform || ctx.platform || undefined,
+      reason || 'reply failed'
+    );
+
+    return { ok: true };
+  }
+
+  /**
    * The extension reporting a send that fired but was never confirmed, so the
    * record is closed rather than re-offered. See closeUnconfirmedReply for why
    * closing beats leaving it queued.
@@ -1741,6 +1779,18 @@ export class EngageService implements OnApplicationBootstrap {
       const result = await this._referencePostService.generate(opportunity, {
         strategy: dto.strategy,
         targetPlatform,
+        // Carried by the REQUEST, not looked up: the only client that
+        // generates is the web app, which already holds this account's live
+        // ceiling from the extension over the social-sessions bridge
+        // (XSessionInfo.maxWeighted). A server-side copy would only be a
+        // staler version of what the caller just read from the browser.
+        //
+        // Client-supplied, so it is bounded on the way in — see
+        // resolveRequestedXCeiling. Only consulted when the target is x; every
+        // other platform has a ceiling of its own and ignores this.
+        ...(targetPlatform === 'x'
+          ? { maxWeighted: resolveRequestedXCeiling(dto.maxWeighted) }
+          : {}),
         sourceAdaptation,
         brandStrength: dto.brandStrength,
         mentions: dto.mentions,

@@ -49,9 +49,11 @@ function build(overrides: Record<string, any> = {}) {
     ...overrides,
   };
   const draftService = {
-    generateDraft: overrides.generateDraft ?? (async function* () {
-      yield 'hello world';
-    }),
+    generateDraft: overrides.generateDraft
+      ? vi.fn(overrides.generateDraft)
+      : vi.fn(async function* () {
+          yield 'hello world';
+        }),
   };
   const controller = new EngageController(
     engageService as any,
@@ -61,7 +63,7 @@ function build(overrides: Record<string, any> = {}) {
     {} as any,
     {} as any
   );
-  return { controller, engageService };
+  return { controller, engageService, draftService };
 }
 
 const ORG = { id: 'org1' } as any;
@@ -210,5 +212,132 @@ describe('EngageController.generateDraft — billing contract', () => {
 
     expect(engageService.settleReplyGeneration).not.toHaveBeenCalled();
     expect(engageService.releaseReplyGeneration).toHaveBeenCalledWith('t1');
+  });
+});
+
+// X's post ceiling is a property of the ACCOUNT's subscription — 280 weighted
+// characters without one, 25000 with one — so the same reply request has to be
+// written to a different length depending on which account will send it.
+describe('EngageController.generateDraft — the account ceiling', () => {
+  it('writes a long reply to the account"s own ceiling', async () => {
+    const { controller, draftService } = build();
+    const { res } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateDraft(
+      ORG,
+      'opp1',
+      { ...BODY, length: 'long', maxWeighted: 25000 },
+      req,
+      res
+    );
+
+    // generateDraft(opportunity, strategy, brandStrength, mentions, signal, outputLength)
+    const outputLength = draftService.generateDraft.mock.calls[0][5];
+    // The REPLY ladder (200/600/2000), not the original-post one (280/1500/
+    // 4096): a reply aimed at someone else's post is a different social act.
+    expect(outputLength).toBe(2000);
+  });
+
+  it('keeps a free account on the tier it has always had', async () => {
+    const { controller, draftService } = build();
+    const { res } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateDraft(
+      ORG,
+      'opp1',
+      { ...BODY, length: 'long' },
+      req,
+      res
+    );
+
+    expect(draftService.generateDraft.mock.calls[0][5]).toBe(255);
+  });
+
+  it('still honours an explicit outputLength over the tier', async () => {
+    // The field is the caller saying what it wants; the ceiling only decides
+    // what a TIER means when no number was given.
+    const { controller, draftService } = build();
+    const { res } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateDraft(
+      ORG,
+      'opp1',
+      { ...BODY, length: 'long', outputLength: 400, maxWeighted: 25000 },
+      req,
+      res
+    );
+
+    expect(draftService.generateDraft.mock.calls[0][5]).toBe(400);
+  });
+
+  it('does not reject a long reply the account can actually send', async () => {
+    // The gate and the target must be fed the SAME ceiling. Told 3000 and then
+    // judged against 280, every long reply on a subscribed account would fail
+    // after it had already been generated and charged for.
+    const { controller, engageService } = build({
+      generateDraft: async function* () {
+        yield 'a'.repeat(2000);
+      },
+    });
+    const { res } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateDraft(
+      ORG,
+      'opp1',
+      { ...BODY, length: 'long', maxWeighted: 25000 },
+      req,
+      res
+    );
+
+    expect(engageService.settleReplyGeneration).toHaveBeenCalledTimes(1);
+    expect(engageService.releaseReplyGeneration).not.toHaveBeenCalled();
+  });
+
+  it('hands the draft service the ceiling, not just the target', async () => {
+    // The service hard-rejects above max(target, ceiling). Given only the
+    // target, a 2000-character reply would be rejected at exactly 2000 —
+    // destroying the slack that split exists for, and failing a reply that
+    // overran by one character after it had burned its retry.
+    const { controller, draftService } = build();
+    const { res } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateDraft(
+      ORG,
+      'opp1',
+      { ...BODY, length: 'long', maxWeighted: 25000 },
+      req,
+      res
+    );
+
+    // generateDraft(opportunity, strategy, brandStrength, mentions, signal,
+    //               outputLength, maxWeighted)
+    expect(draftService.generateDraft.mock.calls[0][6]).toBe(25000);
+  });
+});
+
+describe('EngageController.generateDraft — an untrusted ceiling', () => {
+  it('ignores a ceiling past anything X grants', async () => {
+    // The value is CLIENT-supplied. One outside the range X is known to hand
+    // out is a bug, a stale client or a forged body — never a more generous
+    // account — and honouring it would write a reply that cannot be sent.
+    const { controller, draftService } = build();
+    const { res } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateDraft(
+      ORG,
+      'opp1',
+      { ...BODY, length: 'long', maxWeighted: 1_000_000 },
+      req,
+      res
+    );
+
+    expect(draftService.generateDraft.mock.calls[0][5]).toBe(255);
+    expect(draftService.generateDraft.mock.calls[0][6]).toBe(280);
   });
 });

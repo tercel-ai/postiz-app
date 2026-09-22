@@ -42,6 +42,7 @@ import {
 } from '@gitroom/nestjs-libraries/dtos/engage/scan-ingest.dto';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
 import { TooSimilarToReferenceError } from '@gitroom/nestjs-libraries/engage/engage-reference-post.service';
+import { resolveRequestedXCeiling } from '@gitroom/nestjs-libraries/integrations/x-account-ceiling';
 import {
   assertDraftWithinPlatformLimit,
   outputLengthForLength,
@@ -926,9 +927,19 @@ export class EngageController {
         opportunity.id
       );
 
+      // X's ceiling belongs to the ACCOUNT's subscription — 280 weighted
+      // characters without one, 25000 with one — and it rides in on the
+      // request: the web app reads it live from the extension over the
+      // social-sessions bridge, so there is nothing server-side that could know
+      // it better. Bounded here rather than trusted, and fed to BOTH the target
+      // and the gate below — feeding only one of them would either write a
+      // reply the gate then rejects, or reject a reply this account could
+      // perfectly well have sent.
+      const maxWeighted = resolveRequestedXCeiling(body.maxWeighted);
+
       const outputLength =
         body.outputLength ??
-        outputLengthForLength(opportunity.platform, length);
+        outputLengthForLength(opportunity.platform, length, maxWeighted);
 
       let draft = '';
       for await (const chunk of this._engageDraftService.generateDraft(
@@ -937,7 +948,8 @@ export class EngageController {
         body.brandStrength,
         body.mentions,
         abortController.signal,
-        outputLength
+        outputLength,
+        maxWeighted
       )) {
         if (abortController.signal.aborted) break;
         draft += chunk;
@@ -946,7 +958,7 @@ export class EngageController {
         // Client gone mid-stream — uncount the reservation; nothing delivered.
         await this._engageService.releaseReplyGeneration(reservation.taskId);
       } else {
-        assertDraftWithinPlatformLimit(opportunity.platform, draft);
+        assertDraftWithinPlatformLimit(opportunity.platform, draft, maxWeighted);
         // Settle only after a successful, non-aborted generation (spec §3.3).
         // Best-effort: a billing hiccup must not fail an already-produced draft —
         // the reservation stays counted (status reserved/unbilled) so the cap holds.
@@ -1566,6 +1578,25 @@ export class EngageController {
       org,
       id,
       body.reason || 'the platform never showed the reply'
+    );
+  }
+
+  @ApiOperation({
+    summary:
+      'Report an ORDINARY (retryable) reply-send failure — for failure-rate stats only. Does NOT close the record or notify the user: it stays QUEUE and may be retried on the next poll.',
+  })
+  @ApiResponse({ status: 404, description: 'Sent reply not found' })
+  @Post('/sent/:id/failed')
+  reportReplyFailed(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Body() body: ReportTargetGoneDto
+  ) {
+    return this._engageService.reportReplyFailed(
+      org,
+      id,
+      body.platform,
+      body.reason
     );
   }
 

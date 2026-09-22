@@ -12,6 +12,7 @@ X and Reddit. This is the entry point to all Engage docs.
 | [`api.md`](./api.md) | Dev / Integrators | All `/engage/*` REST endpoints with request/response shapes. |
 | [`../operation-plan-api.md`](../operation-plan-api.md) | Dev / Integrators | `POST /projects/{projectId}/operation-plans` and `GET /operation-plans/{id}` request/response contracts. |
 | [`config-response-reference.md`](./config-response-reference.md) | Dev / Frontend | Field-by-field reference for `GET /engage/config` — plan limits, usage, reply credits, scan timing. |
+| [`reply-metrics-reference.md`](./reply-metrics-reference.md) | **Dev / Frontend** | Field-by-field reference for the `post.metrics` object on `/engage/sent` — the platform key matrix (X / Reddit / HN / Dev.to / fallback), how each key is derived, `visibility` semantics, and why an all-zero object usually means "never synced". |
 | [`startup-checklist.md`](./startup-checklist.md) | **Ops** | Cold-start & upgrade deployment, env vars, Prisma schema push, Temporal workflow registration, smoke test. |
 | [`scripts.md`](./scripts.md) | **Ops / Dev** | Runbook for the 10 maintenance scripts, grouped by scenario (scanning, metrics repair, data-ticks). |
 | [`sync-metrics-script.md`](./sync-metrics-script.md) | Ops | Detailed output walkthrough for `engage-sync-metrics.ts`. |
@@ -34,6 +35,7 @@ X and Reddit. This is the entry point to all Engage docs.
 - **Operating it day-to-day** (sync metrics, trigger scans, repair data) → [`scripts.md`](./scripts.md)
 - **Turning the server-side X scan off / moving X reads to the extension** → [`x-tab-only-migration.md`](./x-tab-only-migration.md)
 - **Rendering an opportunity body on any surface** (links, mentions, images) → [`opportunity-content-rendering.md`](./opportunity-content-rendering.md)
+- **Rendering a sent reply's metrics** (which keys exist per platform, what a missing key means) → [`reply-metrics-reference.md`](./reply-metrics-reference.md)
 - **Adding a write endpoint, or tuning what a subscriber may push** → [`write-path-limits.md`](./write-path-limits.md)
 
 ## Common operational tasks (→ [`scripts.md`](./scripts.md))
@@ -61,3 +63,6 @@ X and Reddit. This is the entry point to all Engage docs.
   rows before joining the shared global cursor, so users do not wait for the 24h
   keyword cadence or miss recent posts already behind `reddit/keyword/__global__`.
 - Reddit public-JSON metric reads require a `loid` cookie to clear the WAF.
+- A reply's `post.metrics` key set is **platform-shaped**: only `trafficScore` and `visibility`
+  are present on every platform, and a key from another platform's branch is absent from the JSON
+  rather than `0`. `visibility: 'unknown'` means "never checked" and must not render as healthy.
