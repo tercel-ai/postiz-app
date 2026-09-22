@@ -74,7 +74,32 @@ Known gaps vs this design (tracked, not silently dropped):
   over-long draft recoverable, so a wrong tier costs an extra paid retry
   rather than a failure — but the numbers should be revisited once there is
   overrun data (the `(measured N)` in the assertion message exists partly so
-  the logs can answer that).
+  the logs can answer that). Revision 5 keeps them as the FREE-tier ladder and
+  adds a second one for subscribed accounts (§6.7), whose `long` is bounded by
+  the token budget rather than by X — that bound IS measured.
+- **The long-form send path is unverified end to end.** A subscribed account
+  can now be written for at 4096 weighted characters, but nothing has yet
+  confirmed the extension can fill and submit a draft that size: its composer
+  fill was tuned for 280-character posts and waits 6s for X's Post button.
+  Measure before enabling the wider ladder in a client.
+
+Design revision 5 (**the ceiling belongs to the ACCOUNT** — see §6.7):
+- X's post limit is not a constant. Two measurements a week apart disagreed:
+  280 weighted characters on 2026-09-15 (the session was not recorded) and
+  **25000** on 2026-09-22 (@aiperceivable). Whether that is one account
+  crossing a subscription or two different accounts is **not established** —
+  and does not need to be, since either reading refutes a fixed limit. Every
+  tier in revision 4 was sized against 280 because that was believed to be X's
+  number; it is the UNSUBSCRIBED number.
+- The ceiling arrives on the request as an optional `maxWeighted`. The web app
+  reads it live from the browser extension over the social-sessions bridge
+  (`XSessionInfo.maxWeighted`), which measures it from X's own composer ring
+  while publishing. Nothing is stored server-side — the only client that
+  generates is the one already holding the current value — so it is
+  client-supplied and bounded rather than trusted (`resolveRequestedXCeiling`).
+- A long-form account gets a WHOLE LADDER, not a widened `long`, and replies
+  get a separate one about a third the size. Absent, out-of-range or
+  unparseable all resolve to 280, which is the cheap direction to be wrong in.
 
 Design revision 3 (**cross-platform generation** — `a→any`):
 - `/generate-post` takes an optional `targetPlatform`. Omitting it is exactly
@@ -389,6 +414,7 @@ reply-draft composer already has:
 | `brandStrength` | `number` (0–3) | ✓ | Same brand-mention control as `/draft`, same mechanism (`engage-brand-instruction.ts`, shared with the reply flow) |
 | `mentions` | `string[]` (≤20) | | Optional brand names, used when `brandStrength` ≥ 2 |
 | `outputLength` | `integer` (≥ 2) | | Target length; same soft-target semantics as reply drafts |
+| `maxWeighted` | `integer` (280–25000) | | **X targets only.** The ACCOUNT's own post ceiling in weighted characters, read live from the browser extension (`XSessionInfo.maxWeighted`). Selects which tier ladder the generation uses — see §6.7. Omitted, out of range or non-numeric → 280, X's free tier |
 | `projectId` | `string` | | Optional project scope |
 | `targetPlatform` | `string` (one of `SCANNABLE_PLATFORMS`) | | The platform the post is WRITTEN FOR. Omitted → the opportunity's own platform (the original a→a behaviour). Supplied → an a→any generation: the character budget, the format rules, the house style, the draft's `providerIdentifier` and its `Post.settings` all come from the TARGET, while the opportunity stays the reference (`settings.referenceOpportunity.platform` keeps naming the SOURCE). Thread capability follows the target too, so `thread: true` for a `medium`/`quora`/`devto` target degrades to a single post rather than 400-ing. See §6.4 |
 | `sourceAdaptation` | `PRESERVE_STRUCTURE` \| `REFRAME` \| `FRESH_ANGLE` | | How closely the post may follow the reference; default `REFRAME`. A separate axis from `strategy` — that picks the voice, this picks the distance from the source. No mode relaxes the anti-plagiarism gate. See §6.3 |
@@ -1169,6 +1195,131 @@ many independent points the reference carries, not by `length / target`, which
 on a 5000-character essay computes 22 posts against a ceiling of 5 and fills
 the difference with padding. If this is ever wanted, the shape is a SUGGESTED
 count returned to the client, decided before generation by the user.
+
+### 6.7 The ceiling belongs to the account, not to X
+
+Every number in §6.6 is sized against 280 weighted characters. That is not X's
+limit — it is the limit of an account with no subscription. Measured on one
+account a week apart by filling x.com's composer and reading its countdown ring
+together with the Post button's `aria-disabled`:
+
+| input | ring `aria-valuenow` | Post button |
+|---|---|---|
+| 280 Latin characters | 1% | enabled |
+| 2500 Latin / 2500 Han | 9% / 19% | enabled |
+| 12500 Han (= 25000 weighted) | 100% | **enabled** |
+| 12501 Han (= 25002 weighted) | 100% | **disabled** |
+
+Only the ceiling moves. 2500 Han read the same 19% as 5000 Latin, so CJK still
+weighs 2 at 25000, and the boundary is still inclusive — `weightedLength` and
+every rule in §6.6 stay correct against a different number.
+
+**Where the number comes from.** Nothing server-side can look it up, and the
+checkmark cannot substitute for it. Per X's published plan comparison, **all
+three paid tiers include 25000-character posts, but Basic carries no
+checkmark**:
+
+| tier | checkmark (`verified_type`) | 25000-char posts |
+|---|---|---|
+| Free | `none` | no |
+| **Basic** | **`none`** | **yes** |
+| Premium | `blue` | yes |
+| Premium+ | `blue` | yes |
+
+So the implication runs one way only: a checkmark DOES imply the long-post
+grant, but its absence does not imply the free tier. Inferring the ceiling from
+`verified` therefore under-serves every Basic subscriber — the safe direction,
+but wrong — and `verified_type` cannot separate Free from Basic at all, since
+both report `none`. The same defect exists in the OAuth send path today
+(`x.provider.ts`'s `maxLength(verified)` returns 280 for a Basic account, and
+4000 rather than 25000 for a verified one). The
+browser extension measures it from the composer ring as a by-product of
+publishing and hands it to the web app over the social-sessions bridge
+(`XSessionInfo.maxWeighted`); the app passes it down as an optional
+`maxWeighted` on `POST /generate-post` and `POST /:id/draft`.
+
+It is therefore **client-supplied**, and treated as such: `@Min(280)
+@Max(25000)` at the DTO and re-checked by `resolveRequestedXCeiling`, which
+resolves absent, out-of-range, fractional-below-bound and non-numeric all to
+280. It is deliberately NOT stored server-side — the only client that generates
+is the one already holding the live value, so a copy here could only ever be a
+staler version of what the caller just read from the browser, with an expiry
+policy to maintain for the privilege. The blast radius of a wrong value is one
+wasted generation for the org that sent it, and the extension's own gate at
+publish time is the real backstop.
+
+**Two ladders, not one widened tier**
+(`X_LONG_FORM_REFERENCE_POST_TARGETS` / `X_LONG_FORM_REPLY_TARGETS`):
+
+| Tier | Original post | Reply | free-tier equivalent (post / reply) |
+|---|---|---|---|
+| `short` | 280 | 200 | 65 / 120 |
+| `medium` | 1500 | 600 | 130 / 200 |
+| `long` | **4096** | **2000** | 260 / 255 |
+
+Moving only `long` was tried first and is wrong: it leaves a 30x hole between
+`medium` (130) and `long` that no picker setting can land in. And replies are
+about a third of an original post throughout — several thousand characters
+aimed at someone else's post is a different social act, and nobody choosing
+"long reply" is asking for an essay.
+
+`short` at 280 is one full standard tweet: the ceiling a free account lives
+under, and the length everyone already recognises as "a post".
+
+**Why `long` is 4096 and not 25000**, which is what the account can actually
+publish: `long` is bounded by what the request can PAY to produce, not by what
+X accepts. `resolveGenerationBudget` derives `max_tokens` from the target and
+states a ceiling back to the model at `TOKENS_PER_CEILING_CHARACTER`; with
+`MAX_TOKENS_PER_POST` at 16384 that stated ceiling stops growing at 8192
+characters. Across the real curve, single post:
+
+| target | stated ceiling | `max_tokens` | headroom |
+|---|---|---|---|
+| 3000 | 6000 | 16000 | 2.00x |
+| **4096** | **8192** | **20384** | **2.00x** ← last full-headroom target |
+| 8192 | 8192 | 20384 | 1.00x |
+| 22500 | 8192 | 20384 | **0.36x** |
+
+At 22500 the prompt would name a ceiling BELOW the target it just asked for and
+the answer comes back truncated mid-sentence — the exact failure §6.4's budget
+derivation exists to prevent. Reaching it needs ~49000 output tokens, past
+`MAX_TOKENS_PER_REQUEST` (32000), itself set by the tightest model's 32768
+output cap. So 4096 is not a matter of taste: it is the largest target that
+keeps the 2x headroom every other number in this file is sized for.
+
+**The "leave 8-10% under the limit" rule does not transfer up here.** That gap
+exists because a model asked for 240 characters DRIFTS past it (measured:
+7/16 over 240, max 260 — see `platform-content-profile.ts`). At four thousand
+characters a model does not overrun, it stops early. A buffer sized for
+overshoot would be guarding a failure that does not happen at this scale, while
+the real risks — truncation and under-writing — are what the token budget above
+addresses.
+
+**Everything tier-keyed follows the account's own ladder.**
+`xReferencePostTierFor` snaps against the targets in force, so 1500 reads as
+`medium` on a subscribed account rather than as `long` (which it would be on
+the free ladder); `downgradedReferencePostTarget` steps 4096 → 1500 → 280 rather than
+collapsing to the free tier's 130, which would be an abandonment rather than a
+downgrade. A THREAD is unchanged at 220 per part on either ladder: every part
+is still an individual post a reader scrolls through, and someone who wanted
+one long post would not have asked for a thread.
+
+**The reply half needed two budgets moved to be real.** `engage-draft.service`
+had `max_tokens: 400` hardcoded in both the OpenRouter and Anthropic paths — a
+2000-character target would simply have been truncated — so it is now derived
+from the requested length at 2 tokens per character, floored at 400, plus a
+4000-token reasoning reserve (both SDKs charge a reasoning model's hidden
+thinking against `max_tokens`). And the reply's hard-reject was
+`max(outputLimit, X_HARD_CHAR_LIMIT)`, which gives the free tier 10% slack
+(255 target against a 280 reject) but a long-form account ZERO (2000 against
+2000) — rejecting at exactly the target, which is what that split exists to
+avoid. It now takes the account ceiling.
+
+**The unattended paths are deliberately excluded.** `engage-auto-reply.service`
+and the operation plan never resolve a ceiling and keep the free-tier ladder,
+because they generate ahead of time and the browser may have switched X
+accounts before the post is published — there is no account whose ceiling it
+would be correct to use.
 
 ## 7. Billing
 

@@ -2,10 +2,24 @@
 // subscription, not of X.
 //
 // MEASURED on x.com by filling the composer and reading its countdown ring plus
-// the Post button's aria-disabled: 280 weighted characters without a
-// subscription, 25000 with one. The same account read 280 on 2026-09-15 and
-// 25000 on 2026-09-22, having subscribed in between — so this is a moving fact
-// about a customer, not a constant to hardcode.
+// the Post button's aria-disabled: 280 weighted characters on an unsubscribed
+// account, 25000 on a subscribed one.
+//
+// Two readings a week apart disagreed: 280 on 2026-09-15 (the session was not
+// recorded) and 25000 on 2026-09-22 (@aiperceivable). Whether that is one
+// account crossing a subscription or two different accounts is NOT established
+// — the earlier note simply did not say which account it was. It does not need
+// to be: either way the ceiling is not a constant, which is the only thing this
+// module depends on.
+//
+// AND THE CHECKMARK CANNOT SUBSTITUTE FOR IT. Per X's published plan
+// comparison, all three paid tiers include 25000-character posts but Basic
+// carries no checkmark, so the implication runs one way only: a checkmark
+// implies the grant, its absence does not imply the free tier. X's API
+// `verified_type` (`none` | `blue` | `business` | `government`) cannot separate
+// Free from Basic at all — both report `none` — while the two tiers have
+// opposite long-post entitlements. That is why this is measured rather than
+// inferred.
 //
 // Nothing here can read it. X states the ceiling only in the logged-in web UI,
 // so the browser EXTENSION observes it as a by-product of publishing, keeps it
