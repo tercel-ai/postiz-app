@@ -828,6 +828,117 @@ describe('EngageRepository — two-table reads', () => {
       ]);
     });
 
+    // The whole point of a date search is that the list, the cards above it and
+    // the tab badges beside it agree. Each of those builds its own where-tree, so
+    // each is asserted separately — dropping the bounds in one of them is the
+    // failure mode, and it looks like a backend bug to the user, not a filter.
+    it('applies startDate/endDate as an exact publishDate window on the list', async () => {
+      const { repo, sentFindMany, sentCount, stateFindMany } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+      sentCount.mockResolvedValue(0);
+      stateFindMany.mockResolvedValue([]);
+
+      await repo.listSentReplies('org1', {
+        startDate: '2026-09-18',
+        endDate: '2026-09-18',
+      } as any);
+
+      const { publishDate } = sentFindMany.mock.calls[0][0].where.post;
+      expect(publishDate.gte.toISOString()).toBe('2026-09-18T00:00:00.000Z');
+      expect(publishDate.lt.toISOString()).toBe('2026-09-19T00:00:00.000Z');
+    });
+
+    it('carries the same window into /sent/stats', async () => {
+      const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
+      sentCount.mockResolvedValue(0);
+      postAggregate.mockResolvedValue({
+        _sum: { impressions: 0, trafficScore: 0 },
+      });
+      sentFindMany.mockResolvedValue([]);
+
+      await repo.getSentStats('org1', {
+        startDate: '2026-09-18',
+        endDate: '2026-09-18',
+      });
+
+      const { publishDate } = sentCount.mock.calls[0][0].where.post;
+      expect(publishDate.gte.toISOString()).toBe('2026-09-18T00:00:00.000Z');
+      expect(publishDate.lt.toISOString()).toBe('2026-09-19T00:00:00.000Z');
+    });
+
+    it('carries the same window into every count that backs the badges', async () => {
+      const { repo, sentCount } = buildRepo();
+      sentCount.mockResolvedValue(0);
+
+      await repo.countSentReplies('org1', {
+        startDate: '2026-09-18',
+        endDate: '2026-09-18',
+      } as any);
+
+      // Not just the first: byPlatform / rollups / awaitingBreakdown each build
+      // their own tree, and a badge counting all-time next to a one-day list is
+      // exactly the bug this guards.
+      expect(sentCount.mock.calls.length).toBeGreaterThan(1);
+      for (const [args] of sentCount.mock.calls) {
+        expect(args.where.post.publishDate.gte.toISOString()).toBe(
+          '2026-09-18T00:00:00.000Z'
+        );
+        expect(args.where.post.publishDate.lt.toISOString()).toBe(
+          '2026-09-19T00:00:00.000Z'
+        );
+      }
+    });
+
+    it('forwards the window from the counts-summary rollup', async () => {
+      const { repo, sentCount } = buildRepo();
+      sentCount.mockResolvedValue(0);
+
+      await repo.getSentCountsSummary('org1', {
+        startDate: '2026-09-18',
+        endDate: '2026-09-18',
+      } as any);
+
+      expect(
+        sentCount.mock.calls[0][0].where.post.publishDate.gte.toISOString()
+      ).toBe('2026-09-18T00:00:00.000Z');
+    });
+
+    it('locates a page under the same window the list used', async () => {
+      const { repo, sentFindFirst, sentCount } = buildRepo();
+      sentFindFirst.mockResolvedValue({
+        id: 's1',
+        post: { publishDate: new Date('2026-09-18T08:00:00.000Z') },
+      });
+      sentCount.mockResolvedValue(0);
+
+      await repo.locateSentReply('org1', {
+        sentReplyId: 's1',
+        startDate: '2026-09-18',
+        endDate: '2026-09-18',
+      } as any);
+
+      const { publishDate } = sentFindFirst.mock.calls[0][0].where.post;
+      expect(publishDate.gte.toISOString()).toBe('2026-09-18T00:00:00.000Z');
+      expect(publishDate.lt.toISOString()).toBe('2026-09-19T00:00:00.000Z');
+    });
+
+    it('lets an exact startDate override the rolling preset', async () => {
+      const { repo, sentFindMany, sentCount, stateFindMany } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+      sentCount.mockResolvedValue(0);
+      stateFindMany.mockResolvedValue([]);
+
+      await repo.listSentReplies('org1', {
+        date: 'month',
+        startDate: '2020-01-15',
+      } as any);
+
+      // ANDing the preset in would make every back-dated search return nothing.
+      expect(
+        sentFindMany.mock.calls[0][0].where.post.publishDate.gte.toISOString()
+      ).toBe('2020-01-15T00:00:00.000Z');
+    });
+
     it('selects lastMetricsFetchAt on every returned post', async () => {
       const { repo, sentFindMany, sentCount, stateFindMany } = buildRepo();
       sentFindMany.mockResolvedValue([]);
@@ -2106,7 +2217,7 @@ describe('EngageRepository — two-table reads', () => {
       sentFindMany.mockResolvedValue([]);
 
       // 'day' previously had no effect here (inline mapper only knew 'today');
-      // now both endpoints route through the shared _engageDateWindow.
+      // now both endpoints route through the shared `engageDateWindow`.
       await repo.getSentStats('org1', { date: 'day' });
 
       expect(sentCount.mock.calls[0][0].where.post.source).toBe('engage');

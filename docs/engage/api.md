@@ -40,7 +40,7 @@
   - [GET /extension-replies](#get-apienageextension-replies) — paginated history
   - [DELETE /extension-replies](#delete-apienageextension-replies) — clear history (all | 1d | 1w | 1m)
 - [Sent Replies — Sent Records](#sent-replies--sent-records)
-  - [GET /sent](#get-apienagesent) — paginated list (`status` rollups: `settled` = live+scheduled, `awaiting` = draft+manual+error; `awaiting-draft` / `awaiting-expired` / `awaiting-link` sub-filter the Awaiting-review tabs)
+  - [GET /sent](#get-apienagesent) — paginated list, `startDate`/`endDate` date search (`status` rollups: `settled` = live+scheduled, `awaiting` = draft+manual+error; `awaiting-draft` / `awaiting-expired` / `awaiting-link` sub-filter the Awaiting-review tabs)
   - [GET /sent/:id](#get-apienagesentid) — single sent reply item
   - [GET /sent/locate](#get-apienagesentlocate) — locate the page of a sentReplyId within /sent
   - [GET /sent/stats](#get-apienagesentstats) — aggregate stats
@@ -2154,9 +2154,26 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 | `projectId` | `string` | — | Optional project scope |
 | `platform` | `string` | — | Platform filter |
 | `status` | `'published' \| 'scheduled' \| 'manual' \| 'error' \| 'draft' \| 'settled' \| 'awaiting' \| 'awaiting-draft' \| 'awaiting-expired' \| 'awaiting-link'` | — | Status filter (see table below). `settled` and `awaiting` are combined rollups; `awaiting-draft` / `awaiting-expired` / `awaiting-link` are sub-filters of `awaiting` that back the Awaiting-review tabs (Drafts / Expired / Awaiting link). |
-| `date` | `all \| day \| today \| week \| month` | `all` | Publish-date window (`day`/`today` aliased) |
+| `date` | `all \| day \| today \| week \| month` | `all` | Rolling publish-date window (`day`/`today` aliased). Overridden by `startDate` |
+| `startDate` | ISO date or timestamp | — | Exact lower bound on `publishDate`. **Overrides** `date` |
+| `endDate` | ISO date or timestamp | — | Exact upper bound on `publishDate`. Combines with `date`/`startDate` |
 | `page` | `number` | `1` | Page number |
 | `limit` | `number` | `20` | Items per page, max 100 |
+
+**Date search (`startDate` / `endDate`)** — same param names and roles as [`GET /opportunities`](#get-apiengageopportunities), so one date control can drive either list. Both accept a bare day (`2026-09-18`) or a full timestamp (`2026-09-18T09:30:00Z`), and both resolve in **UTC** like every other date in Engage.
+
+| You want | Send |
+|---|---|
+| One day | `startDate=2026-09-18&endDate=2026-09-18` |
+| A range | `startDate=2026-09-01&endDate=2026-09-30` (the 30th is included) |
+| From a day onward | `startDate=2026-09-18` |
+| Up to a day | `endDate=2026-09-18` |
+| A precise cutoff | `endDate=2026-09-18T17:45:00Z` (exact instant, no rounding) |
+
+- A **bare-date `endDate` covers that whole day** — the bound is the next midnight, not that day's. ⚠️ This is a deliberate DIVERGENCE from `GET /opportunities`, where `endDate` is applied as-is: there, `startDate=endDate=2026-09-18` is a window one millisecond wide that returns nothing. Don't assume identical rounding across the two endpoints.
+- `startDate` **overrides** the `date` preset rather than intersecting it, so a back-dated search is never silently emptied by a leftover `date=month`.
+- An invalid date is a **`400`**, not a silent all-time result — including `2026-02-30`, which lenient ISO validation accepts and date libraries roll forward to March 2nd.
+- The same window applies to `/sent/stats`, `/sent/count`, `/sent/counts/summary` and `/sent/locate`, so the list, the cards above it and the tab badges beside it can never disagree.
 
 **Status filter meanings** — the four granular states plus two combined rollups that partition them into "no action needed" vs "needs action", plus three sub-filters of `awaiting`:
 
@@ -2335,6 +2352,8 @@ Locate which page a given sent reply lives on within `/sent`, using **the same f
 | `platform` | `string` | — | Must match the active filter |
 | `status` | `'published' \| 'scheduled' \| 'manual' \| 'error' \| 'draft' \| 'settled' \| 'awaiting' \| 'awaiting-draft' \| 'awaiting-expired' \| 'awaiting-link'` | — | Must match the active filter |
 | `date` | `string` | — | Must match the active filter |
+| `startDate` | ISO date or timestamp | — | Must match the active filter |
+| `endDate` | ISO date or timestamp | — | Must match the active filter |
 
 **Response** `200 OK`
 
@@ -2364,14 +2383,15 @@ Locate which page a given sent reply lives on within `/sent`, using **the same f
 
 ### GET `/api/engage/sent/stats`
 
-Retrieve summary statistics for sent records (used for the top of the Sent page). **Scoped by the same `date` / `platform` / `status` filters as `GET /sent`** so the stat cards always match the filtered list below them.
+Retrieve summary statistics for sent records (used for the top of the Sent page). **Scoped by the same `date` / `startDate` / `endDate` / `platform` / `status` filters as `GET /sent`** so the stat cards always match the filtered list below them.
 
 **Query Params** (all optional — identical to `/sent`, pagination ignored)
 
 | Param | Type | Description |
 |---|---|---|
 | `projectId` | `string` | Optional project scope. |
-| `date` | `all` \| `day` \| `today` \| `week` \| `month` | Publish-date window. `all` / omitted / unknown = all-time. `day` and `today` are aliases. Same vocabulary as `/dashboard/summary`. |
+| `date` | `all` \| `day` \| `today` \| `week` \| `month` | Rolling publish-date window. `all` / omitted / unknown = all-time. `day` and `today` are aliases. Same vocabulary as `/dashboard/summary`. |
+| `startDate` / `endDate` | ISO date or timestamp | Exact publish-date bounds — the [date search](#get-apiengagesent) documented on `/sent`. `startDate` overrides `date`; a bare-date `endDate` covers that whole UTC day. |
 | `platform` | `x` \| `reddit` | Restrict to one platform (via the linked opportunity). |
 | `status` | `published` \| `scheduled` \| `manual` \| `error` \| `draft` \| `settled` \| `awaiting` \| `awaiting-draft` \| `awaiting-expired` \| `awaiting-link` | Restrict to a reply lifecycle state. Same values as `/sent` (incl. the `settled` / `awaiting` rollups and the three `awaiting-*` sub-filters). |
 
@@ -2403,6 +2423,7 @@ Total + byPlatform + settled/awaiting rollups + awaitingBreakdown for `/sent` in
 |---|---|---|
 | `projectId` | `string` | Optional project scope. |
 | `date` | `all` \| `day` \| `today` \| `week` \| `month` | Same vocabulary as `/sent`/`/sent/stats`. Scopes every field. |
+| `startDate` / `endDate` | ISO date or timestamp | Exact publish-date bounds, as on `/sent`. Scope every field, so a badge can never count all-time beside a one-day list. |
 
 **Response** `200 OK`
 
@@ -2423,9 +2444,9 @@ Total + byPlatform + settled/awaiting rollups + awaitingBreakdown for `/sent` in
 
 Filtered counts under **exactly** the same filters as `GET /sent`, sharing the list's filter builder server-side so the two can never drift:
 
-- `total` honors every filter — `status`, `platform`, and `date` included — and is the same number the list returns for that query string.
-- `byPlatform` honors every filter **except `platform` itself** (each count pins one platform), so platform badges stay complete while `status`/`date` narrow them.
-- `rollups` (`settled`/`awaiting`) honor every filter **except `status` itself** (the status axis), so the tab badges stay complete while `platform`/`date` narrow them.
+- `total` honors every filter — `status`, `platform`, and the date window (`date` or `startDate`/`endDate`) included — and is the same number the list returns for that query string.
+- `byPlatform` honors every filter **except `platform` itself** (each count pins one platform), so platform badges stay complete while `status` and the date window narrow them.
+- `rollups` (`settled`/`awaiting`) honor every filter **except `status` itself** (the status axis), so the tab badges stay complete while `platform` and the date window narrow them.
 - `awaitingBreakdown` (`drafts`/`link`/`expired`) — the awaiting rollup's sub-axis, same status-less scoping as `rollups`.
 
 `page`/`limit` are accepted and ignored (they can't change a count), so clients can reuse the list query string verbatim.

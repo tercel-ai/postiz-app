@@ -827,9 +827,20 @@ export class LocateSentReplyDto {
   @IsIn(SENT_STATUS_VALUES)
   status?: string;
 
+  // The full /sent date contract — preset plus exact bounds. Locate computes a
+  // page index under the caller's filters, so a window this endpoint silently
+  // ignored would be a page number pointing at the wrong rows.
   @IsOptional()
   @IsString()
   date?: string;
+
+  @IsOptional()
+  @IsDateString({ strict: true })
+  startDate?: string;
+
+  @IsOptional()
+  @IsDateString({ strict: true })
+  endDate?: string;
 
   @IsOptional()
   @Type(() => Number)
@@ -884,12 +895,34 @@ export class ListSentDto {
   @IsIn(SENT_STATUS_VALUES)
   status?: string;
 
-  // Date window: all (default/empty) | day | today | week | month. Untyped (no
-  // @IsIn) so it accepts the same vocabulary as /dashboard/summary; the repository
-  // maps it via the shared _engageDateWindow (unknown values → all-time).
+  // Rolling preset window: all (default/empty) | day | today | week | month.
+  // Untyped (no @IsIn) so it accepts the same vocabulary as /dashboard/summary;
+  // the repository maps it via the shared `engageDateWindow` (unknown values →
+  // all-time). For a specific calendar day or an arbitrary span, use
+  // startDate/endDate below, which override this.
   @IsOptional()
   @IsString()
   date?: string;
+
+  // Exact bounds on the reply's publishDate — the date SEARCH, as opposed to the
+  // rolling presets above. Same names and same roles as ListOpportunitiesDto, so
+  // one date control can drive either list.
+  //
+  // `strict: true` is not decoration: plain @IsDateString accepts `2026-02-30`,
+  // and dayjs then rolls it forward to March 2nd, so a day that does not exist
+  // would silently return another day's replies with a 200.
+  //
+  // ONE DAY = the same date in both: `startDate=2026-09-18&endDate=2026-09-18`.
+  // A bare `YYYY-MM-DD` endDate covers the WHOLE day (see `engageDateWindow`) —
+  // which is where this diverges from /opportunities, whose endDate is applied
+  // as-is and would make that pair an empty window.
+  @IsOptional()
+  @IsDateString({ strict: true })
+  startDate?: string;
+
+  @IsOptional()
+  @IsDateString({ strict: true })
+  endDate?: string;
 
   @IsOptional()
   @Type(() => Number)
@@ -913,6 +946,8 @@ export class ListSentDto {
 export class SentCountsSummaryDto extends PickType(ListSentDto, [
   'projectId',
   'date',
+  'startDate',
+  'endDate',
 ] as const) {}
 
 // Event-driven metrics refresh: the client posts the exact post ids it is
@@ -993,7 +1028,8 @@ export class DashboardSummaryDto {
 
   // Optional date window: 'all' (default) | 'day' (today) | 'week' (ISO week) |
   // 'month'. Left untyped (no @IsIn) so 'all'/empty is tolerated; unknown values
-  // fall through to all-time in the repository.
+  // fall through to all-time in the repository. No startDate/endDate here: this
+  // is the dashboard's own period selector, not the /sent date search.
   @IsOptional()
   @IsString()
   date?: string;

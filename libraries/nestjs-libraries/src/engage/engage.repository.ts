@@ -79,6 +79,7 @@ import { EngageAuthorProfile } from '@gitroom/nestjs-libraries/engage/engage-aut
 // "which account did the browser publish this as?", so a reply and a post can
 // never disagree about it.
 import { resolveExtensionPublisher } from '@gitroom/nestjs-libraries/database/prisma/integrations/extension-session.utils';
+import { engageDateWindow } from '@gitroom/nestjs-libraries/engage/engage-date-window';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import utc from 'dayjs/plugin/utc';
@@ -4678,6 +4679,8 @@ export class EngageRepository {
     organizationId: string,
     dto: {
       date?: string;
+      startDate?: string;
+      endDate?: string;
       platform?: string;
       status?: string;
       projectId?: string;
@@ -4688,11 +4691,13 @@ export class EngageRepository {
     sentWhere: Prisma.EngageSentReplyWhereInput;
   } {
     // Single source of truth for the date→publishDate window (shared with
-    // getDashboardSummary), so /sent, /sent/stats and /dashboard/summary all
-    // accept the same vocabulary (all | day | today | week | month).
+    // getDashboardSummary), so /sent, /sent/stats, /sent/count(s) and
+    // /dashboard/summary all accept the same vocabulary: the rolling presets
+    // (all | day | today | week | month) plus the exact `startDate`/`endDate`
+    // bounds, which override a preset.
     const postWhere: Prisma.PostWhereInput = {
       source: 'engage',
-      ...this._engageDateWindow(dto.date),
+      ...engageDateWindow(dto),
     };
 
     // Narrows the linked EngageOpportunity beyond the plain platform filter.
@@ -5459,6 +5464,8 @@ export class EngageRepository {
     organizationId: string,
     dto: {
       date?: string;
+      startDate?: string;
+      endDate?: string;
       platform?: string;
       status?: string;
       projectId?: string;
@@ -5564,6 +5571,8 @@ export class EngageRepository {
     return this.countSentReplies(organizationId, {
       projectId: dto.projectId,
       date: dto.date,
+      startDate: dto.startDate,
+      endDate: dto.endDate,
     });
   }
 
@@ -5584,7 +5593,17 @@ export class EngageRepository {
     const where = (status?: string, platform?: string) =>
       this._buildSentReplyFilter(
         organizationId,
-        { date: dto.date, projectId: dto.projectId, status, platform },
+        {
+          date: dto.date,
+          // The exact bounds travel with the preset. Forgetting them here is
+          // how a badge ends up counting all-time while the list it labels is
+          // filtered to one day.
+          startDate: dto.startDate,
+          endDate: dto.endDate,
+          projectId: dto.projectId,
+          status,
+          platform,
+        },
         { includeDrafts: true }
       ).sentWhere;
     const count = (w: Prisma.EngageSentReplyWhereInput) =>
@@ -5638,20 +5657,6 @@ export class EngageRepository {
     return Number.isFinite(n) ? n : 0;
   }
 
-  // Shared engage date window on Post.publishDate. 'all'/empty/undefined → no
-  // window; 'day'/'today' → today; 'week' → ISO week; 'month' → calendar month.
-  private _engageDateWindow(date?: string): { publishDate?: { gte: Date } } {
-    const gte =
-      date === 'day' || date === 'today'
-        ? dayjs.utc().startOf('day').toDate()
-        : date === 'week'
-        ? dayjs.utc().startOf('isoWeek').toDate()
-        : date === 'month'
-        ? dayjs.utc().startOf('month').toDate()
-        : null;
-    return gte ? { publishDate: { gte } } : {};
-  }
-
   // Dashboard panel ① "Engage Performance": reply count, response rate,
   // impressions, traffic index, total likes/upvotes, per-platform split, and the
   // single best reply — all scoped to the optional platform + date window
@@ -5664,7 +5669,7 @@ export class EngageRepository {
   ) {
     const platform = opts.platform;
     const platformFilter = platform ? { opportunity: { platform } } : {};
-    const dateWindow = this._engageDateWindow(opts.date);
+    const dateWindow = engageDateWindow({ date: opts.date });
     // Optional project scope. Folded into the related Post filter (Post.projectId)
     // so every EngageSentReply query below inherits it via `post.is`; the two
     // direct Post aggregates apply it on their own top-level where. Omitted =

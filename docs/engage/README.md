@@ -16,6 +16,7 @@ X and Reddit. This is the entry point to all Engage docs.
 | [`scripts.md`](./scripts.md) | **Ops / Dev** | Runbook for the 10 maintenance scripts, grouped by scenario (scanning, metrics repair, data-ticks). |
 | [`sync-metrics-script.md`](./sync-metrics-script.md) | Ops | Detailed output walkthrough for `engage-sync-metrics.ts`. |
 | [`reddit-loid-waf-bypass.md`](./reddit-loid-waf-bypass.md) | Dev | How Reddit public-JSON reads clear the anti-bot WAF (the `loid` cookie). |
+| [`reddit-egress-rollout.md`](./reddit-egress-rollout.md) | Ops/Dev | Cross-repo rollout for the Reddit egress hardening (breaker, parked posts, extension fallback) + what the 2026-09 outage actually was. |
 | [`reddit-metrics-sync-todo.md`](./reddit-metrics-sync-todo.md) | Dev | Open TODOs on Reddit metrics syncing. |
 | [`opportunity-content-rendering.md`](./opportunity-content-rendering.md) | **Dev / Frontend** | What `postContent` / `mediaUrls` hold, and the rules every client MUST follow to render them — never `innerHTML`, how to linkify URLs / `@mentions` / `#hashtags` per platform, attachment layout. Includes the open frontend gaps. |
 | [`x-tab-only-migration.md`](./x-tab-only-migration.md) | **Dev / Ops** | Migration plan: every remaining server-side X API read, what the extension's browser-tab path already covers, and the order to retire them. Includes the switches that turn the server-side X scan off. |

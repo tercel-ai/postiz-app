@@ -2255,6 +2255,8 @@ export class EngageService implements OnApplicationBootstrap {
     org: Organization,
     dto: {
       date?: string;
+      startDate?: string;
+      endDate?: string;
       platform?: string;
       status?: string;
       projectId?: string;

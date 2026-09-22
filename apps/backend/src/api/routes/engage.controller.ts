@@ -1344,7 +1344,7 @@ export class EngageController {
 
   @ApiOperation({
     summary:
-      'Locate the page of a given sentReplyId within /sent using the same filters. Returns null page when the reply does not match the filters.',
+      'Locate the page of a given sentReplyId within /sent using the same filters (including startDate/endDate) and the same ordering. Returns null page when the reply does not match the filters.',
   })
   @Get('/sent/locate')
   locateSentReply(
@@ -1356,7 +1356,7 @@ export class EngageController {
 
   @ApiOperation({
     summary:
-      "Paginated list of Engage replies, ordered by the reply's post.publishDate DESC (the real send time, re-stamped on every publish success) with id DESC as tiebreaker — so scheduled QUEUE replies, which carry a future publishDate, lead the list. Optional status filter: published | scheduled | manual | error | draft, plus rollups — settled (published + scheduled) and awaiting (draft + manual link-pending + failed publishes) — and awaiting's own sub-filters for the Awaiting-review tabs: awaiting-draft (still-actionable draft), awaiting-expired (draft whose opportunity aged out), awaiting-link (link-pending or failed publish)",
+      "Paginated list of Engage replies, ordered by the reply's post.publishDate DESC (the real send time, re-stamped on every publish success) with id DESC as tiebreaker — so scheduled QUEUE replies, which carry a future publishDate, lead the list. Date search: `startDate`/`endDate` (ISO, `YYYY-MM-DD` or a full timestamp) bound publishDate exactly and override the rolling `date` preset; a bare `YYYY-MM-DD` endDate covers that whole UTC day, so one day is startDate=endDate=that day. Optional status filter: published | scheduled | manual | error | draft, plus rollups — settled (published + scheduled) and awaiting (draft + manual link-pending + failed publishes) — and awaiting's own sub-filters for the Awaiting-review tabs: awaiting-draft (still-actionable draft), awaiting-expired (draft whose opportunity aged out), awaiting-link (link-pending or failed publish)",
   })
   @Get('/sent')
   listSentReplies(
@@ -1368,7 +1368,7 @@ export class EngageController {
 
   @ApiOperation({
     summary:
-      'Aggregate stats for sent replies, scoped by the same date/platform/status filters as /sent (no date = all-time)',
+      'Aggregate stats for sent replies, scoped by the same date/startDate/endDate/platform/status filters as /sent (no date filter = all-time)',
   })
   @Get('/sent/stats')
   getSentStats(
@@ -1377,6 +1377,10 @@ export class EngageController {
   ) {
     return this._engageService.getSentStats(org, {
       date: query.date,
+      // The exact bounds travel with the preset: the cards sit directly above
+      // the list, so a window applied to one and not the other is a visible lie.
+      startDate: query.startDate,
+      endDate: query.endDate,
       platform: query.platform,
       status: query.status,
       projectId: query.projectId,
