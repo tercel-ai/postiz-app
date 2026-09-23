@@ -40,7 +40,7 @@
   - [GET /extension-replies](#get-apienageextension-replies) — paginated history
   - [DELETE /extension-replies](#delete-apienageextension-replies) — clear history (all | 1d | 1w | 1m)
 - [Sent Replies — Sent Records](#sent-replies--sent-records)
-  - [GET /sent](#get-apienagesent) — paginated list, `startDate`/`endDate` date search (`status` rollups: `settled` = live+scheduled, `awaiting` = draft+manual+error; `awaiting-draft` / `awaiting-expired` / `awaiting-link` sub-filter the Awaiting-review tabs)
+  - [GET /sent](#get-apienagesent) — paginated list, `startDate`/`endDate` date search (`status` rollups: `settled` = live+scheduled, `awaiting` = draft+manual (**not** error); `awaiting-draft` / `awaiting-expired` / `awaiting-link` sub-filter the Awaiting-review tabs)
   - [GET /sent/:id](#get-apienagesentid) — single sent reply item
   - [GET /sent/locate](#get-apienagesentlocate) — locate the page of a sentReplyId within /sent
   - [GET /sent/stats](#get-apienagesentstats) — aggregate stats
@@ -2178,7 +2178,7 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 - An invalid date is a **`400`**, not a silent all-time result — including `2026-02-30`, which lenient ISO validation accepts and date libraries roll forward to March 2nd.
 - The same window applies to `/sent/stats`, `/sent/count`, `/sent/counts/summary` and `/sent/locate`, so the list, the cards above it and the tab badges beside it can never disagree.
 
-**Status filter meanings** — the four granular states plus two combined rollups that partition them into "no action needed" vs "needs action", plus three sub-filters of `awaiting`:
+**Status filter meanings** — the four granular states plus two combined rollups ("no action needed" vs "needs action"), plus three sub-filters of `awaiting`. The rollups do **not** partition the states: `error` belongs to neither, and only the unfiltered list shows it next to the others.
 
 | status | Post condition |
 |---|---|
@@ -2188,12 +2188,12 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 | `error` | `state=ERROR` (publishing failed; the generated draft is preserved) |
 | `draft` | `state=DRAFT` — a saved working copy a PERSON has not sent (see `POST /opportunities/:id/save-draft`). Unattended replies are never DRAFT; nothing automated may claim one. |
 | `settled` | `published` **OR** `scheduled` — no further action needed (live, or will auto-fire) |
-| `awaiting` | `draft` **OR** `manual` **OR** `error` — has content but not yet live |
+| `awaiting` | `draft` **OR** `manual` — has content, not yet live, and still actionable. **Excludes `error`**: a failed publish cannot be reviewed into a live reply, so it stays under `error` only. |
 | `awaiting-draft` | `draft` **AND** this org's `EngageOpportunityState.status != EXPIRED` — the "Drafts" tab: still-actionable saved drafts |
 | `awaiting-expired` | `draft` **AND** this org's `EngageOpportunityState.status == EXPIRED` — the "Expired" tab: the draft's source post aged out of the actionable feed (read-only) |
-| `awaiting-link` | `manual` **OR** `error` — the "Awaiting link" tab: needs the user to submit a reply link or retry a failed publish |
+| `awaiting-link` | `manual` — the "Awaiting link" tab: the reply is posted and the user still owes its permalink. Like `awaiting`, excludes `error`, so the three sub-filters stay a partition of `awaiting`. |
 
-> **DRAFT working-copies:** a saved draft is a `Post(state=DRAFT)` (see `POST /opportunities/:id/save-draft`). Omitting `status` returns **all** states including `DRAFT`. Use `status=awaiting` to target the whole "needs action" bucket (`DRAFT` + `manual` + `error`), or one of `awaiting-draft` / `awaiting-expired` / `awaiting-link` to target a single Awaiting-review tab directly (no client-side triage of `post.state` needed). `EXPIRED` is a **per-org** status living on `EngageOpportunityState`, not a `Post` field — the same shared opportunity can be `EXPIRED` for one org's draft and still active for another's.
+> **DRAFT working-copies:** a saved draft is a `Post(state=DRAFT)` (see `POST /opportunities/:id/save-draft`). Omitting `status` returns **all** states including `DRAFT`. Use `status=awaiting` to target the whole "needs action" bucket (`DRAFT` + `manual`; `error` is not part of it), or one of `awaiting-draft` / `awaiting-expired` / `awaiting-link` to target a single Awaiting-review tab directly (no client-side triage of `post.state` needed). `EXPIRED` is a **per-org** status living on `EngageOpportunityState`, not a `Post` field — the same shared opportunity can be `EXPIRED` for one org's draft and still active for another's.
 
 **Response** `200 OK`
 

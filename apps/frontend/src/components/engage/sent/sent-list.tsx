@@ -212,7 +212,8 @@ export function SentList() {
           <option value="manual">Manual</option>
           <option value="error">Error</option>
           {/* Combined rollups: settled = published(live) + scheduled; awaiting =
-              manual link-pending + failed publishes (generated but not yet live). */}
+              saved drafts + manual link-pending. Failed publishes are in neither
+              — they have their own Error option above. */}
           <option value="settled">Settled</option>
           <option value="awaiting">Awaiting review</option>
         </select>

@@ -714,13 +714,15 @@ export class EngageController {
   //   draft           = state=DRAFT                           (a PERSON's saved working
   //                     copy, never sent — unattended replies are QUEUE, never DRAFT)
   //   settled         = published OR scheduled        (已处理 — no further action needed)
-  //   awaiting        = draft OR manual OR error      (待处理 — has content, not yet live)
+  //   awaiting        = draft OR manual               (待处理 — has content, not yet live,
+  //                     still actionable; ERROR is NOT included — use `error`)
   //   awaiting-draft  = draft AND this org's EngageOpportunityState.status != EXPIRED
   //                     (Awaiting-review tab "Drafts": still-actionable)
   //   awaiting-expired = draft AND this org's EngageOpportunityState.status == EXPIRED
   //                     (Awaiting-review tab "Expired": source post aged out, read-only)
-  //   awaiting-link   = manual OR error   (Awaiting-review tab "Awaiting link": needs
-  //                     a submitted reply link or a retry after a failed publish)
+  //   awaiting-link   = manual            (Awaiting-review tab "Awaiting link": posted,
+  //                     permalink still owed. Excludes ERROR so the three sub-filters
+  //                     stay a partition of `awaiting`)
   // The default "All" list (no status) INCLUDES DRAFT so awaiting is always a subset
   // of it. DRAFT is excluded from status=settled, from /sent/stats (a never-sent
   // draft has no impressions and would deflate the response-rate cards), and from the

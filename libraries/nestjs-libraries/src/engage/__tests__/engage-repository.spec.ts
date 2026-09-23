@@ -2284,7 +2284,7 @@ describe('EngageRepository — two-table reads', () => {
       });
     });
 
-    it('status=awaiting-link: manual link-pending (PUBLISHED, no releaseURL) OR a failed publish (ERROR)', async () => {
+    it('status=awaiting-link: manual link-pending only (PUBLISHED, no releaseURL) — a failed publish (ERROR) is excluded', async () => {
       const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
       sentCount.mockResolvedValue(0);
       postAggregate.mockResolvedValue({ _sum: { impressions: 0 } });
@@ -2295,8 +2295,11 @@ describe('EngageRepository — two-table reads', () => {
       const where = sentCount.mock.calls[0][0].where;
       expect(where.post).toMatchObject({
         source: 'engage',
-        OR: [{ state: 'PUBLISHED', releaseURL: null }, { state: 'ERROR' }],
+        state: 'PUBLISHED',
+        releaseURL: null,
       });
+      // Stays a strict subset of `awaiting`, which no longer includes ERROR.
+      expect(where.post.OR).toBeUndefined();
       // No opportunity-state narrowing needed here — unlike awaiting-draft/-expired.
       expect(where.opportunity).toBeUndefined();
     });
@@ -2385,7 +2388,8 @@ describe('EngageRepository — two-table reads', () => {
       const linkWhere = sentCount.mock.calls[11][0].where;
       expect(linkWhere.post).toMatchObject({
         source: 'engage',
-        OR: [{ state: 'PUBLISHED', releaseURL: null }, { state: 'ERROR' }],
+        state: 'PUBLISHED',
+        releaseURL: null,
       });
 
       const expiredWhere = sentCount.mock.calls[12][0].where;
@@ -4848,13 +4852,15 @@ describe('EngageRepository.getOrgScanStatus', () => {
   });
 
   // The four granular states roll up into two combined status values:
-  //   `awaiting` = manual link-pending (PUBLISHED + no releaseURL) OR error —
-  //                "generated but not yet live" (folds in the former
-  //                GET /engage/awaiting-review endpoint).
+  //   `awaiting` = saved DRAFT OR manual link-pending (PUBLISHED + no releaseURL)
+  //                — "has content, not yet live, still actionable" (folds in the
+  //                former GET /engage/awaiting-review endpoint). ERROR is NOT in
+  //                it: a failed publish cannot be reviewed into a live reply.
   //   `settled`  = published (PUBLISHED + releaseURL) OR scheduled (QUEUE) —
-  //                "no further action needed". The exact complement of `awaiting`.
+  //                "no further action needed".
+  // The two are disjoint but NOT exhaustive: ERROR falls outside both.
   describe('combined status filters (awaiting / settled)', () => {
-    it('status=awaiting OR-combines DRAFT + the two unpublished buckets', async () => {
+    it('status=awaiting OR-combines DRAFT + manual link-pending, and excludes ERROR', async () => {
       const { repo, sentFindMany, sentCount, stateFindMany } = buildRepo();
       sentFindMany.mockResolvedValue([]);
       sentCount.mockResolvedValue(0);
@@ -4865,7 +4871,6 @@ describe('EngageRepository.getOrgScanStatus', () => {
       expect(where.post.OR).toEqual([
         { state: 'DRAFT' },
         { state: 'PUBLISHED', releaseURL: null },
-        { state: 'ERROR' },
       ]);
       expect(where.post.source).toBe('engage');
       // No rows → skip the matchedKeywords join entirely.
@@ -4933,7 +4938,6 @@ describe('EngageRepository.getOrgScanStatus', () => {
         OR: [
           { state: 'DRAFT' },
           { state: 'PUBLISHED', releaseURL: null },
-          { state: 'ERROR' },
         ],
       });
     });

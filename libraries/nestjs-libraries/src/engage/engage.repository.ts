@@ -4789,15 +4789,17 @@ export class EngageRepository {
       postWhere.state = 'PUBLISHED';
       postWhere.releaseURL = null;
     } else if (dto.status === 'awaiting') {
-      // "Awaiting review": has content but not yet live — a saved working DRAFT
-      // (generated/typed but never sent), manual link-pending (PUBLISHED with no
-      // releaseURL), OR a failed publish (ERROR). This is the ONLY filter that
-      // surfaces DRAFT working-copies; the OR ANDs with source=engage + the date
-      // window above. (Replaces the former GET /engage/awaiting-review endpoint.)
+      // "Awaiting review": has content but not yet live and a person can still
+      // act on it — a saved working DRAFT (generated/typed but never sent) or a
+      // manual link-pending publish (PUBLISHED with no releaseURL). A failed
+      // publish (ERROR) is deliberately NOT here: reviewing it cannot turn it
+      // into a live reply, and it has its own `error` filter. This is the ONLY
+      // filter that surfaces DRAFT working-copies; the OR ANDs with
+      // source=engage + the date window above. (Replaces the former
+      // GET /engage/awaiting-review endpoint.)
       postWhere.OR = [
         { state: 'DRAFT' },
         { state: 'PUBLISHED', releaseURL: null },
-        { state: 'ERROR' },
       ];
     } else if (dto.status === 'awaiting-draft') {
       // Awaiting-review tab "Drafts": a saved working DRAFT whose source
@@ -4826,18 +4828,20 @@ export class EngageRepository {
         },
       };
     } else if (dto.status === 'awaiting-link') {
-      // Awaiting-review tab "Awaiting link": needs the user to act before the
-      // reply counts as sent — a manual link-pending publish (PUBLISHED with no
-      // releaseURL) OR a failed publish attempt (ERROR).
-      postWhere.OR = [
-        { state: 'PUBLISHED', releaseURL: null },
-        { state: 'ERROR' },
-      ];
+      // Awaiting-review tab "Awaiting link": a posted reply whose permalink the
+      // user still has to submit (PUBLISHED with no releaseURL). ERROR is
+      // excluded for the same reason `awaiting` excludes it, and because this
+      // filter must stay a strict SUBSET of `awaiting` — otherwise the
+      // drafts/link/expired breakdown would out-count the rollup it breaks down.
+      postWhere.state = 'PUBLISHED';
+      postWhere.releaseURL = null;
     } else if (dto.status === 'settled') {
       // "Settled" (已处理): no further user action needed — published & live
-      // (PUBLISHED with a releaseURL) OR scheduled to auto-fire (QUEUE). The exact
-      // complement of `awaiting` over the four sent/attempted states; the OR ANDs
-      // with source=engage and the date window above.
+      // (PUBLISHED with a releaseURL) OR scheduled to auto-fire (QUEUE). Together
+      // with `awaiting` this no longer partitions every state: a failed publish
+      // (ERROR) belongs to neither rollup and is reachable only via `error` or the
+      // unfiltered "All" list. The OR ANDs with source=engage and the date window
+      // above.
       postWhere.OR = [
         { state: 'PUBLISHED', releaseURL: { not: null } },
         { state: 'QUEUE' },

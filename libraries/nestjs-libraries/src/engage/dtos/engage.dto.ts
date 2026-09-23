@@ -92,8 +92,9 @@ export type KeywordType = (typeof KEYWORD_TYPES)[number] | null;
 // rollups (settled/awaiting), plus three 'awaiting' sub-filters that back the
 // Awaiting-review tabs: awaiting-draft (still-actionable DRAFT), awaiting-expired
 // (DRAFT whose opportunity aged out — EngageOpportunityState.status=EXPIRED for
-// this org), and awaiting-link (manual link-pending OR failed publish — both need
-// the user to act before the reply counts as sent).
+// this org), and awaiting-link (manual link-pending — the user still owes the
+// reply's permalink). A failed publish (ERROR) sits in NEITHER rollup; reach it
+// through 'error' or the unfiltered list.
 export const SENT_STATUS_VALUES = [
   'published',
   'scheduled',
@@ -883,17 +884,20 @@ export class ListSentDto {
   // Two combined "rollup" values complement the four granular states:
   //   'settled'  = no further action needed: published (live) OR scheduled (will
   //                auto-fire). = published (PUBLISHED + releaseURL) OR QUEUE.
-  //   'awaiting' = needs user action / generated but not yet live: a saved DRAFT,
-  //                manual link-pending (PUBLISHED + no releaseURL), OR a failed
-  //                publish (ERROR). Folds in the former GET /engage/awaiting-review
-  //                endpoint.
+  //   'awaiting' = needs user action / generated but not yet live: a saved DRAFT
+  //                OR manual link-pending (PUBLISHED + no releaseURL). A failed
+  //                publish (ERROR) is NOT included — reviewing it cannot make it
+  //                live; use 'error'. Folds in the former
+  //                GET /engage/awaiting-review endpoint.
+  // The two rollups therefore no longer partition every state: ERROR is in
+  // neither, and only the unfiltered list still shows it alongside the rest.
   // Three more sub-filters of 'awaiting' back the Awaiting-review tabs (All /
-  // Drafts / Awaiting link / Expired):
+  // Drafts / Awaiting link / Expired), each a strict subset of it:
   //   'awaiting-draft'   = DRAFT, opportunity still actionable for this org.
   //   'awaiting-expired' = DRAFT, opportunity's EngageOpportunityState.status for
   //                        this org is EXPIRED (aged out — read-only).
-  //   'awaiting-link'    = manual link-pending OR failed publish (the two states
-  //                        that need the user to act, minus DRAFT).
+  //   'awaiting-link'    = manual link-pending (PUBLISHED + no releaseURL): posted,
+  //                        permalink still owed.
   @IsOptional()
   @IsString()
   @IsIn(SENT_STATUS_VALUES)
