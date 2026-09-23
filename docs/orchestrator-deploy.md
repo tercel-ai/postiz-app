@@ -89,6 +89,30 @@ When you run `pnpm pm2` or `pnpm pm2:prod`, the script `scripts/ensure-pm2-names
 
 So after `pnpm pm2:prod` once, your `.env` has `PM2_BACKEND_NAME="backend-prod"` / `PM2_ORCHESTRATOR_NAME="orchestrator-prod"` and all management scripts (`redeploy-orchestrator.sh`, `switch-worker-mode.sh`, `update-enabled-providers.sh`) target the right processes automatically.
 
+### Registering the fleet with pm2
+
+Use `pnpm run pm2:start` (dev) / `pnpm run pm2:start:prod` (prod) to register the
+three apps with pm2 and persist the result with `pm2 save`. Unlike `pnpm pm2` /
+`pnpm pm2:prod`, this does **not** run `prisma db push` or `prisma seed` — it only
+starts processes against whatever already sits in each app's `dist/`.
+
+Each app's own `pm2` / `pm2:prod` script delegates to `scripts/pm2-start-app.sh`,
+which resolves pnpm to a **stable absolute path** before handing it to pm2.
+
+> **Why this matters.** `pm2 start pnpm --name X -- start` resolves `pnpm` from
+> `PATH` at registration time and writes the result into `~/.pm2/dump.pm2`
+> permanently. Under fnm (and nvm) that resolves to a per-shell directory such as
+> `/run/user/1000/fnm_multishells/<pid>_<ts>/bin/pnpm`, which lives on tmpfs. The
+> next reboot wipes it and every app fails on boot with
+> `Error: Cannot find module '/run/user/1000/fnm_multishells/.../bin/pnpm'`,
+> restarting forever, until the definition is recreated. `pm2-start-app.sh`
+> resolves pnpm via `npm_execpath` + `realpath`, refuses to register an ephemeral
+> path, and recreates a definition that already points at a stale one.
+
+`pnpm run pm2:restart` / `pm2:restart:prod` restarts definitions pm2 already
+holds — it cannot create them, and now fails fast with a pointer to
+`pm2:start(:prod)` when an app is not registered.
+
 ### Quick Deploy (workflow function changes)
 
 ```bash

@@ -16,6 +16,8 @@
     "pm2:prod": "pnpm run pm2-run:prod",
     "pm2:restart": "bash scripts/pm2-restart.sh dev",
     "pm2:restart:prod": "bash scripts/pm2-restart.sh prod",
+    "pm2:start": "bash scripts/ensure-pm2-names.sh dev && pnpm run --parallel pm2 && pm2 save && pm2 list",
+    "pm2:start:prod": "bash scripts/ensure-pm2-names.sh prod && pnpm run --parallel pm2:prod && pm2 save && pm2 list",
     "publish-sdk": "pnpm run --filter ./apps/sdk publish",
     "pm2-run": "bash scripts/ensure-pm2-names.sh dev && pnpm run prisma-db-push && pnpm run prisma-seed && pnpm run --parallel pm2 && pm2 logs",
     "pm2-run:prod": "bash scripts/ensure-pm2-names.sh prod && pnpm run prisma-db-push && pnpm run prisma-seed && pnpm run --parallel pm2:prod && pm2 logs",

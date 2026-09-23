@@ -33,9 +33,35 @@ case "$FLAVOR" in
     ;;
 esac
 
+# This restarts definitions pm2 already holds; it cannot create them. Bail out
+# with a useful pointer instead of failing halfway through the fleet.
+REGISTERED=$(pm2 jlist 2>/dev/null | node -e '
+  let raw = "";
+  process.stdin.on("data", (d) => (raw += d)).on("end", () => {
+    let list = [];
+    try { list = JSON.parse(raw); } catch { /* pm2 not running / no JSON */ }
+    process.stdout.write(list.map((p) => p.name).join("\n"));
+  });
+')
+
+MISSING=""
+for app in orchestrator backend frontend; do
+  if ! grep -qxF "${app}${SUFFIX}" <<<"$REGISTERED"; then
+    MISSING="${MISSING}${MISSING:+ }${app}${SUFFIX}"
+  fi
+done
+
+if [[ -n "$MISSING" ]]; then
+  echo "[pm2-restart] Not registered with pm2: $MISSING" >&2
+  echo "[pm2-restart] Nothing to restart. Register the fleet first:" >&2
+  echo "                pnpm run pm2:start${SUFFIX:+:prod}" >&2
+  exit 1
+fi
+
 echo "[pm2-restart] ($FLAVOR) stopping pm2 processes…"
 for app in orchestrator backend frontend; do
-  pm2 stop "${app}${SUFFIX}"
+  # Already-stopped is fine — don't abort the fleet restart over it.
+  pm2 stop "${app}${SUFFIX}" || true
 done
 
 echo "[pm2-restart] starting pm2 processes (no rebuild)…"
