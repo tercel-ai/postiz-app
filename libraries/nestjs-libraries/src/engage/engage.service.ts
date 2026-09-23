@@ -1364,10 +1364,31 @@ export class EngageService implements OnApplicationBootstrap {
     );
     if (!ctx) throw new NotFoundException('Sent reply not found');
 
+    const message = reason || 'reply failed';
+
+    // Two writes, two audiences, and neither replaces the other.
+    //
+    // The Errors row is the OPERATOR's: it accumulates, so a platform breaking
+    // for everyone at once shows up as a pattern rather than as one user's bad
+    // afternoon. It also survives the next attempt overwriting the row's own
+    // `error`.
     await this._postsService.logRetryableFailure(
       ctx.postId,
       platform || ctx.platform || undefined,
-      reason || 'reply failed'
+      message
+    );
+
+    // The row's own `error` is the USER's: it is what the Sent list and the
+    // status poll can show, so someone who closed the page mid-send comes back
+    // to "not sent — not signed in to Reddit" instead of a draft that looks
+    // like they never pressed send. Deliberately does NOT touch `state` — a
+    // transient failure leaves the reply sendable, and closing a QUEUE row here
+    // would remove it from claimDueEngageReplies for good. See
+    // recordReplyAttemptFailure.
+    await this._engageRepository.recordReplyAttemptFailure(
+      org.id,
+      sentReplyId,
+      message
     );
 
     return { ok: true };

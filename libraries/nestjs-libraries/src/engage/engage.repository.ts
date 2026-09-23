@@ -3560,6 +3560,64 @@ export class EngageRepository {
     return { closed: closed.count > 0 };
   }
 
+  /**
+   * Record WHY the last send attempt did not go out, WITHOUT closing the row.
+   *
+   * The counterpart of {@link closeUnconfirmedReply}: that one is for a send
+   * that FIRED and could not be confirmed, so the row must never be re-sent and
+   * ERROR is the right verdict. This one is for every ordinary failure — signed
+   * out, network, rate limited, a selector that moved, the browser busy with
+   * another platform write — where nothing reached the platform and the row is
+   * still perfectly sendable.
+   *
+   * So `state` is deliberately UNTOUCHED, and the absence of it from `data` is
+   * the guardrail this method exists to hold. Moving a QUEUE row to ERROR would
+   * remove it from `claimDueEngageReplies` (whose where-clause requires
+   * `post.state: 'QUEUE'`) and permanently kill the unattended retry — which is
+   * precisely what `logRetryableFailure`, the only thing this path used to
+   * call, exists NOT to do. A DRAFT row has no automatic retry at all, so
+   * closing it would only move it out of the "Drafts" tab and tell the user it
+   * is over when one more click would do.
+   *
+   * What was missing is the REASON. `logRetryableFailure` writes an Errors row,
+   * which nothing user-facing reads, so a person who closed the page mid-send
+   * came back to a DRAFT indistinguishable from one they never sent. This puts
+   * the reason on the row itself, where both the Sent list and
+   * {@link getSentReplyStatus} can show it — so the row can say "not sent yet,
+   * and here is why" instead of only "not sent yet".
+   *
+   * Scoped to rows that are still OPEN: a PUBLISHED row's send succeeded, and
+   * an ERROR row's `error` already explains what closed it, so neither may be
+   * overwritten by a late report. Cleared again by {@link updateReplyUrl} on
+   * commit and by {@link upsertDraft} when the draft is edited.
+   */
+  async recordReplyAttemptFailure(
+    organizationId: string,
+    sentReplyId: string,
+    reason: string
+  ): Promise<{ recorded: boolean }> {
+    // Scoped by organizationId through the reply, so one org can never write
+    // into another's record by guessing an id. Same guard as
+    // closeUnconfirmedReply.
+    const reply = await this._sentReply.model.engageSentReply.findFirst({
+      where: { id: sentReplyId, organizationId },
+      select: { postId: true },
+    });
+    if (!reply) throw new NotFoundException('Sent reply not found');
+
+    const recorded = await this._post.model.post.updateMany({
+      where: {
+        id: reply.postId,
+        // Re-asserted at write time so a report racing a commit cannot stamp a
+        // failure onto a reply that is already live.
+        state: { in: ['DRAFT', 'QUEUE'] },
+      },
+      // 400 chars matches closeUnconfirmedReply's own truncation.
+      data: { error: reason.slice(0, 400) },
+    });
+    return { recorded: recorded.count > 0 };
+  }
+
   async dismissOpportunity(
     organizationId: string,
     id: string,
@@ -3817,6 +3875,11 @@ export class EngageRepository {
             // value on an already-correct row.
             providerIdentifier: data.platform,
             settings: mergeSettingsType(existing.post?.settings, data.platform),
+            // A re-saved draft is a NEW attempt's content: the previous
+            // attempt's reason describes text that no longer exists, and
+            // keeping it would caption an edited draft with a failure it never
+            // had. See recordReplyAttemptFailure.
+            error: null,
           },
         });
         return tx.engageSentReply.update({
@@ -4827,6 +4890,13 @@ export class EngageRepository {
               trafficScore: true,
               analytics: true,
               lastMetricsFetchAt: true,
+              // Why the last send attempt did not go out, surfaced as `lastError`.
+              // Read ONLY together with `state`: a DRAFT carrying this reads
+              // "still sendable, and here is what went wrong", which is the whole
+              // difference between that row and one the user never sent. Without
+              // it, someone who closed the page mid-send came back to a draft
+              // that explains nothing. See recordReplyAttemptFailure.
+              error: true,
               // settings carries engageAuthor for manual replies posted from an
               // account that isn't a connected integration (integrationId=null).
               settings: true,
@@ -4925,12 +4995,17 @@ export class EngageRepository {
       if (!it.post) return { ...it, opportunity };
       // Surface the reply author (the account that posted the reply) as a clean
       // `replyAuthor` field, and drop the raw `settings` blob from the response.
-      const { settings, ...postRest } = it.post;
+      // `error` is renamed on the way out: the column holds the row's own error
+      // whether that error CLOSED the row or merely annotates an attempt, and
+      // `lastError` names the reading the client must apply — the last
+      // attempt's reason, interpreted through `state`.
+      const { settings, error, ...postRest } = it.post;
       return {
         ...it,
         opportunity,
         post: {
           ...postRest,
+          lastError: error ?? null,
           replyAuthor: resolveReplyAuthor(it.post.integration, settings),
           metrics: normalizeReplyMetrics(
             it.opportunity.platform,
@@ -6326,6 +6401,10 @@ export class EngageRepository {
             content: true,
             state: true,
             releaseURL: true,
+            // Same as listSentReplies — and this is the path a page takes to
+            // re-read ONE row right after an attempt failed, so without it the
+            // refresh that follows a failure still shows nothing.
+            error: true,
             publishDate: true,
             impressions: true,
             trafficScore: true,
@@ -6387,12 +6466,13 @@ export class EngageRepository {
     };
     if (!reply.post) return { ...reply, opportunity };
 
-    const { settings, ...postRest } = reply.post;
+    const { settings, error, ...postRest } = reply.post;
     return {
       ...reply,
       opportunity,
       post: {
         ...postRest,
+        lastError: error ?? null,
         replyAuthor: resolveReplyAuthor(reply.post.integration, settings),
         metrics: normalizeReplyMetrics(
           reply.opportunity.platform,
@@ -6512,6 +6592,15 @@ export class EngageRepository {
         ...(releaseId ? { releaseId } : {}),
         ...(integrationId ? { integrationId } : {}),
         ...(mergedSettings ? { settings: mergedSettings } : {}),
+        // The reply went out, so whatever the previous attempt complained about
+        // is now false. Left standing it would be a permanent "last attempt
+        // failed: not signed in" caption under a published reply — the exact
+        // self-contradiction that makes a row's own history untrustworthy.
+        //
+        // Cleared on BOTH commit paths, not just markPublished: the human
+        // paste-the-link path lands on a row a failed extension attempt may well
+        // have annotated, and pasting the link settles that too.
+        error: null,
         // The commit, and with it the ONLY moment this reply's send time is
         // known. The draft's `publishDate` was stamped when save-draft wrote
         // the row — the extension then posts whenever the browser, the
@@ -6825,7 +6914,18 @@ export class EngageRepository {
       where: { id: sentReplyId, organizationId },
       select: {
         id: true,
-        post: { select: { state: true, releaseURL: true } },
+        // `error`: why the LAST attempt did not go out. Only meaningful together
+        // with `state` — on a DRAFT/QUEUE row it reads "still sendable, and this
+        // is what went wrong"; on ERROR it is what closed the row. A client that
+        // read it without the state would report a live reply as failed.
+        //
+        // No timestamp rides with it, deliberately. `Post.updatedAt` is the
+        // obvious candidate and it is wrong here: it is `@updatedAt`, so on a
+        // QUEUE row every lease hand-out (claimDueEngageReplies stamps
+        // claimedAt/releaseId) moves it — a failure from forty minutes ago would
+        // read "just now". The exact time of each attempt lives in the Errors
+        // table, which is where precision is actually needed.
+        post: { select: { state: true, releaseURL: true, error: true } },
         opportunity: { select: { externalPostUrl: true } },
       },
     });
@@ -6834,6 +6934,7 @@ export class EngageRepository {
       id: reply.id,
       state: reply.post?.state ?? null,
       replyUrl: reply.post?.releaseURL ?? null,
+      lastError: reply.post?.error ?? null,
       // The CURRENT address of the post being replied to. The extension holds
       // its own copy from when the reply was drafted, and a manual retry of an
       // old failure would otherwise re-send to an address that has since been
