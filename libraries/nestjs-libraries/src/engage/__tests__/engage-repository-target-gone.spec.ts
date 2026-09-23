@@ -309,18 +309,34 @@ describe('EngageRepository.closeUnconfirmedReply', () => {
   it('will not overwrite a reply that turned out to have gone out', async () => {
     // Re-asserted at write time: between the extension's attempt and this call
     // the record may have reached PUBLISHED, and marking that ERROR would
-    // contradict a confirmed send.
+    // contradict a confirmed send. An already-ERROR row keeps the reason that
+    // closed it.
     const { repo, postUpdateMany } = buildRepo();
 
     await repo.closeUnconfirmedReply('org-1', 'sent-1', 'unconfirmed');
 
     expect(postUpdateMany.mock.calls[0][0].where).toEqual({
       id: 'p1',
-      state: 'QUEUE',
+      state: { in: ['DRAFT', 'QUEUE'] },
     });
   });
 
-  it('reports closed:false when nothing was in QUEUE to close', async () => {
+  it('closes an ATTENDED send too — those records are DRAFT, not QUEUE', async () => {
+    // The route this used to miss entirely. A reply fired from the Engage page
+    // is saved by save-draft, which writes DRAFT ("Always DRAFT", upsertDraft);
+    // only the unattended driver's rows are QUEUE. So while the where-clause
+    // named QUEUE alone, an attended send whose confirmation could not be read
+    // closed NOTHING: the row stayed a draft offering a Retry button for a
+    // comment that may already be live — the duplicate this endpoint exists to
+    // prevent, arriving by the one route it did not cover.
+    const { repo, postUpdateMany } = buildRepo();
+
+    await repo.closeUnconfirmedReply('org-1', 'sent-1', 'unconfirmed');
+
+    expect(postUpdateMany.mock.calls[0][0].where.state.in).toContain('DRAFT');
+  });
+
+  it('reports closed:false when there was no open row to close', async () => {
     // Makes a second report — or a row that went out meanwhile — a no-op rather
     // than a lie.
     const { repo } = buildRepo();

@@ -3524,8 +3524,17 @@ export class EngageRepository {
    * and commits the record when it finds one — `publishExtensionReply` does not
    * gate on the record's current state, so ERROR → PUBLISHED still works.
    *
-   * Idempotent: `state: 'QUEUE'` in the where means a second report (or a row
+   * Idempotent: the state clause in the where means a second report (or a row
    * that went out in the meantime) is a no-op returning `closed: false`.
+   *
+   * DRAFT as well as QUEUE, because an ATTENDED send produces exactly this
+   * outcome too and its record is a DRAFT: save-draft writes DRAFT ("Always
+   * DRAFT", see upsertDraft), and only the unattended driver's rows are QUEUE.
+   * Limiting this to QUEUE meant a reply fired from the Engage page whose
+   * confirmation could not be read closed nothing at all — the row stayed a
+   * draft, offering a Retry button for a comment that may already be live. That
+   * is the duplicate this endpoint exists to prevent, arriving by the one route
+   * it did not cover.
    */
   async closeUnconfirmedReply(
     organizationId: string,
@@ -3546,10 +3555,11 @@ export class EngageRepository {
       'Check the post before sending another.';
 
     const closed = await this._post.model.post.updateMany({
-      // `state: 'QUEUE'` re-asserted at write time: a row that reached
-      // PUBLISHED between the extension's attempt and this call went out for
-      // real, and marking it ERROR would contradict a confirmed send.
-      where: { id: reply.postId, state: 'QUEUE' },
+      // The open states re-asserted at write time: a row that reached PUBLISHED
+      // between the extension's attempt and this call went out for real, and
+      // marking it ERROR would contradict a confirmed send. An already-ERROR row
+      // keeps the reason that closed it.
+      where: { id: reply.postId, state: { in: ['DRAFT', 'QUEUE'] } },
       // `claimedAt` is preserved — see markOpportunityTargetGone for why. It
       // matters most HERE: this method's own premise is that the send FIRED, so
       // this row's claimedAt is the most recent moment the platform account was
