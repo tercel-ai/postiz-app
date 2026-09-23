@@ -10,6 +10,13 @@ Code spans **three repos**:
 - `postiz-app/apps/frontend` — original Postiz frontend (dev playground; postiz auth).
 - `aisee-app` + `aisee-agent` — customer-facing frontends (aisee_auth).
 
+> **Outcome reporting lives in its own doc.** How a reply reports success /
+> failure back to the page — the message protocol, the `Post.state` vs
+> `Post.error` split, which failures may be retried, and the sequence diagrams
+> across all three repos — is
+> [`engage/extension-reply-outcome-protocol.md`](./engage/extension-reply-outcome-protocol.md).
+> This doc covers auth and the reply mechanics only.
+
 ---
 
 ## 1. Three frontends, two auth systems

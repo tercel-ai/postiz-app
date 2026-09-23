@@ -20,6 +20,7 @@ X and Reddit. This is the entry point to all Engage docs.
 | [`reddit-egress-rollout.md`](./reddit-egress-rollout.md) | Ops/Dev | Cross-repo rollout for the Reddit egress hardening (breaker, parked posts, extension fallback) + what the 2026-09 outage actually was. |
 | [`reddit-metrics-sync-todo.md`](./reddit-metrics-sync-todo.md) | Dev | Open TODOs on Reddit metrics syncing. |
 | [`opportunity-content-rendering.md`](./opportunity-content-rendering.md) | **Dev / Frontend** | What `postContent` / `mediaUrls` hold, and the rules every client MUST follow to render them — never `innerHTML`, how to linkify URLs / `@mentions` / `#hashtags` per platform, attachment layout. Includes the open frontend gaps. |
+| [`extension-reply-outcome-protocol.md`](./extension-reply-outcome-protocol.md) | **Dev / Frontend** | How an in-browser reply reports what happened across `aisee-app` / `aisee-browser-extension` / `postiz-app`: sequence diagrams for publish-trigger, reply success, retryable failure, unconfirmed send and re-entry; the `state` x `lastError` semantics; the attempt-flag verdict table (which failures may be retried and which would double-post); and the `aisee-app` code still to adopt. |
 | [`x-tab-only-migration.md`](./x-tab-only-migration.md) | **Dev / Ops** | Migration plan: every remaining server-side X API read, what the extension's browser-tab path already covers, and the order to retire them. Includes the switches that turn the server-side X scan off. |
 | [`author-followers-null.md`](./author-followers-null.md) | Dev | Why `authorFollowers` was null on every X row — three independent causes, two fixed, one open. |
 | [`reference-post-generation.md`](./reference-post-generation.md) | **Dev** | Backend implemented, frontend not built: generate + save an original `Post` (account-less DRAFT) from a user-picked Engage opportunity as reference. `Post.referenceOpportunityId` + `settings.referenceOpportunity` attribution, single `POST /opportunities/:id/generate-post` call, output-side anti-plagiarism gate, dedicated billing subtype. |
@@ -34,6 +35,7 @@ X and Reddit. This is the entry point to all Engage docs.
 - **Calling the API** → [`api.md`](./api.md)
 - **Operating it day-to-day** (sync metrics, trigger scans, repair data) → [`scripts.md`](./scripts.md)
 - **Turning the server-side X scan off / moving X reads to the extension** → [`x-tab-only-migration.md`](./x-tab-only-migration.md)
+- **Showing whether a reply actually went out** (spinner, Retry, "last attempt failed") → [`extension-reply-outcome-protocol.md`](./extension-reply-outcome-protocol.md)
 - **Rendering an opportunity body on any surface** (links, mentions, images) → [`opportunity-content-rendering.md`](./opportunity-content-rendering.md)
 - **Rendering a sent reply's metrics** (which keys exist per platform, what a missing key means) → [`reply-metrics-reference.md`](./reply-metrics-reference.md)
 - **Adding a write endpoint, or tuning what a subscriber may push** → [`write-path-limits.md`](./write-path-limits.md)
