@@ -16,12 +16,49 @@ import AdmZip from 'adm-zip';
 type Platform = 'chrome' | 'firefox';
 const PLATFORMS: Platform[] = ['chrome', 'firefox'];
 
-function settingKey(platform: Platform) {
-  return `extension.${platform}`;
+/**
+ * Which release line a build belongs to.
+ *
+ * dev and prod are two DIFFERENT extensions — different signing key, id and
+ * name — but they used to be stored under one filename and one setting key, so
+ * whichever was uploaded second silently replaced the first. The prod
+ * `downloadUrl` served by the public endpoint would start pointing at a dev
+ * build, and the dev one would vanish.
+ */
+type Channel = 'prod' | 'dev';
+
+/**
+ * The name the extension's own build gives a non-production build.
+ *
+ * vite.config.base.ts layers manifest.dev.json over EVERY build that is not an
+ * explicit `EXTENSION_ENV=production` release, and that overlay sets this name.
+ * A production build keeps the base manifest's plain "Aisee" — manifest.prod.json
+ * carries only the signing key. So the name in the uploaded zip IS the channel,
+ * and it is the one marker present in the artifact itself.
+ */
+const DEV_BUILD_NAME = 'Aisee - Dev';
+
+function detectChannel(manifestName: string | undefined): Channel {
+  return manifestName?.trim() === DEV_BUILD_NAME ? 'dev' : 'prod';
 }
 
-function extensionFilename(platform: Platform, version: string) {
-  return `aisee-extension-${platform}-${version}.zip`;
+/**
+ * Prod keeps the bare key and filename, so every URL already published and
+ * every reader of `extension.chrome` (notably the unauthenticated
+ * GET /public/extension/latest, which the installed extension polls) keeps
+ * working untouched. Only the dev line is new.
+ */
+function settingKey(platform: Platform, channel: Channel = 'prod') {
+  return channel === 'dev' ? `extension.${platform}.dev` : `extension.${platform}`;
+}
+
+function extensionFilename(
+  platform: Platform,
+  version: string,
+  channel: Channel = 'prod'
+) {
+  const suffix = channel === 'dev' ? '-dev' : '';
+  return `aisee-extension-${platform}${suffix}-${version}.zip`;
 }
 
 @ApiTags('Admin')
@@ -30,12 +67,27 @@ function extensionFilename(platform: Platform, version: string) {
 export class AdminExtensionController {
   constructor(private _settingsService: SettingsService) {}
 
+  /**
+   * Both release lines. `chrome`/`firefox` keep their exact previous meaning
+   * (the production build), so an admin UI that has not been updated is
+   * unaffected; `chromeDev`/`firefoxDev` are additive.
+   */
   @Get('/')
   async getLatest() {
-    const [chrome, firefox] = await Promise.all(
-      PLATFORMS.map((p) => this._settingsService.get<Record<string, string>>(settingKey(p)))
-    );
-    return { chrome: chrome ?? null, firefox: firefox ?? null };
+    const [chrome, firefox, chromeDev, firefoxDev] = await Promise.all([
+      ...PLATFORMS.map((p) =>
+        this._settingsService.get<Record<string, string>>(settingKey(p, 'prod'))
+      ),
+      ...PLATFORMS.map((p) =>
+        this._settingsService.get<Record<string, string>>(settingKey(p, 'dev'))
+      ),
+    ]);
+    return {
+      chrome: chrome ?? null,
+      firefox: firefox ?? null,
+      chromeDev: chromeDev ?? null,
+      firefoxDev: firefoxDev ?? null,
+    };
   }
 
   @Post('/upload/chrome')
@@ -58,9 +110,10 @@ export class AdminExtensionController {
       throw new BadRequestException('Only .zip files are accepted');
     }
 
-    const version = this._readVersionFromZip(file.buffer);
+    const { version, name } = this._readManifestFromZip(file.buffer);
+    const channel = detectChannel(name);
 
-    const filename = extensionFilename(platform, version);
+    const filename = extensionFilename(platform, version, channel);
     const storage = UploadFactory.createStorage();
     const downloadUrl = await storage.uploadBuffer(
       `extensions/${filename}`,
@@ -69,15 +122,27 @@ export class AdminExtensionController {
     );
     const meta = { version, downloadUrl, releasedAt: new Date().toISOString() };
 
-    await this._settingsService.set(settingKey(platform), meta, {
+    await this._settingsService.set(settingKey(platform, channel), meta, {
       type: 'object',
-      description: `Latest ${platform} extension release`,
+      description: `Latest ${platform} extension release (${channel})`,
     });
 
-    return { platform, version, downloadUrl };
+    return { platform, channel, version, downloadUrl };
   }
 
-  private _readVersionFromZip(buffer: Buffer): string {
+  /**
+   * Reads the zip's OWN manifest — not the filename, which the uploader
+   * chooses and which therefore cannot be trusted to say which build this is.
+   *
+   * `manifest.json` must sit at the zip ROOT: that is what Chrome's own
+   * drag-to-install expects, and it is what scripts/pack.sh produces. A zip
+   * that wraps the build in a folder (`zip -r out.zip dist`) fails here, which
+   * is the same way it would fail to install.
+   */
+  private _readManifestFromZip(buffer: Buffer): {
+    version: string;
+    name?: string;
+  } {
     let zip: AdmZip;
     try {
       zip = new AdmZip(buffer);
@@ -105,6 +170,10 @@ export class AdminExtensionController {
       throw new BadRequestException(`Invalid version format "${version}": expected MAJOR.MINOR.PATCH`);
     }
 
-    return version;
+    const name = manifest['name'];
+    return {
+      version,
+      ...(typeof name === 'string' ? { name } : {}),
+    };
   }
 }
