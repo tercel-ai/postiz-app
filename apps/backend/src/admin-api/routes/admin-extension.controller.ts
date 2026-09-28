@@ -16,15 +16,6 @@ import AdmZip from 'adm-zip';
 type Platform = 'chrome' | 'firefox';
 const PLATFORMS: Platform[] = ['chrome', 'firefox'];
 
-/**
- * Which release line a build belongs to.
- *
- * dev and prod are two DIFFERENT extensions — different signing key, id and
- * name — but they used to be stored under one filename and one setting key, so
- * whichever was uploaded second silently replaced the first. The prod
- * `downloadUrl` served by the public endpoint would start pointing at a dev
- * build, and the dev one would vanish.
- */
 type Channel = 'prod' | 'dev';
 
 /**
@@ -43,13 +34,12 @@ function detectChannel(manifestName: string | undefined): Channel {
 }
 
 /**
- * Prod keeps the bare key and filename, so every URL already published and
- * every reader of `extension.chrome` (notably the unauthenticated
- * GET /public/extension/latest, which the installed extension polls) keeps
- * working untouched. Only the dev line is new.
+ * Dev and prod use separate databases, so both environments must keep reading
+ * and writing the same browser setting keys. The channel only distinguishes
+ * artifact filenames in shared object storage.
  */
-function settingKey(platform: Platform, channel: Channel = 'prod') {
-  return channel === 'dev' ? `extension.${platform}.dev` : `extension.${platform}`;
+function settingKey(platform: Platform) {
+  return `extension.${platform}`;
 }
 
 function extensionFilename(
@@ -67,26 +57,16 @@ function extensionFilename(
 export class AdminExtensionController {
   constructor(private _settingsService: SettingsService) {}
 
-  /**
-   * Both release lines. `chrome`/`firefox` keep their exact previous meaning
-   * (the production build), so an admin UI that has not been updated is
-   * unaffected; `chromeDev`/`firefoxDev` are additive.
-   */
   @Get('/')
   async getLatest() {
-    const [chrome, firefox, chromeDev, firefoxDev] = await Promise.all([
-      ...PLATFORMS.map((p) =>
-        this._settingsService.get<Record<string, string>>(settingKey(p, 'prod'))
-      ),
-      ...PLATFORMS.map((p) =>
-        this._settingsService.get<Record<string, string>>(settingKey(p, 'dev'))
-      ),
-    ]);
+    const [chrome, firefox] = await Promise.all(
+      PLATFORMS.map((platform) =>
+        this._settingsService.get<Record<string, string>>(settingKey(platform))
+      )
+    );
     return {
       chrome: chrome ?? null,
       firefox: firefox ?? null,
-      chromeDev: chromeDev ?? null,
-      firefoxDev: firefoxDev ?? null,
     };
   }
 
@@ -122,7 +102,7 @@ export class AdminExtensionController {
     );
     const meta = { version, downloadUrl, releasedAt: new Date().toISOString() };
 
-    await this._settingsService.set(settingKey(platform, channel), meta, {
+    await this._settingsService.set(settingKey(platform), meta, {
       type: 'object',
       description: `Latest ${platform} extension release (${channel})`,
     });
