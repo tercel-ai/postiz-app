@@ -45,6 +45,7 @@ describe('UsersService.getUserLimits', () => {
       postChannelLimit: 0,
       postSendLimit: 0,
       noActiveSubscription: true,
+      blockedReason: 'no_package',
     });
     expect(postPlanLimits.applyOverrides).not.toHaveBeenCalled();
   });
@@ -57,6 +58,8 @@ describe('UsersService.getUserLimits', () => {
       postChannelLimit: 0,
       postSendLimit: 0,
       noActiveSubscription: true,
+      blockedReason: 'stale_period',
+      status: 'active',
     });
     expect(postPlanLimits.applyOverrides).not.toHaveBeenCalled();
   });
@@ -102,6 +105,8 @@ describe('UsersService.getUserLimits', () => {
           postChannelLimit: 0,
           postSendLimit: 0,
           noActiveSubscription: true,
+          blockedReason: 'invalid_status',
+          status,
         });
         expect(postPlanLimits.applyOverrides).not.toHaveBeenCalled();
       });
@@ -138,6 +143,8 @@ describe('UsersService.getUserLimits', () => {
         postChannelLimit: 0,
         postSendLimit: 0,
         noActiveSubscription: true,
+        blockedReason: 'stale_period',
+        status: 'active',
       });
       expect(postPlanLimits.applyOverrides).not.toHaveBeenCalled();
     });
@@ -149,8 +156,54 @@ describe('UsersService.getUserLimits', () => {
           postChannelLimit: 0,
           postSendLimit: 0,
           noActiveSubscription: true,
+          blockedReason: 'stale_period',
+          status: 'active',
         });
       }
+    });
+  });
+
+  // Regression guard. A field only SOME block branches carry cannot be read
+  // after `'noActiveSubscription' in limits` narrowing, and reaches HTTP clients
+  // as something nobody can rely on — which is exactly what an earlier `status`
+  // field did here. Every block branch must answer why it blocked.
+  describe('every block branch reports why', () => {
+    const cases: Array<[string, Parameters<typeof build>[0], string]> = [
+      ['no package', { pkg: null }, 'no_package'],
+      [
+        'invalid status',
+        { pkg: { ...ACTIVE_PKG, status: 'cancelled' } },
+        'invalid_status',
+      ],
+      [
+        'stale period',
+        { pkg: { ...ACTIVE_PKG, periodEnd: '2020-01-01T00:00:00.000Z' } },
+        'stale_period',
+      ],
+    ];
+
+    for (const [name, opts, expected] of cases) {
+      it(`${name} → ${expected}`, async () => {
+        const { service } = build(opts);
+        const limits = await service.getUserLimits('u1');
+
+        expect(limits).toBeTruthy();
+        expect('noActiveSubscription' in limits!).toBe(true);
+        expect((limits as any).blockedReason).toBe(expected);
+      });
+    }
+
+    it('names the aisee status whenever a package was returned', async () => {
+      const { service } = build({ pkg: { ...ACTIVE_PKG, status: 'past_due_forever' } });
+      expect((await service.getUserLimits('u1')) as any).toMatchObject({
+        blockedReason: 'invalid_status',
+        status: 'past_due_forever',
+      });
+    });
+
+    it('omits status only when there was no package to read it from', async () => {
+      const { service } = build({ pkg: null });
+      expect((await service.getUserLimits('u1')) as any).not.toHaveProperty('status');
     });
   });
 

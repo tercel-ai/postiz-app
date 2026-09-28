@@ -26,7 +26,11 @@ export class AdminBillingController {
    *
    * List billing records with optional filters.
    * Query params:
-   *   - status: pending | success | failed | skipped (default: all)
+   *   - status: pending | success | failed | skipped | internal | accruing |
+   *             reserved | released | unbilled (default: all)
+   *             `accruing` = still accumulating, not charged yet; this is the
+   *             listing that surfaces an accrual window left behind by a stream
+   *             that went quiet. Settle one with POST /admin/billing/retry/:id.
    *   - organizationId: filter by org
    *   - businessType: ai_copywriting | image_gen | video_gen
    *   - page: page number (default: 1)

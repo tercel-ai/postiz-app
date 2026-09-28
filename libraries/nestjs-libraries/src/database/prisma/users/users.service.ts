@@ -87,8 +87,30 @@ export class UsersService {
   // because 0 on an active package is a legitimate value ("zero free posts —
   // every post is overage-charged"). On the active member the limits come from
   // post_plan_limits (Settings), where null = no limit.
+  //
+  // The sentinel also carries WHY it blocked, because the three causes are not
+  // the same problem for the person on the other end:
+  //   no_package     — nothing to bill against; they need to subscribe.
+  //   invalid_status — aisee-core says the subscription is cancelled/expired/
+  //                    refunded; they need to renew. `status` names which.
+  //   stale_period   — the status is still VALID but the period ran out long
+  //                    ago, i.e. aisee-core neither renewed nor expired the
+  //                    record. That is a missed renewal webhook on OUR side:
+  //                    the user most likely paid. Telling them to subscribe
+  //                    would be wrong — this one belongs to support.
+  // Anything added here must be declared on the type below and set on ALL three
+  // branches; a field only some branches carry cannot be read after
+  // `'noActiveSubscription' in limits` narrowing, and silently reaches HTTP
+  // clients via GET /user/subscription as a field nobody can rely on.
   async getUserLimits(userId: string): Promise<
-    | { postChannelLimit: number; postSendLimit: number; noActiveSubscription: true }
+    | {
+        postChannelLimit: number;
+        postSendLimit: number;
+        noActiveSubscription: true;
+        blockedReason: 'no_package' | 'invalid_status' | 'stale_period';
+        /** aisee-core's raw status — absent only when no package was returned. */
+        status?: string;
+      }
     | { postChannelLimit: number | null; postSendLimit: number | null; periodStart: string; periodEnd: string; name: string; status: string; interval: string; plan?: string }
     | null
   > {
@@ -101,7 +123,12 @@ export class UsersService {
     // API failed or no active package — hard block
     if (pkg === null) {
       this.logger.warn(`No credit package found for user=${userId}, blocking channels and posts`);
-      return { postChannelLimit: 0, postSendLimit: 0, noActiveSubscription: true };
+      return {
+        postChannelLimit: 0,
+        postSendLimit: 0,
+        noActiveSubscription: true,
+        blockedReason: 'no_package',
+      };
     }
 
     // aisee-core owns the answer to "is this subscription valid" — see
@@ -112,7 +139,13 @@ export class UsersService {
     // to keep serving. Read the status it already sends us instead.
     if (!VALID_SUBSCRIPTION_STATUSES.has(String(pkg.status).toLowerCase())) {
       this.logger.warn(`Inactive subscription status=${pkg.status} for user=${userId}, blocking channels and posts`);
-      return { postChannelLimit: 0, postSendLimit: 0, noActiveSubscription: true, status: pkg.status };
+      return {
+        postChannelLimit: 0,
+        postSendLimit: 0,
+        noActiveSubscription: true,
+        blockedReason: 'invalid_status',
+        status: pkg.status,
+      };
     }
 
     // periodEnd is now a staleness backstop rather than the verdict. Renewal
@@ -127,7 +160,13 @@ export class UsersService {
       this.logger.error(
         `Subscription expired or periodEnd invalid status=${pkg.status} but periodEnd=${pkg.periodEnd} is beyond the renewal grace window for user=${userId} — renewal likely missed; blocking channels and posts`
       );
-      return { postChannelLimit: 0, postSendLimit: 0, noActiveSubscription: true, status: pkg.status };
+      return {
+        postChannelLimit: 0,
+        postSendLimit: 0,
+        noActiveSubscription: true,
+        blockedReason: 'stale_period',
+        status: pkg.status,
+      };
     }
 
     // post_plan_limits (Settings) REPLACES the package's raw numbers once the

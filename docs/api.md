@@ -28,6 +28,7 @@ Modules with a dedicated, parameter-level API reference:
 | Admin | [admin-api.md](./admin-api.md) | `/admin/settings` + `/admin/ai-pricing` |
 | Admin — AI pricing | [ai-pricing-module.md](./ai-pricing-module.md) | AI cost/pricing model behind `/admin/ai-pricing` |
 | Billing / credits | [aisee-integration.md](./aisee-integration.md) | Credit billing model behind `/billing` + `/stripe` |
+| Billing — what calls cost | [credits-api-billing.md](./credits-api-billing.md) | Per-endpoint credit cost, statement, running out, what is not charged |
 | Copilot / agents | [agents-module-technical-guide.md](./agents-module-technical-guide.md) | Agent graph behind `/copilot` |
 | DataTicks (internal) | [data-ticks-module.md](./data-ticks-module.md) | Analytics aggregation feeding the dashboards |
 
@@ -305,13 +306,13 @@ Modules with a dedicated, parameter-level API reference:
 
 ### [copilot.controller.ts](../apps/backend/src/api/routes/copilot.controller.ts) — `/copilot`
 📖 agent internals → [agents-module-technical-guide.md](./agents-module-technical-guide.md) · 📝 endpoint-level reference TODO
-| Method | Path |
-| --- | --- |
-| POST | `/copilot/chat` |
-| POST | `/copilot/agent` |
-| GET | `/copilot/credits` |
-| GET | `/copilot/:thread/list` |
-| GET | `/copilot/list` |
+| Method | Path | Notes |
+| --- | --- | --- |
+| POST | `/copilot/chat` | ⚠️ off by default — 404 unless `COPILOT_CHAT_ENABLED=true` |
+| POST | `/copilot/agent` | |
+| GET | `/copilot/credits` | |
+| GET | `/copilot/:thread/list` | |
+| GET | `/copilot/list` | |
 
 ### [settings.controller.ts](../apps/backend/src/api/routes/settings.controller.ts) — `/settings`
 📖 **[settings-module.md](./settings-module.md)**

@@ -307,6 +307,13 @@ model BillingRecord {
   /// failed   → Aisee deduction failed or refunded
   /// skipped  → Aisee not configured (self-hosted)
   /// internal → BILL_TYPE=internal, subscription billing, no Aisee call
+  /// accruing → still accumulating cost, not charged yet (see AiseeCreditService
+  ///            .accrueCollectedUsages). NOT the same as `pending`: an accruing
+  ///            row is a healthy steady state, not a stuck charge.
+  /// reserved → engage reply draft reserved against the monthly cap
+  /// released → reservation released (generation failed/aborted), uncounted
+  /// unbilled → reply delivered but the Aisee charge failed; still counts
+  ///            toward the cap so a billing outage cannot lift it
   status           String       @default("pending")
   /// Remaining balance returned by Aisee after deduction
   remainingBalance String?

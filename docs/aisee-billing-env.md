@@ -63,7 +63,7 @@ BillingRecord.id  →  sent to Aisee as postiz_billing_id  →  enables cross-sy
 | `costItems` | JSON-serialised `AiseeCostItem[]` breakdown |
 | `relatedId` | Optional related entity ID (e.g. threadId, mediaId) — can be back-filled |
 | `data` | Flexible business context JSON (prompt, generation params, associated entities) |
-| `status` | `pending` / `success` / `failed` / `skipped` / `internal` |
+| `status` | `pending` / `success` / `failed` / `skipped` / `internal` / `accruing` (still accumulating, not charged yet) / `reserved` / `released` / `unbilled` (engage reply cap) |
 | `transactionId` | Aisee transaction ID (set after successful deduction) |
 | `remainingBalance` | User's remaining balance after deduction |
 | `debtAmount` | Non-null if user went into debt |
@@ -73,7 +73,8 @@ BillingRecord.id  →  sent to Aisee as postiz_billing_id  →  enables cross-sy
 
 | Scenario | Trigger | Business Type | Sub Type | relatedId | BILL_TYPE=internal | BILL_TYPE=third |
 |----------|---------|---------------|----------|-----------|--------------------|-----------------
-| **Copilot chat** | `POST /copilot/agent` | `ai_copywriting` | `chat` | threadId | Aisee (pre-check + post-billing) | Same |
+| **Copilot agent** | `POST /copilot/agent` | `ai_copywriting` | `chat` | threadId | Aisee (pre-check + post-billing) | Same |
+| **Copilot chat** (off by default, `COPILOT_CHAT_ENABLED`) | `POST /copilot/chat` | `ai_copywriting` | `chat` | — | Aisee, **accrued** per org per UTC hour | Same |
 | **Image generation** | `POST /media/generate-image` | `image_gen` | `image` | null | Subscription useCredit() only | Aisee credits only |
 | **Image gen+save** | `POST /media/generate-image-with-prompt` | `image_gen` | `image` | mediaId | Subscription useCredit() only | Aisee credits only |
 | **Agent post generation** | Agent workflow | `ai_copywriting` | `post_gen` | null | Aisee only | Same |

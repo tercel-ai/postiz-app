@@ -12,8 +12,22 @@ import { AiPricingService, AiCostResult } from './ai-pricing.service';
 import { AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
 import {
   PrismaRepository,
+  PrismaTransaction,
 } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { isInternalBilling } from '@gitroom/nestjs-libraries/services/billing.helper';
+
+/**
+ * A BillingRecord still accumulating cost that has NOT been charged yet.
+ *
+ * Deliberately distinct from `pending` ("row created, Aisee call not yet made"),
+ * which /admin/billing/summary counts as actionRequired and which flips its
+ * `healthy` flag. An accruing row is the normal steady state of an accrual
+ * stream, not a stuck charge, so it must not trip that alarm.
+ */
+export const ACCRUING_STATUS = 'accruing';
+
+/** Postgres serialization failure — the retryable outcome of a SERIALIZABLE conflict. */
+const SERIALIZATION_FAILURE_CODE = 'P2034';
 
 export interface AiseeCreditExecOptions {
   userId: string;
@@ -53,7 +67,8 @@ export class AiseeCreditService {
     private readonly aiseeClient: AiseeClient,
     private readonly aiPricingService: AiPricingService,
     private readonly _billingRecord: PrismaRepository<'billingRecord'>,
-    private readonly _userOrganization: PrismaRepository<'userOrganization'>
+    private readonly _userOrganization: PrismaRepository<'userOrganization'>,
+    private readonly _tx: PrismaTransaction
   ) {}
 
   // Short-lived cache: orgId → userId (avoids double DB query per billing flow)
@@ -428,6 +443,289 @@ export class AiseeCreditService {
     opts: AiseeCreditExecOptions,
     usages: AiUsageInfo[]
   ): Promise<AiseeDeductResponse | null> {
+    const costItems = await this.usagesToCostItems(opts, usages);
+
+    if (costItems.length === 0) {
+      return null;
+    }
+
+    return this.deductWithItems(opts, costItems);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Accrual: many small calls, one charge
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Accumulate `usages` onto a single per-org, per-window BillingRecord instead
+   * of charging every call.
+   *
+   * Why this exists: /copilot/chat is driven by CopilotTextarea autosuggestions,
+   * which fire on every typing pause. Charging per request would mean one
+   * BillingRecord row and two aisee-core round-trips per pause — load
+   * proportional to keystrokes rather than to spend.
+   *
+   * Settlement is LAZY; there is no scheduled sweep. A window is charged when
+   * either:
+   *   - a later request on the same stream arrives in a NEWER window, or
+   *   - the accrued total reaches `thresholdCredits`.
+   *
+   * The consequence is accepted, not overlooked: a stream that goes quiet
+   * mid-window leaves its last row uncharged — bounded by `thresholdCredits`,
+   * listed by `GET /admin/billing/records?status=accruing`, and chargeable with
+   * `POST /admin/billing/retry/:id`. Nothing is lost, it just waits.
+   *
+   * `streamKey` must identify the stream WITHOUT the window (e.g.
+   * `copilot_chat_{orgId}`): it is the prefix used to find that stream's older
+   * windows, so two orgs — or two surfaces — never settle each other's rows.
+   */
+  async accrueCollectedUsages(
+    opts: Omit<AiseeCreditExecOptions, 'taskId'> & { streamKey: string },
+    usages: AiUsageInfo[],
+    thresholdCredits: number
+  ): Promise<void> {
+    const costItems = await this.usagesToCostItems(opts, usages);
+    if (costItems.length === 0) {
+      return;
+    }
+
+    const taskId = `postiz_${opts.streamKey}_${this.accrualWindow()}`;
+
+    // Older windows first: they are complete, and charging them before touching
+    // the current one keeps the stream's history in order even if the accrual
+    // below (or its threshold flush) throws.
+    await this.settleStaleWindows(opts.userId, opts.streamKey, taskId);
+
+    // usages.length, NOT costItems.length: when pricing cannot resolve,
+    // usagesToCostItems collapses every call into ONE minimum-charge item whose
+    // amount already covers them all. Counting line items there would under-report
+    // the calls by exactly the factor that matters.
+    const accrued = await this.accrueOntoWindow(
+      taskId,
+      opts,
+      costItems,
+      usages.length
+    );
+    if (!accrued) {
+      return;
+    }
+
+    if (parseFloat(accrued.amount) >= thresholdCredits) {
+      await this.settleAccruedRecord(accrued.recordId);
+    }
+  }
+
+  /** UTC hour bucket — the accrual window. */
+  private accrualWindow(now = new Date()): string {
+    return now.toISOString().slice(0, 13).replace(/[-T]/g, '');
+  }
+
+  /**
+   * Read-modify-write the window's row under SERIALIZABLE isolation.
+   *
+   * Two concurrent requests from the same org would otherwise lose one
+   * increment — `amount` is a decimal STRING, so there is no atomic column
+   * increment to lean on. Postgres SSI aborts the loser and the retry reads the
+   * winner's committed row. Same mechanism engage's reserveReplyGeneration
+   * relies on for its cap.
+   */
+  private async accrueOntoWindow(
+    taskId: string,
+    opts: Omit<AiseeCreditExecOptions, 'taskId'> & { streamKey: string },
+    incoming: AiseeCostItem[],
+    callCount: number
+  ): Promise<{ recordId: string; amount: string } | null> {
+    const subType = AiseeCreditService.inferSubType(
+      opts.businessType,
+      opts.subType as AiseeBusinessSubType
+    );
+    const incomingAmount = this.sumDecimalStrings(
+      incoming.map((item) => item.amount)
+    );
+
+    try {
+      return await this.runSerializable(async (tx) => {
+        const existing = await tx.billingRecord.findUnique({ where: { taskId } });
+
+        if (!existing) {
+          const created = await tx.billingRecord.create({
+            data: {
+              organizationId: opts.userId,
+              taskId,
+              amount: incomingAmount,
+              businessType: opts.businessType,
+              subType: subType || null,
+              description: opts.description,
+              costItems: JSON.stringify(incoming),
+              relatedId: opts.relatedId || null,
+              data: this.mergeAccrualData(null, opts.data, callCount),
+              status: ACCRUING_STATUS,
+            },
+          });
+          return { recordId: created.id, amount: created.amount };
+        }
+
+        // A window already charged (or being charged) must not be reopened —
+        // its taskId is spent as far as Aisee is concerned, so topping it up
+        // would silently drop the new cost. Roll into the next window instead.
+        if (existing.status !== ACCRUING_STATUS) {
+          this.logger.warn(
+            `Accrual window ${taskId} is already ${existing.status}; skipping ${incomingAmount} credits`
+          );
+          return null;
+        }
+
+        const merged = this.mergeCostItems(
+          this.parseCostItems(existing.costItems),
+          incoming
+        );
+        const amount = this.sumDecimalStrings(merged.map((i) => i.amount));
+
+        const updated = await tx.billingRecord.update({
+          where: { id: existing.id },
+          data: {
+            amount,
+            costItems: JSON.stringify(merged),
+            data: this.mergeAccrualData(
+              existing.data as Record<string, unknown> | null,
+              opts.data,
+              callCount
+            ),
+          },
+        });
+        return { recordId: updated.id, amount: updated.amount };
+      });
+    } catch (err) {
+      // Accrual is bookkeeping on a response that already went out; losing a
+      // window is better than throwing from a 'close' handler.
+      this.logger.error(`Failed to accrue onto ${taskId}:`, err);
+      return null;
+    }
+  }
+
+  /**
+   * Charge every window of this stream except `currentTaskId`. Sequential on
+   * purpose: each settle is an Aisee round-trip, and a stream normally has at
+   * most one stale window.
+   */
+  private async settleStaleWindows(
+    organizationId: string,
+    streamKey: string,
+    currentTaskId: string
+  ): Promise<void> {
+    try {
+      const stale = await this._billingRecord.model.billingRecord.findMany({
+        where: {
+          organizationId,
+          status: ACCRUING_STATUS,
+          taskId: { startsWith: `postiz_${streamKey}_`, not: currentTaskId },
+        },
+        select: { id: true },
+        orderBy: { createdAt: 'asc' },
+      });
+
+      for (const record of stale) {
+        await this.settleAccruedRecord(record.id);
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to settle stale accrual windows for ${streamKey}:`,
+        err
+      );
+    }
+  }
+
+  /**
+   * Charge an accruing row: flip it out of `accruing` FIRST so a concurrent
+   * accrual cannot keep adding to a row that is about to be sent, then run the
+   * same Aisee deduct/confirm the direct path uses.
+   */
+  private async settleAccruedRecord(recordId: string): Promise<void> {
+    const internal = isInternalBilling();
+
+    // Claim it: the conditional status guard means only one caller can win, so
+    // two overlapping requests cannot charge the same window twice.
+    const claimed = await this._billingRecord.model.billingRecord
+      .updateMany({
+        where: { id: recordId, status: ACCRUING_STATUS },
+        data: { status: internal ? 'internal' : 'pending' },
+      })
+      .catch((err) => {
+        this.logger.error(`Failed to claim accrual ${recordId}:`, err);
+        return { count: 0 };
+      });
+
+    if (claimed.count === 0) {
+      return;
+    }
+
+    const record = await this._billingRecord.model.billingRecord.findUnique({
+      where: { id: recordId },
+    });
+    if (!record) {
+      return;
+    }
+
+    if (internal) {
+      return;
+    }
+
+    try {
+      const aiseeUserId = await this.resolveOwnerUserId(record.organizationId);
+      const costItems = this.parseCostItems(record.costItems);
+      const data = (record.data as Record<string, unknown>) || {};
+
+      const deduction = await this.aiseeClient.deductCredits({
+        userId: aiseeUserId,
+        amount: record.amount,
+        taskId: record.taskId,
+        description: record.description,
+        relatedId: record.relatedId || undefined,
+        channel: AiseeCreditService.resolveChannel(
+          record.businessType as AiseeBusinessType,
+          data
+        ),
+        data: {
+          business_type: record.businessType,
+          sub_type: record.subType || undefined,
+          cost_items: costItems,
+          postiz_billing_id: record.id,
+          ...data,
+        },
+      });
+
+      await this.updateBillingRecord(record.id, deduction);
+
+      if (!deduction.success && !deduction.skipped) {
+        this.logger.error(
+          `Accrual deduction failed for task=${record.taskId}: ${deduction.error}`
+        );
+        return;
+      }
+
+      if (deduction.success && !deduction.skipped && deduction.transactionId) {
+        this.fireConfirm(record.taskId, 'success');
+      }
+    } catch (err) {
+      // The row is left at 'pending', which /admin/billing/summary already
+      // reports as actionRequired and POST /admin/billing/retry/:id can finish.
+      this.logger.error(`Failed to settle accrual ${record.taskId}:`, err);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Internal helpers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Price `usages` into cost items. Shared with billCollectedUsages so the
+   * accrual path applies the same minimum charge for untracked calls — usage
+   * that reached a model is never free, whichever path settles it.
+   */
+  private async usagesToCostItems(
+    opts: { taskId?: string; streamKey?: string },
+    usages: AiUsageInfo[]
+  ): Promise<AiseeCostItem[]> {
     const costItems: AiseeCostItem[] = [];
     for (const usage of usages) {
       const cost = await this.aiPricingService.calculateCost(usage);
@@ -438,30 +736,103 @@ export class AiseeCreditService {
     }
 
     if (costItems.length === 0 && usages.length > 0) {
-      // Token counts were 0 (tracking issue) but LLM was invoked.
-      // Apply a minimum charge so usage is never free.
       this.logger.warn(
-        `Zero-cost usages for task=${opts.taskId} (${usages.length} calls, tokens may not have been tracked). Applying minimum charge.`
+        `Zero-cost usages for ${opts.taskId ?? opts.streamKey} (${usages.length} calls, tokens may not have been tracked). Applying minimum charge.`
       );
       costItems.push({
         type: 'text',
-        amount: (0.01 * usages.length).toFixed(6), // 0.01 credits per untracked call
+        amount: (0.01 * usages.length).toFixed(6),
         model: usages[0]?.model || 'unknown',
         billing_mode: 'per_token',
         quantity: 0,
       });
     }
 
-    if (costItems.length === 0) {
-      return null;
-    }
-
-    return this.deductWithItems(opts, costItems);
+    return costItems;
   }
 
-  // ---------------------------------------------------------------------------
-  // Internal helpers
-  // ---------------------------------------------------------------------------
+  private parseCostItems(raw: string): AiseeCostItem[] {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      this.logger.warn('Unparseable costItems on an accrual row — treating as empty');
+      return [];
+    }
+  }
+
+  /**
+   * Fold incoming items into existing ones, keyed by what actually distinguishes
+   * a price line: type + model + billing_mode. Without this a busy window would
+   * carry one item per request, and that list is sent to Aisee verbatim.
+   */
+  private mergeCostItems(
+    existing: AiseeCostItem[],
+    incoming: AiseeCostItem[]
+  ): AiseeCostItem[] {
+    const byKey = new Map<string, AiseeCostItem>();
+    for (const item of [...existing, ...incoming]) {
+      const key = `${item.type}|${item.model}|${item.billing_mode}`;
+      const current = byKey.get(key);
+      if (!current) {
+        byKey.set(key, { ...item });
+        continue;
+      }
+      current.amount = this.sumDecimalStrings([current.amount, item.amount]);
+      current.quantity += item.quantity;
+    }
+    return [...byKey.values()];
+  }
+
+  /**
+   * Carry the caller's context onto the window and keep running counters. The
+   * first request's context wins for scalar fields — later ones only add to the
+   * counters, so the row says how many calls it covers and of which kind.
+   */
+  private mergeAccrualData(
+    existing: Record<string, unknown> | null,
+    incoming: Record<string, unknown> | undefined,
+    callCount: number
+  ): Record<string, unknown> {
+    const base = existing ?? { ...(incoming || {}) };
+    const previousCalls = Number(base.accruedCalls ?? 0);
+
+    const requestType = incoming?.requestType as string | undefined;
+    const byRequestType = {
+      ...((base.byRequestType as Record<string, number>) || {}),
+    };
+    if (requestType) {
+      byRequestType[requestType] = (byRequestType[requestType] || 0) + callCount;
+    }
+
+    return {
+      ...base,
+      accruedCalls: previousCalls + callCount,
+      ...(Object.keys(byRequestType).length > 0 && { byRequestType }),
+    };
+  }
+
+  /**
+   * Run `fn` in a SERIALIZABLE transaction, retrying a bounded number of times
+   * on a serialization conflict.
+   */
+  private async runSerializable<T>(fn: (tx: any) => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this._tx.model.$transaction(fn, {
+          isolationLevel: 'Serializable',
+        });
+      } catch (err) {
+        if (
+          attempt < 3 &&
+          (err as { code?: string })?.code === SERIALIZATION_FAILURE_CODE
+        ) {
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
 
   private costResultToItem(cost: AiCostResult): AiseeCostItem | null {
     if (!cost.pricingFound || cost.cost <= 0) {

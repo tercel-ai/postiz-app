@@ -54,6 +54,16 @@ function createService(
       model: {
         userOrganization: { findFirst: vi.fn().mockResolvedValue({ userId: 'user-1' }) },
       },
+    } as any,
+    // PrismaTransaction — only the accrual path uses it. Throw rather than pass
+    // an empty stub, so a future test that unexpectedly reaches accrual says so
+    // instead of failing on an undefined property.
+    {
+      model: {
+        $transaction: () => {
+          throw new Error('idempotency tests must not reach the accrual path');
+        },
+      },
     } as any
   );
   return { service, billingRecordModel, aiseeClient };

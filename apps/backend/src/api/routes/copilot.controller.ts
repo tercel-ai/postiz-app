@@ -15,7 +15,6 @@ import {
   copilotRuntimeNodeHttpEndpoint,
   copilotRuntimeNestEndpoint,
 } from '@copilotkit/runtime';
-import OpenAI from 'openai';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
 import { GetTimezone } from '@gitroom/nestjs-libraries/user/timezone.from.request';
@@ -31,8 +30,36 @@ import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai
 import { AiseeBusinessType, AiseeBusinessSubType, AiseeClient } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
 import { AiPricingService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/ai-pricing.service';
 import { runWithContext, getCollectedUsages } from '@gitroom/nestjs-libraries/chat/async.storage';
+import { withCopilotChatUsageTracking } from '@gitroom/nestjs-libraries/chat/billing.middleware';
 import { randomUUID } from 'crypto';
 import { logAiUsage } from '@gitroom/nestjs-libraries/openai/openai.service';
+import { createCopilotOpenRouterClient } from '@gitroom/nestjs-libraries/chat/copilot-openai-client';
+
+/**
+ * Credits an accruing /copilot/chat window may reach before it is charged
+ * immediately instead of waiting for the next window.
+ *
+ * It bounds two things at once: how much spend sits uncharged if a user goes
+ * quiet mid-hour, and how stale a heavy user's ledger gets. At current text
+ * pricing (~0.0015 credits per output token) 5 credits is on the order of a few
+ * thousand tokens — a busy editing session, not a keystroke.
+ */
+const COPILOT_CHAT_ACCRUAL_THRESHOLD_CREDITS = 5;
+
+/**
+ * Whether the site-wide CopilotKit runtime at POST /copilot/chat is served.
+ *
+ * Default OFF. The endpoint backs postiz-frontend's own editor assistant and
+ * autosuggestion boxes; `../aisee-app`, the frontend actually deployed against
+ * this backend, only uses /copilot/agent. Leaving it on would expose a billable
+ * LLM path with no consumer, so it has to be turned on deliberately by whoever
+ * is serving the postiz frontend.
+ */
+function isCopilotChatEnabled(): boolean {
+  return (
+    (process.env.COPILOT_CHAT_ENABLED ?? 'false').toLowerCase().trim() === 'true'
+  );
+}
 
 function hasValidOpenAiKey(): boolean {
   const key = process.env.OPENAI_API_KEY;
@@ -43,12 +70,13 @@ function isOpenRouterProvider(): boolean {
   return (process.env.IMAGE_PROVIDER || 'openai').toLowerCase() === 'openrouter';
 }
 
-// TODO: OpenAIAdapter is incompatible with openai v6 — it calls beta.chat.completions.stream()
-// which was removed in v6. Currently only used by /copilot/chat (works for now).
-// If it breaks, options:
-//   1. Write a custom CopilotServiceAdapter using v6 API (openai.chat.completions.create)
-//   2. Upgrade @copilotkit/runtime to a version that supports openai v6
-//   3. Downgrade openai to v4
+// OpenAIAdapter drives its client through `beta.chat.completions.stream()`,
+// which exists only in openai v4 — v6 (this repo's root dependency) removed it.
+// The adapter's own default client is fine, because @copilotkit/runtime pulls in
+// a nested openai v4; the hazard is passing it a client of ours. So the
+// OpenRouter branch below — which MUST inject a client, since
+// OpenAIAdapterParams has no baseURL knob — builds it from that same nested v4
+// via createCopilotOpenRouterClient(). See copilot-openai-client.ts.
 function createServiceAdapter(): OpenAIAdapter {
   if (isOpenRouterProvider() && !hasValidOpenAiKey()) {
     if (!process.env.OPENROUTER_API_KEY) {
@@ -56,15 +84,22 @@ function createServiceAdapter(): OpenAIAdapter {
         'OPENROUTER_API_KEY is required when IMAGE_PROVIDER=openrouter without OPENAI_API_KEY'
       );
     }
-    const openrouterClient = new OpenAI({
-      apiKey: process.env.OPENROUTER_API_KEY,
-      baseURL: 'https://openrouter.ai/api/v1',
-    });
+    const model = process.env.OPENROUTER_TEXT_MODEL || 'openai/gpt-4.1';
     return new OpenAIAdapter({
-      openai: openrouterClient as any,
-      model: process.env.OPENROUTER_TEXT_MODEL || 'openai/gpt-4.1',
+      // Cast: the param is typed against the root openai v6 types, but the
+      // adapter wants v4 — which is what this client is.
+      openai: withCopilotChatUsageTracking(
+        createCopilotOpenRouterClient(process.env.OPENROUTER_API_KEY),
+        { provider: 'openrouter', model }
+      ) as any,
+      model,
     });
   }
+  // NOTE: no usage tracking on this branch. The adapter builds its own client
+  // inside its constructor, so there is nothing for us to wrap and
+  // /copilot/chat goes unbilled here. Closing that gap means replacing
+  // OpenAIAdapter with a custom CopilotServiceAdapter; it is not a concern while
+  // IMAGE_PROVIDER=openrouter, which is the branch above.
   return new OpenAIAdapter({ model: 'gpt-4.1' });
 }
 
@@ -90,10 +125,34 @@ export class CopilotController {
     private _creditService: AiseeCreditService,
     private _aiPricingService: AiPricingService
   ) {}
+  /**
+   * Site-wide CopilotKit runtime: the post-editor assistant (CopilotPopup) and
+   * every CopilotTextarea autosuggestion box. Billed the same way as /agent
+   * below — `runWithContext` opens a usage-collection scope, the adapter's
+   * wrapped client pushes each completion's tokens into it, and the response
+   * 'close' settles it.
+   */
   @Post('/chat')
-  chatAgent(@Req() req: Request, @Res() res: Response) {
+  chatAgent(
+    @Req() req: Request,
+    @Res() res: Response,
+    @GetOrgFromRequest() organization: Organization
+  ) {
+    // Off by default — see isCopilotChatEnabled(). 404 rather than 403: when the
+    // runtime is not being served, the honest answer is that this route does not
+    // exist here.
+    if (!isCopilotChatEnabled()) {
+      res.status(404).json({
+        error: 'Copilot chat runtime is not enabled on this deployment',
+      });
+      return;
+    }
+
     if (!hasAnyApiKey()) {
+      // Answer the request. Returning without touching `res` under @Res() sends
+      // nothing at all, leaving the connection open until it times out.
       Logger.warn('No AI API key set (OPENAI_API_KEY or OPENROUTER_API_KEY), chat functionality will not work');
+      res.status(503).json({ error: 'AI is not configured on this deployment' });
       return;
     }
 
@@ -103,7 +162,25 @@ export class CopilotController {
       serviceAdapter: createServiceAdapter(),
     });
 
-    return copilotRuntimeHandler(req, res);
+    // Which UI produced the request. CopilotKit sends one of Chat, Suggestion,
+    // Task, TextareaCompletion, TextareaPopover — so an autosuggestion keystroke
+    // is distinguishable in the ledger from someone typing in the assistant, even
+    // though both arrive here. Recorded, not acted on: the two are charged alike,
+    // and this is the axis that would let that change.
+    const requestType: string | undefined =
+      req?.body?.variables?.data?.metadata?.requestType;
+
+    return runWithContext(
+      { requestId: randomUUID(), auth: organization, usages: [] },
+      () => {
+        res.on('close', () => {
+          this.billAfterResponse(organization, undefined, 'copilot_chat', {
+            requestType,
+          });
+        });
+        return copilotRuntimeHandler(req, res);
+      }
+    );
   }
 
   @Post('/agent')
@@ -116,7 +193,10 @@ export class CopilotController {
     @GetTimezone() timezone: string | undefined
   ) {
     if (!hasAnyApiKey()) {
+      // Same as /chat: a bare return under @Res() answers nothing and holds the
+      // connection until it times out.
       Logger.warn('No AI API key set (OPENAI_API_KEY or OPENROUTER_API_KEY), chat functionality will not work');
+      res.status(503).json({ error: 'AI is not configured on this deployment' });
       return;
     }
 
@@ -152,9 +232,10 @@ export class CopilotController {
     const handler = copilotRuntimeNestEndpoint({
       endpoint: '/copilot/agent',
       runtime,
-      // EmptyAdapter: Mastra agent handles LLM calls via @ai-sdk/openai → OpenRouter.
-      // OpenAIAdapter cannot be used here — openai v6 removed beta.chat.completions.stream().
-      // See createServiceAdapter() TODO for follow-up options.
+      // EmptyAdapter: the Mastra agent makes the LLM calls itself via
+      // @ai-sdk/openai → OpenRouter, and its usage is captured by
+      // withBillingTracking on the model. No service adapter is involved in
+      // inference here, so there is nothing for OpenAIAdapter to do.
       serviceAdapter: new EmptyAdapter(),
     });
 
@@ -229,9 +310,40 @@ export class CopilotController {
     return null;
   }
 
-  private billAfterResponse(organization: Organization, threadId?: string): void {
+  /**
+   * Settle the usages collected during one request.
+   *
+   * `surface` separates the two endpoints in the ledger. Both bill as
+   * ai_copywriting/chat, but only `data.surface` says whether the spend came from
+   * the Agent page or from the editor assistant / autosuggestion boxes — a
+   * distinction that matters because the latter fire without the user ever
+   * opening a chat. `extra.requestType` narrows that further, to which CopilotKit
+   * UI made the call.
+   */
+  private billAfterResponse(
+    organization: Organization,
+    threadId?: string,
+    surface: 'agent_chat' | 'copilot_chat' = 'agent_chat',
+    extra?: { requestType?: string }
+  ): void {
+    // Called from a response 'close' listener, where a synchronous throw is an
+    // uncaught exception rather than a failed request. AuthMiddleware guarantees
+    // req.org on every path that reaches a controller, so this is belt-and-braces
+    // against a future change there — but the cost of being wrong is the process.
+    if (!organization?.id) {
+      this.logger.warn(`[${surface}] no organization on request — nothing billed`);
+      return;
+    }
+
     const usages = getCollectedUsages();
     if (usages.length === 0) {
+      // Not necessarily an error — an aborted request or a turn the runtime
+      // answered without calling the model both land here. Worth a line anyway:
+      // on /copilot/chat it is also what a silently missing `usage` in the
+      // upstream stream looks like, and that WOULD be lost revenue.
+      this.logger.debug(
+        `[${surface}] no AI usage collected for org=${organization.id} — nothing billed`
+      );
       return;
     }
 
@@ -239,7 +351,35 @@ export class CopilotController {
       logAiUsage(usage);
     }
 
-    const taskId = AiseeClient.buildTaskId(`agent_chat_${organization.id}_${Date.now()}`);
+    // /copilot/chat accrues instead of charging per request: its autosuggestion
+    // boxes fire on every typing pause, so one charge per request would put a
+    // ledger row and two aisee-core round-trips behind every keystroke pause.
+    // /copilot/agent stays immediate — it is one deliberate turn per request.
+    if (surface === 'copilot_chat') {
+      this._creditService
+        .accrueCollectedUsages(
+          {
+            userId: organization.id,
+            streamKey: `${surface}_${organization.id}`,
+            businessType: AiseeBusinessType.AI_COPYWRITING,
+            subType: AiseeBusinessSubType.CHAT,
+            description: 'Copilot editor assistant / autosuggestions',
+            data: {
+              ...(extra?.requestType && { requestType: extra.requestType }),
+              source: 'chat',
+              surface,
+            },
+          },
+          usages,
+          COPILOT_CHAT_ACCRUAL_THRESHOLD_CREDITS
+        )
+        .catch((err) => {
+          this.logger.error(`Failed to accrue ${surface} usage:`, err);
+        });
+      return;
+    }
+
+    const taskId = AiseeClient.buildTaskId(`${surface}_${organization.id}_${Date.now()}`);
 
     this._creditService
       .billCollectedUsages(
@@ -249,13 +389,20 @@ export class CopilotController {
           businessType: AiseeBusinessType.AI_COPYWRITING,
           subType: AiseeBusinessSubType.CHAT,
           relatedId: threadId,
+          // Only the agent surface reaches here — copilot_chat returned above.
           description: 'Agent chat conversation',
-          data: { ...(threadId && { threadId }), messageCount: usages.length, source: 'chat' },
+          data: {
+            ...(threadId && { threadId }),
+            ...(extra?.requestType && { requestType: extra.requestType }),
+            messageCount: usages.length,
+            source: 'chat',
+            surface,
+          },
         },
         usages
       )
       .catch((err) => {
-        this.logger.error('Failed to bill agent chat usage:', err);
+        this.logger.error(`Failed to bill ${surface} usage:`, err);
       });
   }
 
