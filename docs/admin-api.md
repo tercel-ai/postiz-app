@@ -503,7 +503,18 @@ The ledger. All filters optional and ANDed; `scene`, `status`, `businessType` an
 | `page`, `pageSize` | `pageSize` max 200, default 50 |
 
 Response: `{ records, totals, pagination }`. Each record carries its resolved
-`scene`. **`totals` is the credit sum and count over the whole filtered set, not
+`scene` and a `tokens` summary:
+
+```json
+"tokens": { "total": 1400, "prompt": 1100, "completion": 300, "cached": 50 }
+```
+
+`total` is the sum of `quantity` over the record's **per_token** cost items —
+per_image items are excluded because their `quantity` is an image count, not
+tokens. `prompt` / `completion` / `cached` are **null** unless every per_token
+item carries a split: a record written before the split was persisted, or an
+accrual window spanning that change, reports its total and nothing else rather
+than a split that does not account for it. **`totals` is the credit sum and count over the whole filtered set, not
 the page** — that is the number to read after narrowing to one business.
 
 The date and amount bounds are validated and rejected rather than ignored on
@@ -516,7 +527,33 @@ member narrows to nothing instead of failing the page.
 
 The same filtered set, aggregated per scene: `count`, `totalAmount`, `avgAmount`
 (**credits one charge of that business costs**), `minAmount`, `maxAmount`,
-`lastAt`, and a `byStatus` split. Scenes with no matching row are omitted; `/meta`
+`lastAt`, a `byStatus` split, and `tokens`:
+
+```json
+"tokens": { "total": 41200, "prompt": 33000, "completion": 8200,
+            "cached": 0, "avgPerCharge": 1373, "chargesWithSplit": 28 }
+```
+
+`chargesWithSplit` says how many of `count` carry a prompt/completion split — less
+than `count` means the split describes only part of the bucket and the rest
+predates it. `prompt` / `completion` / `cached` are null when none do.
+
+`chargesWithTokenData` says how many of `count` contributed a token figure at all.
+Token usage is read from the denormalised `BillingRecord.totalTokens` /
+`promptTokens` / `completionTokens` / `cachedPromptTokens` columns, which are summed
+directly; rows written before those columns existed have them NULL, and for exactly
+those rows the aggregate falls back to summing the `costItems` JSON until
+`backfill-billing-record-token-columns.sql` has run. `avgPerCharge` divides by
+`chargesWithTokenData`, not `count`, so an un-backfilled remainder cannot drag the
+average toward zero.
+
+`tokens` is **null**, and the response's `tokensAvailable` is false, only when the
+token aggregate could not be read at all. The costItems fallback is a separate
+statement because casting that TEXT column to jsonb is what PostgreSQL 15 has no
+predicate to guard (16's `IS JSON` would); if it fails, the backfilled rows still
+report and the rest stay visibly uncovered in `chargesWithTokenData`. Once every row
+is backfilled the fallback is no longer issued and no JSON is parsed at query
+time. Scenes with no matching row are omitted; `/meta`
 is the list of every scene that can exist. The unclassified bucket is reported per
 businessType (`id: "other:<businessType>"`), because blending two businesses there
 would destroy the only diagnostic signal it carries.

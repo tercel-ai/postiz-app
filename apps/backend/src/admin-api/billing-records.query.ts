@@ -42,6 +42,67 @@ import { csvSet } from '@gitroom/nestjs-libraries/dtos/util/csv-set.transform';
 /** Guarded numeric reading of `amount`: one malformed row must not 500 the page. */
 export const BILLING_AMOUNT = Prisma.sql`(CASE WHEN "amount" ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN "amount"::numeric ELSE 0 END)`;
 
+/**
+ * The per_token fields a cost item can carry. `quantity` is always the total;
+ * the other three are the split, and are ABSENT on anything written before the
+ * split was persisted — which is why every sum below skips absent instead of
+ * reading it as zero.
+ */
+export const BILLING_TOKEN_FIELDS = [
+  'quantity',
+  'prompt_tokens',
+  'completion_tokens',
+  'cached_prompt_tokens',
+] as const;
+export type BillingTokenField = (typeof BILLING_TOKEN_FIELDS)[number];
+
+/**
+ * Sum one numeric field across a row's **per_token** cost items.
+ *
+ * `costItems` is a TEXT column, so it has to be cast to jsonb to be read, and a
+ * cast of malformed content RAISES. PostgreSQL 16's `IS JSON` predicate would
+ * guard that, but the server this runs on is 15 (asserted in
+ * billing-records.query.sql.spec.ts, which reads the version off the live
+ * connection — the compose files pin 16/17 and are not evidence of what the app
+ * connects to). There is no version-independent way to make the cast safe without
+ * installing a function, so the caller isolates every token aggregate in its own
+ * statement and degrades tokens as a unit when it fails, rather than letting one
+ * corrupt row take the whole per-scene view down.
+ *
+ * The two guards that DO work on 15:
+ *  - `billing_mode = 'per_token'` excludes per_image items, whose `quantity` is an
+ *    image COUNT — summing those in would inflate a token figure with a different
+ *    unit entirely.
+ *  - `jsonb_typeof(...) = 'number'` stops the inner cast raising on a non-numeric
+ *    value AND makes an ABSENT field contribute nothing rather than zero, so a row
+ *    written before the split was persisted reports only its total.
+ */
+export function billingTokenSum(field: BillingTokenField): Prisma.Sql {
+  if (!SAFE_IDENTIFIER.test(field)) {
+    throw new Error(`Unsafe billing token field: ${field}`);
+  }
+  return Prisma.raw(`(
+      SELECT COALESCE(SUM((item->>'${field}')::numeric), 0)
+      FROM jsonb_array_elements("costItems"::jsonb) AS item
+      WHERE item->>'billing_mode' = 'per_token'
+        AND jsonb_typeof(item->'${field}') = 'number'
+    )`);
+}
+
+/**
+ * True when a row carries a usable prompt/completion split. Counting these tells
+ * an operator how much of a window the split actually covers — rows written
+ * before it was persisted have only a total, and no backfill is possible because
+ * `logAiUsage` never stored the split anywhere.
+ */
+export const BILLING_TOKEN_SPLIT_PRESENT = Prisma.raw(`(EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements("costItems"::jsonb) AS item
+    WHERE item->>'billing_mode' = 'per_token'
+      AND jsonb_typeof(item->'prompt_tokens') = 'number'
+      AND jsonb_typeof(item->'completion_tokens') = 'number'
+  ))`)
+
 /** `data` JSON keys the admin filter can narrow on directly. */
 export const BILLING_DATA_FILTER_KEYS = [
   'source',

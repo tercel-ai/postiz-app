@@ -3,12 +3,18 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Prisma, PrismaClient } from '@prisma/client';
 import {
   BILLING_AMOUNT,
+  BILLING_TOKEN_SPLIT_PRESENT,
+  billingTokenSum,
   buildBillingOrderBy,
   buildBillingWhere,
   buildSceneGrouping,
   normalizeBillingQuery,
 } from '../billing-records.query';
 import { AdminBillingRecordsQueryDto } from '@gitroom/nestjs-libraries/dtos/admin/admin-billing-records-query.dto';
+import {
+  AiseeCostItem,
+  deriveTokenColumns,
+} from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
 import {
   BILLING_SCENES,
   BILLING_SCENE_OTHER,
@@ -100,6 +106,41 @@ function statements(dto: AdminBillingRecordsQueryDto): Record<string, Prisma.Sql
       WHERE ${where}
       GROUP BY ${groupBy}, "status"
     `,
+    // The primary token path once the backfill has run: plain SUMs over the
+    // denormalised columns, no cast, no JSON expansion.
+    'stats: token columns': Prisma.sql`
+      SELECT ${select},
+             COALESCE(SUM("totalTokens"), 0)::text AS "totalTokens",
+             COALESCE(SUM("promptTokens"), 0)::text AS "promptTokens",
+             COALESCE(SUM("completionTokens"), 0)::text AS "completionTokens",
+             COALESCE(SUM("cachedPromptTokens"), 0)::text AS "cachedTokens",
+             COUNT(*) FILTER (WHERE "promptTokens" IS NOT NULL)::int AS "chargesWithSplit",
+             COUNT(*) FILTER (WHERE "totalTokens" IS NOT NULL)::int AS "chargesWithTokenData",
+             COUNT(*) FILTER (WHERE "totalTokens" IS NULL)::int AS "chargesNeedingFallback"
+      FROM "BillingRecord"
+      WHERE ${where}
+      GROUP BY ${groupBy}
+    `,
+    // Isolated on purpose — see statsTokens(). It is the only statement here
+    // that casts costItems, and PostgreSQL 15 cannot guard that cast. Issued only
+    // for rows the backfill has not reached.
+    'stats: tokens': Prisma.sql`
+      SELECT ${select},
+             COALESCE(SUM(${billingTokenSum('quantity')}), 0)::text AS "totalTokens",
+             COALESCE(SUM(${billingTokenSum('prompt_tokens')}), 0)::text AS "promptTokens",
+             COALESCE(SUM(${billingTokenSum(
+               'completion_tokens'
+             )}), 0)::text AS "completionTokens",
+             COALESCE(SUM(${billingTokenSum(
+               'cached_prompt_tokens'
+             )}), 0)::text AS "cachedTokens",
+             COUNT(*) FILTER (
+               WHERE ${BILLING_TOKEN_SPLIT_PRESENT}
+             )::int AS "chargesWithSplit"
+      FROM "BillingRecord"
+      WHERE ${where} AND "totalTokens" IS NULL
+      GROUP BY ${groupBy}
+    `,
   };
 }
 
@@ -135,13 +176,64 @@ describe.skipIf(!DATABASE_URL)(
   'billing-records.query against a real PostgreSQL (read-only)',
   () => {
     let prisma: PrismaClient;
+    /**
+     * The denormalised token columns are declared in schema.prisma, so they exist
+     * only once `pnpm run prisma-db-push` has run. Until then the statements that
+     * reference them cannot be planned — which is a correct failure, not a broken
+     * test, so those cases skip and say so.
+     */
+    let hasTokenColumns = false;
 
     beforeAll(async () => {
       prisma = new PrismaClient();
+      const [row] = await prisma.$queryRawUnsafe<{ present: number }[]>(
+        `SELECT COUNT(*)::int AS present
+         FROM information_schema.columns
+         WHERE table_name = 'BillingRecord'
+           AND column_name IN ('totalTokens', 'promptTokens',
+                               'completionTokens', 'cachedPromptTokens')`
+      );
+      hasTokenColumns = row.present === 4;
+      if (!hasTokenColumns) {
+        console.warn(
+          `[billing-records.query.sql] BillingRecord has ${row.present}/4 token ` +
+            `columns — run \`pnpm run prisma-db-push\` to add them, then ` +
+            `backfill-billing-record-token-columns.sql. The statements that read ` +
+            `them are SKIPPED until then.`
+        );
+      }
     });
 
     afterAll(async () => {
       await prisma?.$disconnect();
+    });
+
+    // Pins the server capabilities this compiler's SQL depends on. A compose file
+    // pinning postgres:16 says nothing about the database the app actually
+    // connects to — prod's is external — so the version is asserted here, where
+    // it is read from the live connection.
+    it('runs on a server version whose features this SQL stays within', async () => {
+      const [row] = await prisma.$queryRawUnsafe<
+        { version: string; database: string }[]
+      >(`SELECT current_setting('server_version') AS version,
+                current_database() AS database`);
+
+      const major = Number(row.version.split('.')[0]);
+      console.info(
+        `[billing-records.query.sql] PostgreSQL ${row.version} on database "${row.database}"`
+      );
+
+      // Anything the compiler emits must parse here. `IS JSON` (PostgreSQL 16+)
+      // is the feature this file exists to keep us honest about: it is NOT
+      // available below 16, and using it would make /stats a syntax error.
+      const supportsIsJson = major >= 16;
+      const probe = await prisma
+        .$queryRawUnsafe(`SELECT ('[]'::text IS JSON ARRAY) AS ok`)
+        .then(() => true)
+        .catch(() => false);
+
+      expect(probe).toBe(supportsIsJson);
+      expect(major).toBeGreaterThanOrEqual(12);
     });
 
     // EXPLAIN, not EXPLAIN ANALYZE: it runs parse-analysis and planning and
@@ -150,9 +242,15 @@ describe.skipIf(!DATABASE_URL)(
     describe.each(['no filters', 'every filter'])('%s', (variant) => {
       const dto = variant === 'no filters' ? query() : EVERY_FILTER;
 
-      it.each(Object.keys(statements(dto)))(
-        'PostgreSQL accepts and plans the %s statement',
-        async (name) => {
+      // A plain loop, not it.each: it.each spreads the case values as arguments
+      // and never passes the TestContext, so ctx.skip() would be unavailable.
+      for (const name of Object.keys(statements(dto))) {
+        it(`PostgreSQL accepts and plans the ${name} statement`, async (ctx) => {
+          // Both token statements reference the denormalised columns.
+          if (name.startsWith('stats: token') && !hasTokenColumns) {
+            ctx.skip();
+            return;
+          }
           const statement = statements(dto)[name];
           await expect(
             prisma.$queryRawUnsafe(
@@ -160,8 +258,8 @@ describe.skipIf(!DATABASE_URL)(
               ...statement.values
             )
           ).resolves.toBeDefined();
-        }
-      );
+        });
+      }
     });
 
     // Pins the REASON dataText inlines the key instead of binding it. Without
@@ -224,6 +322,205 @@ describe.skipIf(!DATABASE_URL)(
       expect(mismatches).toEqual([]);
     });
 
+    // The EXPLAIN cases above prove the server accepts these statements; these
+    // prove the token expression MEANS what the page claims, over the exact
+    // costItems shapes the ledger actually holds.
+    describe('token sums over a literal costItems value', () => {
+      const tokensOf = async (costItems: unknown) => {
+        const statement = Prisma.sql`
+          SELECT ${billingTokenSum('quantity')}::text          AS total,
+                 ${billingTokenSum('prompt_tokens')}::text     AS prompt,
+                 ${billingTokenSum('completion_tokens')}::text AS completion,
+                 ${BILLING_TOKEN_SPLIT_PRESENT}                AS "hasSplit"
+          FROM (SELECT CAST(${JSON.stringify(costItems)} AS text) AS "costItems") AS t
+        `;
+        const [row] = await prisma.$queryRawUnsafe<
+          { total: string; prompt: string; completion: string; hasSplit: boolean }[]
+        >(statement.text, ...statement.values);
+        return {
+          total: Number(row.total),
+          prompt: Number(row.prompt),
+          completion: Number(row.completion),
+          hasSplit: row.hasSplit,
+        };
+      };
+
+      it('sums the split when a row carries one', async () => {
+        expect(
+          await tokensOf([
+            { type: 'text', amount: '0.1', model: 'gpt-4.1', billing_mode: 'per_token', quantity: 1500, prompt_tokens: 1200, completion_tokens: 300 },
+            { type: 'text', amount: '0.2', model: 'gpt-4.1-mini', billing_mode: 'per_token', quantity: 500, prompt_tokens: 400, completion_tokens: 100 },
+          ])
+        ).toEqual({ total: 2000, prompt: 1600, completion: 400, hasSplit: true });
+      });
+
+      // The whole point of making the split optional: a row written before it was
+      // persisted must report its TOTAL and contribute nothing to the split —
+      // never a zero that would read as "this call had no input tokens".
+      it('reports total only for a historical row with no split', async () => {
+        expect(
+          await tokensOf([
+            { type: 'text', amount: '0.1', model: 'gpt-4.1', billing_mode: 'per_token', quantity: 1500 },
+          ])
+        ).toEqual({ total: 1500, prompt: 0, completion: 0, hasSplit: false });
+      });
+
+      // quantity is an IMAGE COUNT there, so counting it as tokens would inflate
+      // the figure by a number that is not even the same unit.
+      it('ignores per_image items', async () => {
+        expect(
+          await tokensOf([
+            { type: 'image', amount: '4', model: 'dall-e-3', billing_mode: 'per_image', quantity: 2 },
+          ])
+        ).toEqual({ total: 0, prompt: 0, completion: 0, hasSplit: false });
+      });
+
+      // post_overage / engage_reply / post_analytics write a synthetic per_token
+      // item with quantity 0 — no tokens, and no split to find.
+      it('reads a flat-rate charge as zero tokens', async () => {
+        expect(
+          await tokensOf([
+            { type: 'text', amount: '25.000000', model: 'post_send', billing_mode: 'per_token', quantity: 0 },
+          ])
+        ).toEqual({ total: 0, prompt: 0, completion: 0, hasSplit: false });
+      });
+
+      it('sums a mixed row without letting the image count leak in', async () => {
+        expect(
+          await tokensOf([
+            { type: 'text', amount: '0.1', model: 'gpt-4.1', billing_mode: 'per_token', quantity: 900, prompt_tokens: 700, completion_tokens: 200 },
+            { type: 'image', amount: '4', model: 'dall-e-3', billing_mode: 'per_image', quantity: 3 },
+          ])
+        ).toEqual({ total: 900, prompt: 700, completion: 200, hasSplit: true });
+      });
+
+      // Pins the reason statsTokens() is a separate, try/caught statement: on
+      // PostgreSQL 15 there is no predicate that makes this cast safe, so one
+      // corrupt row DOES fail the query. Isolating it is what keeps the credit
+      // figures — which need no cast — rendering anyway.
+      it('RAISES on an unparseable costItems, which is why it is isolated', async () => {
+        const statement = Prisma.sql`
+          SELECT ${billingTokenSum('quantity')}::text AS total
+          FROM (SELECT CAST('{not json' AS text) AS "costItems") AS t
+        `;
+
+        await expect(
+          prisma.$queryRawUnsafe(statement.text, ...statement.values)
+        ).rejects.toThrow();
+      });
+
+      // Valid JSON, wrong shape: jsonb_array_elements rejects a non-array, so
+      // this raises too and is covered by the same isolation.
+      it('RAISES on a JSON object rather than an array', async () => {
+        const statement = Prisma.sql`
+          SELECT ${billingTokenSum('quantity')}::text AS total
+          FROM (SELECT CAST('{"quantity":999}' AS text) AS "costItems") AS t
+        `;
+
+        await expect(
+          prisma.$queryRawUnsafe(statement.text, ...statement.values)
+        ).rejects.toThrow();
+      });
+    });
+
+    /**
+     * The backfill derives the token columns in SQL; every write path derives them
+     * in TypeScript via deriveTokenColumns(). If the two disagree, a backfilled row
+     * and a freshly written one report different numbers for the same costItems —
+     * a discrepancy nothing else in the suite could catch, because each side is
+     * individually self-consistent.
+     */
+    describe('backfill SQL agrees with deriveTokenColumns()', () => {
+      // Verbatim from backfill-billing-record-token-columns.sql.
+      const backfilled = async (costItems: AiseeCostItem[]) => {
+        const statement = Prisma.sql`
+          SELECT t.total::int AS "totalTokens",
+                 CASE WHEN t.items > 0 AND t.with_split = t.items
+                      THEN t.prompt::int END AS "promptTokens",
+                 CASE WHEN t.items > 0 AND t.with_split = t.items
+                      THEN t.completion::int END AS "completionTokens",
+                 CASE WHEN t.items > 0 AND t.with_split = t.items
+                      THEN t.cached::int END AS "cachedPromptTokens"
+          FROM (
+            SELECT
+              COUNT(*) AS items,
+              COUNT(*) FILTER (
+                WHERE jsonb_typeof(item->'prompt_tokens') = 'number'
+                  AND jsonb_typeof(item->'completion_tokens') = 'number'
+              ) AS with_split,
+              COALESCE(SUM(CASE WHEN jsonb_typeof(item->'quantity') = 'number'
+                                THEN (item->>'quantity')::numeric ELSE 0 END), 0) AS total,
+              COALESCE(SUM(CASE WHEN jsonb_typeof(item->'prompt_tokens') = 'number'
+                                THEN (item->>'prompt_tokens')::numeric ELSE 0 END), 0) AS prompt,
+              COALESCE(SUM(CASE WHEN jsonb_typeof(item->'completion_tokens') = 'number'
+                                THEN (item->>'completion_tokens')::numeric ELSE 0 END), 0) AS completion,
+              COALESCE(SUM(CASE WHEN jsonb_typeof(item->'cached_prompt_tokens') = 'number'
+                                THEN (item->>'cached_prompt_tokens')::numeric ELSE 0 END), 0) AS cached
+            FROM jsonb_array_elements(CAST(${JSON.stringify(
+              costItems
+            )} AS jsonb)) AS item
+            WHERE item->>'billing_mode' = 'per_token'
+          ) t
+        `;
+        const [row] = await prisma.$queryRawUnsafe<Record<string, any>[]>(
+          statement.text,
+          ...statement.values
+        );
+        return row;
+      };
+
+      const item = (over: Partial<AiseeCostItem> = {}): AiseeCostItem => ({
+        type: 'text',
+        amount: '0.100000',
+        model: 'gpt-4.1',
+        billing_mode: 'per_token',
+        quantity: 1000,
+        ...over,
+      });
+
+      const CASES: [string, AiseeCostItem[]][] = [
+        ['every item split', [
+          item({ quantity: 1500, prompt_tokens: 1200, completion_tokens: 300 }),
+          item({ quantity: 500, prompt_tokens: 400, completion_tokens: 100 }),
+        ]],
+        ['a cached prompt', [
+          item({ quantity: 1500, prompt_tokens: 1200, completion_tokens: 300, cached_prompt_tokens: 900 }),
+        ]],
+        // The accrual window that spans the change — the case the null rule exists for.
+        ['one item missing the split', [
+          item({ quantity: 900, prompt_tokens: 700, completion_tokens: 200 }),
+          item({ quantity: 500 }),
+        ]],
+        ['no split at all (historical row)', [item({ quantity: 1500 })]],
+        ['per_image only', [
+          item({ type: 'image', model: 'dall-e-3', billing_mode: 'per_image', quantity: 3 }),
+        ]],
+        ['a flat-rate charge', [
+          item({ model: 'post_send', quantity: 0, amount: '25.000000' }),
+        ]],
+        ['mixed per_token and per_image', [
+          item({ quantity: 900, prompt_tokens: 700, completion_tokens: 200 }),
+          item({ type: 'image', model: 'dall-e-3', billing_mode: 'per_image', quantity: 3 }),
+        ]],
+        ['half a split (completion only)', [
+          item({ quantity: 900, completion_tokens: 200 }),
+        ]],
+        ['an empty breakdown', []],
+      ];
+
+      it.each(CASES)('agrees on %s', async (_label, costItems) => {
+        const expected = deriveTokenColumns(costItems);
+        const actual = await backfilled(costItems);
+
+        expect({
+          totalTokens: actual.totalTokens,
+          promptTokens: actual.promptTokens,
+          completionTokens: actual.completionTokens,
+          cachedPromptTokens: actual.cachedPromptTokens,
+        }).toEqual(expected);
+      });
+    });
+
     // A decimal-string column read as a number. The CASE guard exists so one
     // malformed row cannot error a SUM over the whole filtered set.
     it.each([
@@ -265,6 +562,12 @@ describe('billing SQL spec preconditions', () => {
       );
     }
     // The statements must at least still compile, with or without a database.
-    expect(Object.keys(statements(EVERY_FILTER))).toHaveLength(3);
+    expect(Object.keys(statements(EVERY_FILTER))).toEqual([
+      'records: totals',
+      'records: id page',
+      'stats',
+      'stats: token columns',
+      'stats: tokens',
+    ]);
   });
 });

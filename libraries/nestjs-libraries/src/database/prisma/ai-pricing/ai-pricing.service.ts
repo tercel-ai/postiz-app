@@ -33,6 +33,14 @@ export interface AiCostResult {
   inputPrice?: string;
   outputPrice?: string;
   quantity: number; // per_token: total_tokens, per_image: count
+  /**
+   * per_token only: the split behind `quantity`, passed through from
+   * AiUsageInfo.usage so it can be persisted on the BillingRecord cost item.
+   * Undefined for per_image, and for a usage that reported no split.
+   */
+  promptTokens?: number;
+  completionTokens?: number;
+  cachedPromptTokens?: number;
   cost: number; // in credits
   pricingFound: boolean;
 }
@@ -96,6 +104,10 @@ export class AiPricingService implements OnModuleInit {
 
     let quantity: number;
     let cost: number;
+    // per_token only: `quantity` is the total, and these say how it splits.
+    let promptTokens: number | undefined;
+    let completionTokens: number | undefined;
+    let cachedPromptTokens: number | undefined;
 
     if (entry.billing_mode === 'per_image') {
       // credits per 1 image
@@ -104,6 +116,9 @@ export class AiPricingService implements OnModuleInit {
     } else {
       // per_token: credits per 1 token
       quantity = usage.usage.total_tokens;
+      promptTokens = usage.usage.prompt_tokens;
+      completionTokens = usage.usage.completion_tokens;
+      cachedPromptTokens = usage.usage.cached_prompt_tokens;
       const hasInputPrice = !!entry.input_price;
       const hasOutputPrice = !!entry.output_price;
       if (hasInputPrice && hasOutputPrice) {
@@ -141,6 +156,9 @@ export class AiPricingService implements OnModuleInit {
       inputPrice: entry.input_price,
       outputPrice: entry.output_price,
       quantity,
+      promptTokens,
+      completionTokens,
+      cachedPromptTokens,
       cost,
       pricingFound: true,
     };

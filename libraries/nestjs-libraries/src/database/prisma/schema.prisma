@@ -321,6 +321,22 @@ model BillingRecord {
   debtAmount       String?
   /// Error message if deduction failed
   error            String?
+  /// LLM token usage, denormalised out of `costItems` so the admin views can
+  /// aggregate it with SUM() instead of casting the costItems TEXT column to
+  /// jsonb per row — a cast this server (PostgreSQL 15) has no safe guard for,
+  /// and which no index can serve.
+  ///
+  /// `totalTokens` is the sum of `quantity` over the row's per_token cost items
+  /// (per_image items are excluded: their quantity is an image COUNT). 0 means a
+  /// flat-rate charge that used no LLM tokens; NULL means "not recorded" — a row
+  /// written before these columns existed and not yet backfilled.
+  totalTokens      Int?
+  /// The prompt/completion split, populated only when EVERY per_token item on the
+  /// row carries one. NULL means the split is unknown for this row, never zero —
+  /// `logAiUsage` only ever logged it, so rows predating it cannot be backfilled.
+  promptTokens     Int?
+  completionTokens Int?
+  cachedPromptTokens Int?
   createdAt        DateTime     @default(now())
   updatedAt        DateTime     @updatedAt
   organization     Organization @relation(fields: [organizationId], references: [id])

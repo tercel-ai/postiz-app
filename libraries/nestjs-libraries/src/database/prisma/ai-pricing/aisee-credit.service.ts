@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import {
   AiseeClient,
   AiseeBusinessType,
+  deriveTokenColumns,
   AiseeBusinessSubType,
   AiseeCostItem,
   AiseeCreditBalance,
@@ -557,6 +558,7 @@ export class AiseeCreditService {
               subType: subType || null,
               description: opts.description,
               costItems: JSON.stringify(incoming),
+              ...deriveTokenColumns(incoming),
               relatedId: opts.relatedId || null,
               data: this.mergeAccrualData(null, opts.data, callCount),
               status: ACCRUING_STATUS,
@@ -586,6 +588,7 @@ export class AiseeCreditService {
           data: {
             amount,
             costItems: JSON.stringify(merged),
+            ...deriveTokenColumns(merged),
             data: this.mergeAccrualData(
               existing.data as Record<string, unknown> | null,
               opts.data,
@@ -780,8 +783,48 @@ export class AiseeCreditService {
       }
       current.amount = this.sumDecimalStrings([current.amount, item.amount]);
       current.quantity += item.quantity;
+      this.mergeTokenSplit(current, item);
     }
     return [...byKey.values()];
+  }
+
+  /**
+   * Add `item`'s prompt/completion split onto `current`, or drop the split when
+   * either side does not have one.
+   *
+   * Dropping matters during the transition: an accruing window opened before the
+   * split was persisted gets merged with items that do have it. Adding them as
+   * if the missing side were 0 would produce a split that no longer accounts for
+   * `quantity` — a number that looks precise and under-reports. Absent is the
+   * honest answer, and it self-heals as soon as that window settles.
+   */
+  private mergeTokenSplit(current: AiseeCostItem, item: AiseeCostItem): void {
+    // prompt+completion is what makes a split; one without the other is not one.
+    const hasSplit = (costItem: AiseeCostItem) =>
+      costItem.prompt_tokens !== undefined &&
+      costItem.completion_tokens !== undefined;
+
+    if (!hasSplit(current) || !hasSplit(item)) {
+      delete current.prompt_tokens;
+      delete current.completion_tokens;
+      delete current.cached_prompt_tokens;
+      return;
+    }
+
+    current.prompt_tokens = current.prompt_tokens! + item.prompt_tokens!;
+    current.completion_tokens =
+      current.completion_tokens! + item.completion_tokens!;
+
+    // Unlike the pair above, cached_prompt_tokens is legitimately absent when a
+    // call cached nothing — and here both sides DO carry a split, so absent
+    // means zero rather than unknown.
+    const cached =
+      (current.cached_prompt_tokens ?? 0) + (item.cached_prompt_tokens ?? 0);
+    if (cached > 0) {
+      current.cached_prompt_tokens = cached;
+    } else {
+      delete current.cached_prompt_tokens;
+    }
   }
 
   /**
@@ -844,6 +887,18 @@ export class AiseeCreditService {
       model: cost.model,
       billing_mode: cost.billingMode,
       quantity: cost.quantity,
+      // Spread-omitted rather than written as 0: absent must read as "unknown"
+      // so a historical row keeps showing only its total instead of claiming a
+      // 0/0 split that does not add up to `quantity`.
+      ...(cost.promptTokens !== undefined && {
+        prompt_tokens: cost.promptTokens,
+      }),
+      ...(cost.completionTokens !== undefined && {
+        completion_tokens: cost.completionTokens,
+      }),
+      ...(cost.cachedPromptTokens !== undefined && {
+        cached_prompt_tokens: cost.cachedPromptTokens,
+      }),
     };
   }
 
@@ -914,6 +969,7 @@ export class AiseeCreditService {
           subType: subType || null,
           description: opts.description,
           costItems: JSON.stringify(costItems),
+          ...deriveTokenColumns(costItems),
           relatedId: opts.relatedId || null,
           data: (opts.data as any) || undefined,
           status: internal ? 'internal' : 'pending',
@@ -1079,6 +1135,7 @@ export class AiseeCreditService {
         data: {
           amount: totalAmount,
           costItems: JSON.stringify(costItems),
+          ...deriveTokenColumns(costItems),
           status: internal ? 'internal' : 'pending',
           error: null,
         },

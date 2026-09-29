@@ -14,6 +14,8 @@ import {
 } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
 import {
   AiseeBusinessType,
+  AiseeCostItem,
+  deriveTokenColumns,
   AISEE_PLAN_CODES,
   AiseePlanCode,
   normalizeAiseePlanName,
@@ -1066,6 +1068,17 @@ export class EngageEntitlementService implements OnModuleInit {
    * taskId; the caller MUST later settleReplyGeneration (success) or
    * releaseReplyGeneration (failure/abort). Throws ForbiddenException when blocked.
    */
+  /** The flat-rate line a reply reservation records. */
+  private static RESERVATION_ITEMS = (cost: number): AiseeCostItem[] => [
+    {
+      type: 'text',
+      amount: cost.toFixed(6),
+      model: 'engage_reply',
+      billing_mode: 'per_token',
+      quantity: 0,
+    },
+  ];
+
   async reserveReplyGeneration(
     orgId: string,
     length: ReplyLength,
@@ -1093,9 +1106,10 @@ export class EngageEntitlementService implements OnModuleInit {
       amount: cost.toFixed(6),
       businessType: AiseeBusinessType.ENGAGE_REPLY,
       description: `Engage reply draft (${length})`,
-      costItems: JSON.stringify([
-        { type: 'text', amount: cost.toFixed(6), model: 'engage_reply', billing_mode: 'per_token', quantity: 0 },
-      ]),
+      costItems: JSON.stringify(EngageEntitlementService.RESERVATION_ITEMS(cost)),
+      // 0 tokens, not null: a reply draft is priced by length, so the row
+      // genuinely used no LLM tokens on the reservation itself.
+      ...deriveTokenColumns(EngageEntitlementService.RESERVATION_ITEMS(cost)),
       relatedId: opportunityId,
       data: { length } as any,
       status: RESERVED_STATUS,

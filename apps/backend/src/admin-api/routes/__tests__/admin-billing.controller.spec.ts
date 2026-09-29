@@ -51,6 +51,14 @@ function makeController(options: {
   totals?: { count: number; amount: string };
   ids?: { id: string }[];
   statsRows?: RawResult;
+  /** Rows from the column aggregate — the path used once the backfill has run. */
+  tokenColumnRows?: RawResult;
+  /** Rows from the costItems fallback, issued only for un-backfilled rows. */
+  tokenJsonRows?: RawResult;
+  /** Make the column aggregate fail (tokens degrade as a unit). */
+  tokenQueryThrows?: boolean;
+  /** Make only the costItems fallback fail, as one corrupt row does. */
+  tokenFallbackThrows?: boolean;
   rows?: Record<string, any>[];
   orgsByUser?: { id: string }[];
 } = {}) {
@@ -60,6 +68,21 @@ function makeController(options: {
     const statement = Prisma.sql(strings, ...values);
     statements.push(statement);
 
+    // Both token statements contain 'GROUP BY' and 'COUNT(*)', so they are matched
+    // first. The costItems fallback is the one that expands JSON; the column
+    // aggregate never touches it.
+    if (statement.sql.includes('jsonb_array_elements')) {
+      return options.tokenFallbackThrows
+        ? Promise.reject(
+            new Error('invalid input syntax for type json: "{not json"')
+          )
+        : Promise.resolve(options.tokenJsonRows ?? []);
+    }
+    if (statement.sql.includes('"totalTokens"')) {
+      return options.tokenQueryThrows
+        ? Promise.reject(new Error('column "totalTokens" does not exist'))
+        : Promise.resolve(options.tokenColumnRows ?? []);
+    }
     if (statement.sql.includes('GROUP BY')) {
       return Promise.resolve(options.statsRows ?? []);
     }
@@ -386,7 +409,14 @@ describe('AdminBillingController.stats', () => {
       byStatus: { success: 2, failed: 1 },
     });
     expect(result.scenes[0].lastAt).toBe('2026-09-21T10:00:00.000Z');
-    expect(result.total).toEqual({ count: 3, amount: '1.500000' });
+    // Tokens are zero here because this case supplies no tokenRows — the token
+    // aggregate is a separate statement (see the token usage suite).
+    expect(result.total).toEqual({
+      count: 3,
+      amount: '1.500000',
+      tokens: 0,
+      chargesWithTokenSplit: 0,
+    });
   });
 
   // Same businessType, same subType — only the `data` marker differs. Grouping
@@ -484,6 +514,299 @@ describe('AdminBillingController.stats', () => {
     expect(find('GROUP BY')!.values).toContain(
       AiseeBusinessType.OPERATION_PLAN
     );
+  });
+});
+
+describe('AdminBillingController token usage', () => {
+  const statsRow = (over: Record<string, any> = {}) => ({
+    businessType: AiseeBusinessType.AI_COPYWRITING,
+    subType: AiseeBusinessSubType.POST_GEN,
+    data_source: null as string | null,
+    data_surface: null as string | null,
+    status: 'success',
+    count: 2,
+    totalAmount: '1.000000',
+    minAmount: '0.400000',
+    maxAmount: '0.600000',
+    lastAt: new Date('2026-09-20T10:00:00.000Z'),
+    ...over,
+  });
+
+  const tokenRow = (over: Record<string, any> = {}) => ({
+    businessType: AiseeBusinessType.AI_COPYWRITING,
+    subType: AiseeBusinessSubType.POST_GEN,
+    data_source: null as string | null,
+    data_surface: null as string | null,
+    totalTokens: '2000',
+    promptTokens: '1600',
+    completionTokens: '400',
+    cachedTokens: '0',
+    chargesWithSplit: 2,
+    chargesWithTokenData: 2,
+    chargesNeedingFallback: 0,
+    ...over,
+  });
+
+  it('reports per-scene token totals and the per-charge average', async () => {
+    const { controller } = makeController({
+      statsRows: [statsRow()],
+      tokenColumnRows: [tokenRow()],
+    });
+
+    const result = await controller.stats(query());
+
+    expect(result.scenes[0].tokens).toEqual({
+      total: 2000,
+      prompt: 1600,
+      completion: 400,
+      cached: 0,
+      avgPerCharge: 1000,
+      chargesWithSplit: 2,
+      chargesWithTokenData: 2,
+    });
+    expect(result.total.tokens).toBe(2000);
+    expect(result.tokensAvailable).toBe(true);
+  });
+
+  // The point of making the split optional: rows written before it was persisted
+  // must report their TOTAL and nothing else. A 0/0 split would look precise and
+  // contradict the total.
+  it('reports total only when no charge in the bucket carries a split', async () => {
+    const { controller } = makeController({
+      statsRows: [statsRow()],
+      tokenColumnRows: [
+        tokenRow({
+          promptTokens: '0',
+          completionTokens: '0',
+          chargesWithSplit: 0,
+        }),
+      ],
+    });
+
+    const result = await controller.stats(query());
+
+    expect(result.scenes[0].tokens).toMatchObject({
+      total: 2000,
+      prompt: null,
+      completion: null,
+      cached: null,
+    });
+  });
+
+  it('says how much of a bucket the split covers', async () => {
+    const { controller } = makeController({
+      statsRows: [statsRow({ count: 10 })],
+      tokenColumnRows: [tokenRow({ chargesWithSplit: 3, chargesWithTokenData: 10 })],
+    });
+
+    const result = await controller.stats(query());
+
+    expect(result.scenes[0].tokens?.chargesWithSplit).toBe(3);
+    expect(result.scenes[0].count).toBe(10);
+  });
+
+  // Between pushing the columns and running the backfill, both paths contribute:
+  // the columns for rows that have them, costItems for the rest.
+  it('falls back to costItems only for rows the backfill has not reached', async () => {
+    const { controller, statements } = makeController({
+      statsRows: [statsRow({ count: 5 })],
+      tokenColumnRows: [
+        tokenRow({
+          totalTokens: '2000',
+          chargesWithSplit: 2,
+          chargesWithTokenData: 2,
+          chargesNeedingFallback: 3,
+        }),
+      ],
+      tokenJsonRows: [
+        tokenRow({
+          totalTokens: '1500',
+          promptTokens: '0',
+          completionTokens: '0',
+          chargesWithSplit: 0,
+          chargesWithTokenData: 3,
+        }),
+      ],
+    });
+
+    const result = await controller.stats(query());
+
+    expect(result.scenes[0].tokens).toMatchObject({
+      total: 3500,
+      chargesWithTokenData: 5,
+      // Averaged over the 5 charges that reported tokens, not over a count that
+      // includes rows contributing nothing.
+      avgPerCharge: 700,
+    });
+    // The fallback is scoped to the un-backfilled rows, so a backfilled ledger
+    // never pays for the JSON expansion.
+    const fallback = statements.find((s) =>
+      s.sql.includes('jsonb_array_elements')
+    )!;
+    expect(fallback.sql).toContain('"totalTokens" IS NULL');
+  });
+
+  it('stops issuing the costItems fallback once every row is backfilled', async () => {
+    const { controller, statements } = makeController({
+      statsRows: [statsRow()],
+      tokenColumnRows: [tokenRow({ chargesNeedingFallback: 0 })],
+    });
+
+    await controller.stats(query());
+
+    expect(
+      statements.some((s) => s.sql.includes('jsonb_array_elements'))
+    ).toBe(false);
+  });
+
+  it('keeps the column figures when only the costItems fallback fails', async () => {
+    const { controller } = makeController({
+      statsRows: [statsRow({ count: 5 })],
+      tokenColumnRows: [
+        tokenRow({ chargesWithTokenData: 2, chargesNeedingFallback: 3 }),
+      ],
+      tokenFallbackThrows: true,
+    });
+
+    const result = await controller.stats(query());
+
+    // The backfilled rows still report; the rest stay visibly uncovered rather
+    // than taking the whole token figure down.
+    expect(result.tokensAvailable).toBe(true);
+    expect(result.scenes[0].tokens).toMatchObject({
+      total: 2000,
+      chargesWithTokenData: 2,
+    });
+  });
+
+  // costItems is a TEXT column and PostgreSQL 15 has no predicate that makes the
+  // ::jsonb cast safe, so one corrupt row fails the token aggregate. Isolating it
+  // is what keeps the credit figures — which need no cast — rendering.
+  it('degrades tokens as a unit without failing the credit figures', async () => {
+    const { controller } = makeController({
+      statsRows: [statsRow()],
+      tokenQueryThrows: true,
+    });
+
+    const result = await controller.stats(query());
+
+    expect(result.tokensAvailable).toBe(false);
+    expect(result.scenes[0].tokens).toBeNull();
+    expect(result.scenes[0].totalAmount).toBe('1.000000');
+    expect(result.total.amount).toBe('1.000000');
+  });
+
+  it('keeps the unclassified bucket\'s tokens split per businessType', async () => {
+    const { controller } = makeController({
+      statsRows: [
+        statsRow({ subType: null, count: 1, totalAmount: '1.000000' }),
+        statsRow({
+          businessType: AiseeBusinessType.IMAGE_GEN,
+          subType: null,
+          count: 1,
+          totalAmount: '2.000000',
+        }),
+      ],
+      tokenColumnRows: [
+        tokenRow({
+          subType: null,
+          totalTokens: '900',
+          chargesWithSplit: 1,
+          chargesWithTokenData: 1,
+        }),
+        tokenRow({
+          businessType: AiseeBusinessType.IMAGE_GEN,
+          subType: null,
+          totalTokens: '0',
+          promptTokens: '0',
+          completionTokens: '0',
+          chargesWithSplit: 0,
+          chargesWithTokenData: 1,
+        }),
+      ],
+    });
+
+    const result = await controller.stats(query());
+
+    // Both resolve to `other`; the token map must be keyed the same way the
+    // credit buckets are, or the two businesses would swap numbers.
+    expect(
+      result.scenes.map((s) => [s.businessType, s.tokens?.total])
+    ).toEqual([
+      [AiseeBusinessType.IMAGE_GEN, 0],
+      [AiseeBusinessType.AI_COPYWRITING, 900],
+    ]);
+  });
+
+  it('sums a record\'s tokens from its per_token items only', async () => {
+    const { controller } = makeController({
+      ids: [{ id: 'rec-1' }],
+      rows: [
+        record({
+          costItems: JSON.stringify([
+            {
+              type: 'text',
+              amount: '0.1',
+              model: 'gpt-4.1',
+              billing_mode: 'per_token',
+              quantity: 900,
+              prompt_tokens: 700,
+              completion_tokens: 200,
+              cached_prompt_tokens: 50,
+            },
+            // quantity here is an IMAGE COUNT, not tokens.
+            {
+              type: 'image',
+              amount: '4',
+              model: 'dall-e-3',
+              billing_mode: 'per_image',
+              quantity: 3,
+            },
+          ]),
+        }),
+      ],
+      totals: { count: 1, amount: '4.1' },
+    });
+
+    const result = await controller.listRecords(query());
+
+    expect(result.records[0].tokens).toEqual({
+      total: 900,
+      prompt: 700,
+      completion: 200,
+      cached: 50,
+    });
+  });
+
+  it('shows a record total only when one of its items lacks the split', async () => {
+    const { controller } = makeController({
+      ids: [{ id: 'rec-1' }],
+      rows: [
+        record({
+          costItems: JSON.stringify([
+            {
+              billing_mode: 'per_token',
+              quantity: 900,
+              prompt_tokens: 700,
+              completion_tokens: 200,
+            },
+            // An accrual window that spans the change: no split on this item, so
+            // prompt+completion would no longer account for the total.
+            { billing_mode: 'per_token', quantity: 500 },
+          ]),
+        }),
+      ],
+      totals: { count: 1, amount: '0.3' },
+    });
+
+    const result = await controller.listRecords(query());
+
+    expect(result.records[0].tokens).toEqual({
+      total: 1400,
+      prompt: null,
+      completion: null,
+      cached: null,
+    });
   });
 });
 

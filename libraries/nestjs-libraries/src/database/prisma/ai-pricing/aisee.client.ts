@@ -62,6 +62,85 @@ export interface AiseeCostItem {
   billing_mode: 'per_token' | 'per_image';
   /** per_token: total_tokens, per_image: image count */
   quantity: number;
+  /**
+   * The prompt/completion split behind `quantity`, for per_token items only.
+   *
+   * ABSENT on three kinds of item, and every reader must treat absent as
+   * "unknown", never as zero:
+   *   - rows written before the split was persisted (no backfill is possible —
+   *     `logAiUsage` only ever logged it),
+   *   - per_image items, where `quantity` is an image count,
+   *   - flat-rate items (post_overage / engage_reply / post_analytics), which
+   *     carry a synthetic quantity of 0 and no real token usage.
+   * `/admin/billing/stats` reports `chargesWithTokenSplit` so an operator can
+   * see how much of a window the split actually covers.
+   */
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cached_prompt_tokens?: number;
+}
+
+/** The BillingRecord token columns derived from a row's cost items. */
+export interface AiseeTokenColumns {
+  totalTokens: number;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  cachedPromptTokens: number | null;
+}
+
+/**
+ * Derive the denormalised token columns from the cost items being written.
+ *
+ * Single source of truth for the rule, used by every BillingRecord write path and
+ * mirrored by the backfill migration — if the two disagree, a backfilled row and a
+ * freshly written one report different numbers for the same data.
+ *
+ * - `totalTokens` counts `quantity` on **per_token** items only. per_image items
+ *   are skipped because their `quantity` is an image COUNT, a different unit
+ *   entirely. A flat-rate charge (post_overage / engage_reply / post_analytics,
+ *   which write a synthetic item with quantity 0) therefore lands on 0, which is
+ *   accurate: it used no LLM tokens.
+ * - The split is populated only when EVERY per_token item carries one. A partial
+ *   sum would look precise while failing to account for `totalTokens`, so the
+ *   honest answer is null — the same rule the read path applies per record.
+ */
+export function deriveTokenColumns(
+  costItems: AiseeCostItem[]
+): AiseeTokenColumns {
+  let totalTokens = 0;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let cachedPromptTokens = 0;
+  let perTokenItems = 0;
+  let itemsWithSplit = 0;
+
+  for (const item of costItems) {
+    if (item?.billing_mode !== 'per_token') {
+      continue;
+    }
+    perTokenItems += 1;
+    totalTokens += Number(item.quantity) || 0;
+
+    if (
+      typeof item.prompt_tokens === 'number' &&
+      typeof item.completion_tokens === 'number'
+    ) {
+      itemsWithSplit += 1;
+      promptTokens += item.prompt_tokens;
+      completionTokens += item.completion_tokens;
+      cachedPromptTokens += item.cached_prompt_tokens ?? 0;
+    }
+  }
+
+  const splitCoversEverything =
+    perTokenItems > 0 && itemsWithSplit === perTokenItems;
+
+  return {
+    totalTokens,
+    promptTokens: splitCoversEverything ? promptTokens : null,
+    completionTokens: splitCoversEverything ? completionTokens : null,
+    cachedPromptTokens: splitCoversEverything ? cachedPromptTokens : null,
+  };
 }
 
 // ---------------------------------------------------------------------------

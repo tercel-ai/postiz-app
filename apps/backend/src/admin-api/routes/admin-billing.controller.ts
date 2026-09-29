@@ -9,6 +9,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import { Prisma } from '@prisma/client';
 import { SuperAdmin } from '@gitroom/backend/services/auth/admin/super-admin.decorator';
 import {
   PrismaRepository,
@@ -18,6 +19,7 @@ import {
   AiseeBusinessSubType,
   AiseeBusinessType,
   AiseeClient,
+  AiseeCostItem,
 } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
 import {
   BILLING_SCENES,
@@ -33,6 +35,8 @@ import {
 import {
   BILLING_AMOUNT,
   BILLING_DATA_FILTER_KEYS,
+  BILLING_TOKEN_SPLIT_PRESENT,
+  billingTokenSum,
   buildBillingOrderBy,
   buildBillingWhere,
   buildSceneGrouping,
@@ -40,6 +44,29 @@ import {
 } from '@gitroom/backend/admin-api/billing-records.query';
 import { OrganizationService } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.service';
 import { resolveOrganizationId } from '@gitroom/backend/admin-api/admin.utils';
+
+/**
+ * LLM token usage. `total` is always available (it is `quantity` on the per_token
+ * cost items); `prompt` / `completion` / `cached` are null when the rows in
+ * question carry no split — anything written before the split was persisted has
+ * only a total, and it cannot be backfilled.
+ */
+interface BillingTokenUsage {
+  total: number;
+  prompt: number | null;
+  completion: number | null;
+  cached: number | null;
+}
+
+/** Running token totals for one bucket while /stats folds its groups together. */
+interface SceneTokenTotals {
+  total: number;
+  prompt: number;
+  completion: number;
+  cached: number;
+  chargesWithSplit: number;
+  chargesWithTokenData: number;
+}
 
 /** Per-scene credit consumption (see GET /stats). Amounts are decimal strings. */
 interface BillingSceneStats {
@@ -61,6 +88,25 @@ interface BillingSceneStats {
   maxAmount: string;
   lastAt: string | null;
   byStatus: Record<string, number>;
+  /** null when the token aggregate could not be read — see statsTokens. */
+  tokens:
+    | (BillingTokenUsage & {
+        /** Tokens burned by ONE charge of this scene, on average. */
+        avgPerCharge: number;
+        /**
+         * How many of `count` carry a prompt/completion split. Less than `count`
+         * means the split describes only part of this bucket — the rest predates
+         * it.
+         */
+        chargesWithSplit: number;
+        /**
+         * How many of `count` contributed a token figure at all. Less than
+         * `count` means some rows have neither the denormalised columns nor a
+         * readable costItems — i.e. the backfill has not reached them.
+         */
+        chargesWithTokenData: number;
+      })
+    | null;
 }
 
 /** One selectable business scene in the admin filter (see GET /meta). */
@@ -88,6 +134,237 @@ export class AdminBillingController {
   ) {}
 
   private readonly logger = new Logger(AdminBillingController.name);
+
+  /**
+   * Shape one bucket's token usage for the response.
+   *
+   * `prompt` / `completion` / `cached` are null — never 0 — when no charge in the
+   * bucket carries a split: those rows predate it and cannot be backfilled, so
+   * "total only" is the truthful answer, where a 0/0 split would both look
+   * precise and contradict `total`.
+   */
+  private sceneTokens(
+    tokens: SceneTokenTotals | undefined,
+    count: number
+  ): BillingSceneStats['tokens'] {
+    if (!tokens) {
+      return null;
+    }
+    const hasSplit = tokens.chargesWithSplit > 0;
+    // Averaged over the charges that actually reported tokens, not over `count`:
+    // dividing by rows the backfill has not reached yet would drag every average
+    // toward zero and make the figure read as "cheaper than it is".
+    const denominator = tokens.chargesWithTokenData || count;
+
+    return {
+      total: tokens.total,
+      prompt: hasSplit ? tokens.prompt : null,
+      completion: hasSplit ? tokens.completion : null,
+      cached: hasSplit ? tokens.cached : null,
+      avgPerCharge: denominator ? Math.round(tokens.total / denominator) : 0,
+      chargesWithSplit: tokens.chargesWithSplit,
+      chargesWithTokenData: tokens.chargesWithTokenData,
+    };
+  }
+
+  /**
+   * Bucket identity for the per-scene fold.
+   *
+   * The unclassified bucket is keyed per businessType: it exists to announce
+   * "this billing call site has no scene definition", and folding two
+   * businessTypes into one row would show a single arbitrary label (whichever SQL
+   * group arrived first) plus an average across unrelated businesses.
+   */
+  private sceneBucketKey(sceneId: string, businessType: string): string {
+    return sceneId === BILLING_SCENE_OTHER ? `other:${businessType}` : sceneId;
+  }
+
+  /**
+   * Per-bucket LLM token usage, or null when it could not be read at all.
+   *
+   * Reads the denormalised `totalTokens` / `promptTokens` / `completionTokens` /
+   * `cachedPromptTokens` columns, which needs no cast and can be summed directly.
+   * Rows written before those columns existed have them NULL, so for exactly
+   * those rows it falls back to summing the `costItems` JSON — the old path, kept
+   * only until the backfill runs (`add-billing-record-token-columns.sql`), and
+   * still isolated in its own try/caught statement because casting that TEXT
+   * column is what PostgreSQL 15 cannot guard. Once every row is backfilled the
+   * fallback stops being issued and no JSON is parsed at query time at all.
+   *
+   * `chargesWithTokenData` is what makes the transition visible rather than
+   * silent: less than `count` means some rows contributed no token figure.
+   */
+  private async statsTokens(where: Prisma.Sql): Promise<Map<
+    string,
+    SceneTokenTotals
+  > | null> {
+    const { keys, select, groupBy } = buildSceneGrouping();
+
+    const bucketOf = (row: Record<string, any>) =>
+      this.sceneBucketKey(
+        resolveBillingSceneId({
+          businessType: row.businessType,
+          subType: row.subType,
+          data: Object.fromEntries(keys.map((key) => [key, row[`data_${key}`]])),
+        }),
+        row.businessType
+      );
+
+    const byBucket = new Map<string, SceneTokenTotals>();
+    const bucketFor = (key: string) => {
+      const existing = byBucket.get(key);
+      if (existing) {
+        return existing;
+      }
+      const fresh: SceneTokenTotals = {
+        total: 0,
+        prompt: 0,
+        completion: 0,
+        cached: 0,
+        chargesWithSplit: 0,
+        chargesWithTokenData: 0,
+      };
+      byBucket.set(key, fresh);
+      return fresh;
+    };
+
+    let rowsNeedingFallback = 0;
+
+    try {
+      // ::text on every SUM: SUM(int4) is int8 in PostgreSQL, and Prisma hands
+      // an int8 back as a BigInt, which JSON.stringify refuses to serialise.
+      const columnRows = await this._billingRecord.model.$queryRaw<
+        Record<string, any>[]
+      >`
+        SELECT ${select},
+               COALESCE(SUM("totalTokens"), 0)::text AS "totalTokens",
+               COALESCE(SUM("promptTokens"), 0)::text AS "promptTokens",
+               COALESCE(SUM("completionTokens"), 0)::text AS "completionTokens",
+               COALESCE(SUM("cachedPromptTokens"), 0)::text AS "cachedTokens",
+               COUNT(*) FILTER (WHERE "promptTokens" IS NOT NULL)::int AS "chargesWithSplit",
+               COUNT(*) FILTER (WHERE "totalTokens" IS NOT NULL)::int AS "chargesWithTokenData",
+               COUNT(*) FILTER (WHERE "totalTokens" IS NULL)::int AS "chargesNeedingFallback"
+        FROM "BillingRecord"
+        WHERE ${where}
+        GROUP BY ${groupBy}
+      `;
+
+      for (const row of columnRows) {
+        const bucket = bucketFor(bucketOf(row));
+        bucket.total += Number(row.totalTokens) || 0;
+        bucket.prompt += Number(row.promptTokens) || 0;
+        bucket.completion += Number(row.completionTokens) || 0;
+        bucket.cached += Number(row.cachedTokens) || 0;
+        bucket.chargesWithSplit += Number(row.chargesWithSplit) || 0;
+        bucket.chargesWithTokenData += Number(row.chargesWithTokenData) || 0;
+        rowsNeedingFallback += Number(row.chargesNeedingFallback) || 0;
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Token column aggregate failed — reporting credits only: ${
+          error instanceof Error ? error.message : error
+        }`
+      );
+      return null;
+    }
+
+    if (rowsNeedingFallback === 0) {
+      return byBucket;
+    }
+
+    try {
+      const jsonRows = await this._billingRecord.model.$queryRaw<
+        Record<string, any>[]
+      >`
+        SELECT ${select},
+               COALESCE(SUM(${billingTokenSum('quantity')}), 0)::text AS "totalTokens",
+               COALESCE(SUM(${billingTokenSum(
+                 'prompt_tokens'
+               )}), 0)::text AS "promptTokens",
+               COALESCE(SUM(${billingTokenSum(
+                 'completion_tokens'
+               )}), 0)::text AS "completionTokens",
+               COALESCE(SUM(${billingTokenSum(
+                 'cached_prompt_tokens'
+               )}), 0)::text AS "cachedTokens",
+               COUNT(*) FILTER (
+                 WHERE ${BILLING_TOKEN_SPLIT_PRESENT}
+               )::int AS "chargesWithSplit",
+               COUNT(*)::int AS "chargesWithTokenData"
+        FROM "BillingRecord"
+        WHERE ${where} AND "totalTokens" IS NULL
+        GROUP BY ${groupBy}
+      `;
+
+      for (const row of jsonRows) {
+        const bucket = bucketFor(bucketOf(row));
+        bucket.total += Number(row.totalTokens) || 0;
+        bucket.prompt += Number(row.promptTokens) || 0;
+        bucket.completion += Number(row.completionTokens) || 0;
+        bucket.cached += Number(row.cachedTokens) || 0;
+        bucket.chargesWithSplit += Number(row.chargesWithSplit) || 0;
+        bucket.chargesWithTokenData += Number(row.chargesWithTokenData) || 0;
+      }
+    } catch (error) {
+      // The columns still gave numbers for every backfilled row; the un-backfilled
+      // ones stay uncovered, which chargesWithTokenData < count already says.
+      this.logger.warn(
+        `Token JSON fallback failed for ${rowsNeedingFallback} un-backfilled ` +
+          `row(s) — a costItems value is most likely not valid JSON: ${
+            error instanceof Error ? error.message : error
+          }`
+      );
+    }
+
+    return byBucket;
+  }
+
+  /**
+   * Total LLM tokens on one record, from its per_token cost items.
+   *
+   * The split is reported ONLY when every per_token item carries one — otherwise
+   * prompt+completion would not account for `total`, and a partial split reads as
+   * precise while under-reporting. A row written before the split was persisted
+   * therefore shows its total and nothing else, which is the intended behavior.
+   * per_image items are skipped: their `quantity` is an image count, not tokens.
+   */
+  private summariseTokens(costItems: unknown[]): BillingTokenUsage {
+    let total = 0;
+    let prompt = 0;
+    let completion = 0;
+    let cached = 0;
+    let perTokenItems = 0;
+    let itemsWithSplit = 0;
+
+    for (const raw of costItems) {
+      const item = raw as Partial<AiseeCostItem> | null;
+      if (!item || item.billing_mode !== 'per_token') {
+        continue;
+      }
+      perTokenItems += 1;
+      total += Number(item.quantity) || 0;
+
+      if (
+        typeof item.prompt_tokens === 'number' &&
+        typeof item.completion_tokens === 'number'
+      ) {
+        itemsWithSplit += 1;
+        prompt += item.prompt_tokens;
+        completion += item.completion_tokens;
+        cached += item.cached_prompt_tokens ?? 0;
+      }
+    }
+
+    const splitCoversEverything =
+      perTokenItems > 0 && itemsWithSplit === perTokenItems;
+
+    return {
+      total,
+      prompt: splitCoversEverything ? prompt : null,
+      completion: splitCoversEverything ? completion : null,
+      cached: splitCoversEverything ? cached : null,
+    };
+  }
 
   /**
    * `costItems` is a JSON string column, and this is the view an operator opens
@@ -222,12 +499,16 @@ export class AdminBillingController {
       records: ids
         .map(({ id }) => byId.get(id))
         .filter((row): row is (typeof rows)[number] => !!row)
-        .map(({ organization, ...record }) => ({
-          ...record,
-          costItems: this.parseCostItems(record.costItems, record.id),
-          scene: resolveBillingSceneId(record),
-          userId: organization?.users[0]?.userId ?? null,
-        })),
+        .map(({ organization, ...record }) => {
+          const costItems = this.parseCostItems(record.costItems, record.id);
+          return {
+            ...record,
+            costItems,
+            tokens: this.summariseTokens(costItems),
+            scene: resolveBillingSceneId(record),
+            userId: organization?.users[0]?.userId ?? null,
+          };
+        }),
       totals: {
         count: totals?.count ?? 0,
         amount: totals?.amount ?? '0',
@@ -256,9 +537,12 @@ export class AdminBillingController {
       return { error: 'Record not found' };
     }
 
+    const costItems = this.parseCostItems(record.costItems, record.id);
+
     return {
       ...record,
-      costItems: this.parseCostItems(record.costItems, record.id),
+      costItems,
+      tokens: this.summariseTokens(costItems),
       scene: resolveBillingSceneId(record),
     };
   }
@@ -319,7 +603,8 @@ export class AdminBillingController {
       return {
         checkedAt: new Date().toISOString(),
         scenes: [] as BillingSceneStats[],
-        total: { count: 0, amount: '0' },
+        total: { count: 0, amount: '0', tokens: 0, chargesWithTokenSplit: 0 },
+        tokensAvailable: true,
       };
     }
 
@@ -327,9 +612,8 @@ export class AdminBillingController {
     const where = buildBillingWhere(normalized);
     const { keys, select, groupBy } = buildSceneGrouping();
 
-    const rows = await this._billingRecord.model.$queryRaw<
-      Record<string, any>[]
-    >`
+    const [rows, tokensByBucket] = await Promise.all([
+      this._billingRecord.model.$queryRaw<Record<string, any>[]>`
       SELECT ${select},
              "status",
              COUNT(*)::int AS "count",
@@ -340,7 +624,9 @@ export class AdminBillingController {
       FROM "BillingRecord"
       WHERE ${where}
       GROUP BY ${groupBy}, "status"
-    `;
+    `,
+      this.statsTokens(where),
+    ]);
 
     const buckets = new Map<
       string,
@@ -369,13 +655,7 @@ export class AdminBillingController {
       });
       const def = findBillingScene(sceneId);
 
-      // The unclassified bucket is keyed per businessType: it exists to announce
-      // "this billing call site has no scene definition", and folding two
-      // businessTypes into one row would show a single arbitrary label (whichever
-      // SQL group arrived first) plus an average across unrelated businesses —
-      // exactly the blending scenes were introduced to eliminate.
-      const bucketKey =
-        sceneId === BILLING_SCENE_OTHER ? `other:${row.businessType}` : sceneId;
+      const bucketKey = this.sceneBucketKey(sceneId, row.businessType);
 
       const bucket = buckets.get(bucketKey) ?? {
         id: bucketKey,
@@ -425,6 +705,7 @@ export class AdminBillingController {
         maxAmount: bucket.maxAmount.toFixed(6),
         lastAt: bucket.lastAt ? bucket.lastAt.toISOString() : null,
         byStatus: bucket.byStatus,
+        tokens: this.sceneTokens(tokensByBucket?.get(bucket.id), bucket.count),
       }))
       .sort((a, b) => Number(b.totalAmount) - Number(a.totalAmount));
 
@@ -436,7 +717,18 @@ export class AdminBillingController {
         amount: scenes
           .reduce((sum, scene) => sum + Number(scene.totalAmount), 0)
           .toFixed(6),
+        tokens: scenes.reduce(
+          (sum, scene) => sum + (scene.tokens?.total ?? 0),
+          0
+        ),
+        chargesWithTokenSplit: scenes.reduce(
+          (sum, scene) => sum + (scene.tokens?.chargesWithSplit ?? 0),
+          0
+        ),
       },
+      // false when the token aggregate could not be read at all, so the UI can
+      // say "unavailable" instead of showing zeroes that look like "no usage".
+      tokensAvailable: tokensByBucket !== null,
     };
   }
 
