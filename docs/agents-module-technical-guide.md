@@ -134,8 +134,10 @@ Failed billing records (e.g. Aisee service down) can be retried via admin endpoi
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/admin/billing/records` | GET | List billing records (filterable by status, org, businessType) |
+| `/admin/billing/records` | GET | List billing records (filterable by business scene, status, org, businessType, `data` markers, model, keyword, date range, amount range) |
 | `/admin/billing/records/:id` | GET | Single record detail |
+| `/admin/billing/stats` | GET | Credit consumption per business scene (same filters as `/records`) |
+| `/admin/billing/meta` | GET | Filter vocabulary: scenes, statuses, businessTypes, subTypes |
 | `/admin/billing/summary` | GET | Aggregated counts by status and businessType |
 | `/admin/billing/retry/:id` | POST | Retry single failed record |
 | `/admin/billing/retry-all-failed` | POST | Batch retry all failed records |

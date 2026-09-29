@@ -109,9 +109,11 @@ All endpoints require `@SuperAdmin()` permission.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/admin/billing/records` | GET | List billing records with filters (`status`, `organizationId`, `businessType`, pagination) |
-| `/admin/billing/records/:id` | GET | Single record detail with parsed `costItems` |
-| `/admin/billing/summary` | GET | Aggregated counts by status and businessType |
+| `/admin/billing/records` | GET | List billing records. Filters by business **scene**, plus status / businessType / subType sets, `data` markers, model, relatedId, taskId, keyword, date range and single-charge amount range; sorts by createdAt or amount. See [admin-api.md § Billing](./admin-api.md#billing) |
+| `/admin/billing/records/:id` | GET | Single record detail with parsed `costItems` and its resolved scene |
+| `/admin/billing/stats` | GET | Credit consumption per business scene — count, total, **average per charge**, min, max, status split. Takes the same filters as `/records` |
+| `/admin/billing/meta` | GET | The filter vocabulary: every scene with its meaning, all nine statuses with whether each needs a human, businessTypes, subTypes, sort fields |
+| `/admin/billing/summary` | GET | Aggregated counts by status and by (businessType, status) |
 | `/admin/billing/associate/:taskId` | PATCH | Back-fill `relatedId` and/or `data` on a BillingRecord (merge semantics) |
 | `/admin/billing/retry/:id` | POST | Retry single failed/pending record — re-sends deduction to Aisee |
 | `/admin/billing/retry-all-failed` | POST | Batch retry all `failed` records sequentially |

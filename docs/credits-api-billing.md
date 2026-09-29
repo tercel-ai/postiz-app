@@ -178,7 +178,19 @@ looks like. `pending` and `failed` are the ones worth chasing.
 ### Where to look
 
 **Admin endpoints** (`/admin/billing/…`) list and summarise these records, and can
-re-run a charge that failed or settle one that is still accumulating.
+re-run a charge that failed or settle one that is still accumulating:
+
+- `GET /records` — the ledger, filtered by business **scene** (which product action
+  burned the credits, not just the coarse business type), plus status, date range,
+  single-charge amount range and a keyword. Its `totals` is the credit sum over the
+  whole filtered set, not the page.
+- `GET /stats` — the same filtered set, aggregated per scene: how many charges and,
+  the number this page exists for, **how much one charge of that business costs** on
+  average, at least and at most.
+- `GET /meta` — what the filters accept, including every scene with a one-line
+  description of the spend it represents.
+
+Full parameter reference: [admin-api.md § Billing](./admin-api.md#billing).
 
 **There is no end-user endpoint for the credit balance in this API.** Balance and
 statement live on the Aisee side and are read there. Note that

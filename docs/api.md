@@ -418,11 +418,13 @@ Modules with a dedicated, parameter-level API reference:
 | GET | `/admin/api-cost/engage-scores` |
 
 ### [admin-billing.controller.ts](../apps/backend/src/admin-api/routes/admin-billing.controller.ts) — `/admin/billing`
-📝 No dedicated API reference yet.
+📖 [admin-api.md § Billing](./admin-api.md#billing)
 | Method | Path |
 | --- | --- |
 | GET | `/admin/billing/records` |
 | GET | `/admin/billing/records/:id` |
+| GET | `/admin/billing/stats` |
+| GET | `/admin/billing/meta` |
 | GET | `/admin/billing/summary` |
 | PATCH | `/admin/billing/associate/:taskId` |
 | POST | `/admin/billing/retry/:id` |

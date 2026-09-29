@@ -446,13 +446,122 @@ Manually trigger a backfill of daily statistics (DataTicks) for a specific date 
 
 ---
 
+### Billing
+
+Credit consumption. Every AI charge writes a `BillingRecord`; these endpoints are
+how operations reads that ledger. All require `@SuperAdmin()`.
+
+#### The business scene
+
+`BillingRecord.businessType` is too coarse to answer "what did this feature cost
+us": `ai_copywriting` alone covers the editor copilot, the agent chat, calendar
+post generation and Engage reference posts, which have nothing in common
+operationally. A **scene** is the product action that burned the credits —
+declared as `businessType` + optional `subType` + optional `data` markers
+(`surface`, `source`) in
+[`billing-scene.ts`](../libraries/nestjs-libraries/src/database/prisma/ai-pricing/billing-scene.ts)
+and compiled to SQL by
+[`billing-records.query.ts`](../apps/backend/src/admin-api/billing-records.query.ts).
+
+`GET /admin/billing/meta` is the authoritative list. Today:
+
+| Scene | What it is |
+|---|---|
+| `copilot_editor` | Editor popup + CopilotTextarea autosuggestions (`/copilot/chat`). Accrued per window, so one row covers many keystroke pauses |
+| `agent_chat` | One deliberate `/copilot/agent` turn |
+| `post_generation` | Calendar agent generating a post |
+| `engage_reference_post` | Post generated from an Engage opportunity used as reference |
+| `image_generation_calendar` / `image_generation_chat` | Image generation, split by where it was invoked |
+| `video_generation` | Not charged yet — expected to be empty |
+| `engage_reply` | Engage reply draft, priced by length; counts against the monthly cap |
+| `post_overage_engage` / `post_overage_post` | A send beyond the plan limit, split the same way the ledger's `channel` is |
+| `post_analytics` | One analytics-sync run for one integration |
+| `operation_plan` | A project's operation plan (main generation plus every shrink call, one transaction) |
+| `other` | Rows no definition claims — a billing call site with no scene, or a row predating the `subType` column. Filterable, so it cannot hide |
+
+#### GET /admin/billing/records
+
+The ledger. All filters optional and ANDed; `scene`, `status`, `businessType` and
+`subType` each take a comma-separated set (max 30).
+
+| Parameter | Notes |
+|---|---|
+| `scene` | Scene ids from `/meta`, incl. `other`. An unknown id matches nothing |
+| `status` | `success` `pending` `failed` `unbilled` `accruing` `reserved` `released` `skipped` `internal` |
+| `businessType`, `subType` | The raw columns, when the coarse split is what you want |
+| `organizationId` \| `userId` | `userId` resolves to every org it owns |
+| `source`, `surface`, `platform`, `projectId` | `data` JSON markers |
+| `model` | Substring of the per-model `costItems` breakdown |
+| `relatedId` | Exact business entity: post / media / opportunity / plan / integration |
+| `taskId` | Partial idempotency key — a taskId embeds the entity it was built from |
+| `transactionId` | Exact Aisee transaction id |
+| `search` | Keyword over description / taskId / relatedId / transactionId / id. `%` and `_` are literals |
+| `dateFrom`, `dateTo` | ISO 8601. A malformed value is **rejected** (400), never ignored |
+| `minAmount`, `maxAmount` | Plain decimal credits. Malformed is rejected (400) |
+| `sortBy` | `createdAt` (default) or `amount`. `amount` sorts **numerically** — the column is a decimal string |
+| `sortOrder` | `asc` \| `desc` (default) |
+| `page`, `pageSize` | `pageSize` max 200, default 50 |
+
+Response: `{ records, totals, pagination }`. Each record carries its resolved
+`scene`. **`totals` is the credit sum and count over the whole filtered set, not
+the page** — that is the number to read after narrowing to one business.
+
+The date and amount bounds are validated and rejected rather than ignored on
+purpose: silently dropping one would answer with the entire ledger *and its
+credit total* while the operator believes they are looking at a scoped window.
+The scene and status sets are the opposite — open-ended by design, so an unknown
+member narrows to nothing instead of failing the page.
+
+#### GET /admin/billing/stats
+
+The same filtered set, aggregated per scene: `count`, `totalAmount`, `avgAmount`
+(**credits one charge of that business costs**), `minAmount`, `maxAmount`,
+`lastAt`, and a `byStatus` split. Scenes with no matching row are omitted; `/meta`
+is the list of every scene that can exist. The unclassified bucket is reported per
+businessType (`id: "other:<businessType>"`), because blending two businesses there
+would destroy the only diagnostic signal it carries.
+
+#### GET /admin/billing/meta
+
+The filter vocabulary, served from the registries so a client cannot drift from
+what the backend actually writes: `scenes` (id, label, description, businessType,
+subType), `statuses` (id, label, description, `actionRequired` — true only for
+`pending`, `failed`, `unbilled`), `businessTypes`, `subTypes`, `dataFilterKeys`,
+`sortFields`.
+
+#### GET /admin/billing/summary
+
+Counts by status and by (businessType, status). `healthy` is true when nothing is
+`failed` or `pending`. Note the `byBusinessType` rows are per **(businessType,
+status)** pair, not per business type.
+
+#### GET /admin/billing/records/:id
+
+One record with parsed `costItems` and its resolved `scene`.
+
+#### PATCH /admin/billing/associate/:taskId
+
+Back-fill `relatedId` and/or `data` on a record whose business entity was created
+after the charge (merge semantics).
+
+#### POST /admin/billing/retry/:id · POST /admin/billing/retry-all-failed
+
+Re-send a failed or still-accumulating deduction to Aisee. Refuses a record that
+already succeeded, was skipped, or was billed internally.
+
+---
+
 ## Key Files
 
 - `apps/backend/src/admin-api/routes/admin-dashboard.controller.ts`
 - `apps/backend/src/admin-api/routes/admin-settings.controller.ts`
 - `apps/backend/src/admin-api/routes/admin-diagnostics.controller.ts`
 - `apps/backend/src/admin-api/routes/admin-engage.controller.ts`
+- `apps/backend/src/admin-api/routes/admin-billing.controller.ts`
+- `apps/backend/src/admin-api/billing-records.query.ts`
+- `libraries/nestjs-libraries/src/database/prisma/ai-pricing/billing-scene.ts`
 - `libraries/nestjs-libraries/src/dtos/admin/admin-engage-query.dto.ts`
+- `libraries/nestjs-libraries/src/dtos/admin/admin-billing-records-query.dto.ts`
 - `libraries/nestjs-libraries/src/engage/engage.repository.ts` (diagnostic query methods: `findStuckScanCursors`, `findFailedKeywordScans`, `findDeadReplyAccounts`, `findEngageReplyErrors`)
 - `libraries/nestjs-libraries/src/dtos/admin/ai-pricing.dto.ts`
 - `libraries/nestjs-libraries/src/dtos/admin/settings-body.dto.ts`

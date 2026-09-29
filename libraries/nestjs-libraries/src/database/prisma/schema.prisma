@@ -330,6 +330,10 @@ model BillingRecord {
   @@index([status])
   @@index([relatedId])
   @@index([subType])
+  /// Admin credit-consumption views filter by business scene (businessType plus
+  /// subType plus a `data` marker) inside a date window — see
+  /// GET /admin/billing/records and /stats.
+  @@index([businessType, createdAt])
 }
 
 model Subscription {
