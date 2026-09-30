@@ -57,6 +57,38 @@ export const BILLING_TOKEN_FIELDS = [
 export type BillingTokenField = (typeof BILLING_TOKEN_FIELDS)[number];
 
 /**
+ * True when a row carries a COMPLETE prompt/completion split — every one of its
+ * per_token items has both fields.
+ *
+ * All-or-nothing, deliberately, and it must stay that way: `deriveTokenColumns`
+ * (the write path), the backfill SQL and `summariseTokens` (per record) all apply
+ * the same rule, and the point of it is that a partial split reads as precise
+ * while under-accounting for the total. An `EXISTS` ("at least one item is split")
+ * would make this the one path that disagrees — and the shape it disagrees on,
+ * two per_token items where only one is split, is exactly the accrual window that
+ * spans the change.
+ */
+export const BILLING_TOKEN_SPLIT_PRESENT = Prisma.raw(`(
+    EXISTS (
+      SELECT 1 FROM jsonb_array_elements("costItems"::jsonb) AS item
+      WHERE item->>'billing_mode' = 'per_token'
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM jsonb_array_elements("costItems"::jsonb) AS item
+      WHERE item->>'billing_mode' = 'per_token'
+        -- COALESCE, not a bare NOT: an ABSENT key makes item->'x' SQL NULL and
+        -- jsonb_typeof(NULL) NULL, so the comparison is NULL and NOT NULL is
+        -- still NULL. The row would not be selected and an unsplit item would
+        -- read as split -- the inversion of the whole rule.
+        AND NOT COALESCE(
+              jsonb_typeof(item->'prompt_tokens') = 'number'
+          AND jsonb_typeof(item->'completion_tokens') = 'number',
+          FALSE
+        )
+    )
+  )`);
+
+/**
  * Sum one numeric field across a row's **per_token** cost items.
  *
  * `costItems` is a TEXT column, so it has to be cast to jsonb to be read, and a
@@ -69,39 +101,38 @@ export type BillingTokenField = (typeof BILLING_TOKEN_FIELDS)[number];
  * statement and degrades tokens as a unit when it fails, rather than letting one
  * corrupt row take the whole per-scene view down.
  *
- * The two guards that DO work on 15:
+ * The guards that DO work on 15:
  *  - `billing_mode = 'per_token'` excludes per_image items, whose `quantity` is an
  *    image COUNT — summing those in would inflate a token figure with a different
  *    unit entirely.
  *  - `jsonb_typeof(...) = 'number'` stops the inner cast raising on a non-numeric
- *    value AND makes an ABSENT field contribute nothing rather than zero, so a row
- *    written before the split was persisted reports only its total.
+ *    value.
+ *  - the three SPLIT fields are additionally gated on
+ *    BILLING_TOKEN_SPLIT_PRESENT, so a row whose split is incomplete contributes
+ *    0 to them instead of a partial sum. Without that gate this would be the only
+ *    one of the four implementations of the rule that reports
+ *    prompt + completion < total as though it accounted for it.
  */
 export function billingTokenSum(field: BillingTokenField): Prisma.Sql {
   if (!SAFE_IDENTIFIER.test(field)) {
     throw new Error(`Unsafe billing token field: ${field}`);
   }
-  return Prisma.raw(`(
+
+  const sum = `(
       SELECT COALESCE(SUM((item->>'${field}')::numeric), 0)
       FROM jsonb_array_elements("costItems"::jsonb) AS item
       WHERE item->>'billing_mode' = 'per_token'
         AND jsonb_typeof(item->'${field}') = 'number'
-    )`);
-}
+    )`;
 
-/**
- * True when a row carries a usable prompt/completion split. Counting these tells
- * an operator how much of a window the split actually covers — rows written
- * before it was persisted have only a total, and no backfill is possible because
- * `logAiUsage` never stored the split anywhere.
- */
-export const BILLING_TOKEN_SPLIT_PRESENT = Prisma.raw(`(EXISTS (
-    SELECT 1
-    FROM jsonb_array_elements("costItems"::jsonb) AS item
-    WHERE item->>'billing_mode' = 'per_token'
-      AND jsonb_typeof(item->'prompt_tokens') = 'number'
-      AND jsonb_typeof(item->'completion_tokens') = 'number'
-  ))`)
+  if (field === 'quantity') {
+    return Prisma.raw(sum);
+  }
+
+  return Prisma.sql`(CASE WHEN ${BILLING_TOKEN_SPLIT_PRESENT} THEN ${Prisma.raw(
+    sum
+  )} ELSE 0 END)`;
+}
 
 /** `data` JSON keys the admin filter can narrow on directly. */
 export const BILLING_DATA_FILTER_KEYS = [

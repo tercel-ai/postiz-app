@@ -3,6 +3,11 @@ import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 import { EngageOpportunity } from "@prisma/client";
 import { weightedLength } from "@gitroom/helpers/utils/count.length";
+import {
+  AiUsageInfo,
+  logAiUsage,
+  parseModelId,
+} from "@gitroom/nestjs-libraries/openai/openai.service";
 import { buildOriginalPostXml } from "@gitroom/nestjs-libraries/engage/prompt-source-envelope";
 import {
   requiresMention,
@@ -198,6 +203,18 @@ export class EngageDraftService {
      * unattended auto-reply driver gets.
      */
     maxWeighted?: number,
+    /**
+     * Receives one AiUsageInfo per LLM call this generation makes. A single draft
+     * can take up to three calls (the length retry and the missing-mention
+     * rewrite each re-generate), so the caller gets a list, not a number.
+     *
+     * The reply is PRICED by length, not by tokens, so nothing here changes what
+     * is charged — but the tokens are real spend, and without them there is no
+     * way to tell whether a length tier's flat price covers what it burns. The
+     * caller hands this list to settleReplyGeneration / releaseReplyGeneration,
+     * which stamp it onto the generation charge's BillingRecord.
+     */
+    usages?: AiUsageInfo[],
   ): AsyncGenerator<string> {
     const platform = normalizePlatform(opportunity.platform);
     const outputLimit = outputLength ?? defaultOutputLimitForPlatform(platform);
@@ -249,6 +266,7 @@ export class EngageDraftService {
         requiredMentions,
         outputLimit,
         signal,
+        usages,
       });
     } else if (platform === "reddit") {
       // The prompt targets `outputLimit` (default 1000), but we only reject above
@@ -264,6 +282,7 @@ export class EngageDraftService {
         requiredMentions,
         outputLimit,
         signal,
+        usages,
       });
     } else {
       console.log("No limit set, using default.");
@@ -277,6 +296,7 @@ export class EngageDraftService {
         requiredMentions,
         outputLimit,
         signal,
+        usages,
       });
     }
   }
@@ -299,6 +319,8 @@ export class EngageDraftService {
     /** The requested length, which sizes the model's output budget. */
     outputLimit: number;
     signal?: AbortSignal;
+    /** Every attempt's usage lands here, retries included — see generateDraft. */
+    usages?: AiUsageInfo[];
   }): AsyncGenerator<string> {
     const {
       systemPrompt,
@@ -310,6 +332,7 @@ export class EngageDraftService {
       requiredMentions,
       outputLimit,
       signal,
+      usages,
     } = options;
 
     const MAX_ATTEMPTS = 3;
@@ -323,7 +346,8 @@ export class EngageDraftService {
         attemptSystemPrompt,
         userPrompt,
         signal,
-        replyMaxTokens(outputLimit)
+        replyMaxTokens(outputLimit),
+        usages
       );
 
       const overLimit = !isWithinLimit(draft);
@@ -388,11 +412,54 @@ export class EngageDraftService {
     );
   }
 
+  /**
+   * Log one LLM call's usage and, when the caller asked for it, collect it.
+   *
+   * Logged unconditionally, like every other LLM path in the codebase
+   * (`logAiUsage`): before this, reply drafts were the one high-volume LLM feature
+   * whose token spend appeared nowhere — not in the ledger, not even in the logs.
+   */
+  private _recordUsage(
+    usages: AiUsageInfo[] | undefined,
+    call: {
+      servicer: string;
+      rawModel: string;
+      method: string;
+      promptTokens?: number | null;
+      completionTokens?: number | null;
+      totalTokens?: number | null;
+      cachedPromptTokens?: number | null;
+    }
+  ): void {
+    const { provider, model } = parseModelId(call.rawModel, call.servicer);
+    const info: AiUsageInfo = {
+      servicer: call.servicer,
+      provider,
+      model,
+      type: "text",
+      billing_mode: "per_token",
+      method: call.method,
+      usage: {
+        prompt_tokens: call.promptTokens ?? 0,
+        completion_tokens: call.completionTokens ?? 0,
+        total_tokens:
+          call.totalTokens ??
+          (call.promptTokens ?? 0) + (call.completionTokens ?? 0),
+        ...(call.cachedPromptTokens
+          ? { cached_prompt_tokens: call.cachedPromptTokens }
+          : {}),
+      },
+    };
+    logAiUsage(info);
+    usages?.push(info);
+  }
+
   private async _generateRaw(
     systemPrompt: string,
     userPrompt: string,
     signal?: AbortSignal,
     maxTokens: number = replyMaxTokens(0),
+    usages?: AiUsageInfo[],
   ): Promise<string> {
     if (this.useOpenRouter && this.openRouterClient) {
       return this._generateViaOpenRouter(
@@ -400,6 +467,7 @@ export class EngageDraftService {
         userPrompt,
         signal,
         maxTokens,
+        usages,
       );
     }
     if (this.anthropicClient) {
@@ -408,6 +476,7 @@ export class EngageDraftService {
         userPrompt,
         signal,
         maxTokens,
+        usages,
       );
     }
     throw new Error(
@@ -420,6 +489,7 @@ export class EngageDraftService {
     userPrompt: string,
     signal?: AbortSignal,
     maxTokens: number = replyMaxTokens(0),
+    usages?: AiUsageInfo[],
   ): Promise<string> {
     const generate = (model: string) =>
       this.openRouterClient!.chat.completions.create(
@@ -459,6 +529,22 @@ export class EngageDraftService {
       response = await generate(this.openRouterFallbackModel);
     }
 
+    // Recorded from the FINAL response only: a region-blocked first attempt is
+    // refused before generation and burns nothing. `response.model` is the model
+    // that actually served, which differs from the configured one after a
+    // fallback — and it is the one that was paid for.
+    this._recordUsage(usages, {
+      servicer: "openrouter",
+      rawModel: response.model || this.openRouterModel,
+      method: "engageDraftViaOpenRouter",
+      promptTokens: response.usage?.prompt_tokens,
+      completionTokens: response.usage?.completion_tokens,
+      totalTokens: response.usage?.total_tokens,
+      cachedPromptTokens: (
+        response.usage as { prompt_tokens_details?: { cached_tokens?: number } }
+      )?.prompt_tokens_details?.cached_tokens,
+    });
+
     const content = response.choices[0]?.message?.content;
     return Array.isArray(content)
       ? content
@@ -473,6 +559,7 @@ export class EngageDraftService {
     userPrompt: string,
     signal?: AbortSignal,
     maxTokens: number = replyMaxTokens(0),
+    usages?: AiUsageInfo[],
   ): Promise<string> {
     const response = await this.anthropicClient!.messages.create(
       {
@@ -483,6 +570,20 @@ export class EngageDraftService {
       },
       { signal },
     );
+
+    // Anthropic reports input/output, not prompt/completion/total, and counts
+    // cache reads separately from input_tokens — so the total is their sum.
+    const input = response.usage?.input_tokens ?? 0;
+    const output = response.usage?.output_tokens ?? 0;
+    this._recordUsage(usages, {
+      servicer: "anthropic",
+      rawModel: response.model || "claude-sonnet-4-6",
+      method: "engageDraftViaAnthropic",
+      promptTokens: input,
+      completionTokens: output,
+      totalTokens: input + output,
+      cachedPromptTokens: response.usage?.cache_read_input_tokens ?? undefined,
+    });
 
     return response.content
       .map((block) => (block.type === "text" ? block.text : ""))

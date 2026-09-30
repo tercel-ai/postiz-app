@@ -136,7 +136,8 @@ function statements(dto: AdminBillingRecordsQueryDto): Record<string, Prisma.Sql
              )}), 0)::text AS "cachedTokens",
              COUNT(*) FILTER (
                WHERE ${BILLING_TOKEN_SPLIT_PRESENT}
-             )::int AS "chargesWithSplit"
+             )::int AS "chargesWithSplit",
+             COUNT(*)::int AS "chargesWithTokenData"
       FROM "BillingRecord"
       WHERE ${where} AND "totalTokens" IS NULL
       GROUP BY ${groupBy}
@@ -363,6 +364,30 @@ describe.skipIf(!DATABASE_URL)(
             { type: 'text', amount: '0.1', model: 'gpt-4.1', billing_mode: 'per_token', quantity: 1500 },
           ])
         ).toEqual({ total: 1500, prompt: 0, completion: 0, hasSplit: false });
+      });
+
+      // THE regression case. The fallback used to sum the split per FIELD, so this
+      // reported prompt 700 / completion 200 against a total of 1400 — the exact
+      // shape aisee-token-columns.spec.ts calls "precise-looking and wrong", while
+      // deriveTokenColumns, the backfill and summariseTokens all return null for it.
+      // Two per_token items with different models stay two items through
+      // mergeCostItems, so an accrual window spanning the change produces this.
+      it('reports total only when ONE of several items lacks the split', async () => {
+        expect(
+          await tokensOf([
+            { type: 'text', amount: '0.1', model: 'gpt-4.1', billing_mode: 'per_token', quantity: 900, prompt_tokens: 700, completion_tokens: 200 },
+            { type: 'text', amount: '0.05', model: 'gpt-4.1-mini', billing_mode: 'per_token', quantity: 500 },
+          ])
+        ).toEqual({ total: 1400, prompt: 0, completion: 0, hasSplit: false });
+      });
+
+      // Half a split is not a split — the pair is what makes it one.
+      it('treats an item with only completion_tokens as unsplit', async () => {
+        expect(
+          await tokensOf([
+            { type: 'text', amount: '0.1', model: 'gpt-4.1', billing_mode: 'per_token', quantity: 900, completion_tokens: 200 },
+          ])
+        ).toEqual({ total: 900, prompt: 0, completion: 0, hasSplit: false });
       });
 
       // quantity is an IMAGE COUNT there, so counting it as tokens would inflate

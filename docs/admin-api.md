@@ -473,7 +473,7 @@ and compiled to SQL by
 | `engage_reference_post` | Post generated from an Engage opportunity used as reference |
 | `image_generation_calendar` / `image_generation_chat` | Image generation, split by where it was invoked |
 | `video_generation` | Not charged yet — expected to be empty |
-| `engage_reply` | Engage reply draft, priced by length; counts against the monthly cap |
+| `engage_reply` | Engage reply draft, priced by length; counts against the monthly cap. The row also records the tokens every LLM call of the generation burned (retries included) and `data.generationModels`, so price can be compared with cost. A released (failed/aborted) generation keeps its tokens too — spend with no revenue |
 | `post_overage_engage` / `post_overage_post` | A send beyond the plan limit, split the same way the ledger's `channel` is |
 | `post_analytics` | One analytics-sync run for one integration |
 | `operation_plan` | A project's operation plan (main generation plus every shrink call, one transaction) |
@@ -530,8 +530,9 @@ The same filtered set, aggregated per scene: `count`, `totalAmount`, `avgAmount`
 `lastAt`, a `byStatus` split, and `tokens`:
 
 ```json
-"tokens": { "total": 41200, "prompt": 33000, "completion": 8200,
-            "cached": 0, "avgPerCharge": 1373, "chargesWithSplit": 28 }
+"tokens": { "total": 41200, "prompt": 33000, "completion": 8200, "cached": 0,
+            "avgPerCharge": 1373, "chargesWithSplit": 28,
+            "chargesWithTokenData": 30 }
 ```
 
 `chargesWithSplit` says how many of `count` carry a prompt/completion split — less
@@ -539,13 +540,20 @@ than `count` means the split describes only part of the bucket and the rest
 predates it. `prompt` / `completion` / `cached` are null when none do.
 
 `chargesWithTokenData` says how many of `count` contributed a token figure at all.
+Less than `count` means some rows' tokens could not be read — their `costItems` does
+not parse and their columns are not backfilled — so `total` is an under-count by
+those rows. It is **not** a backfill-progress signal: while the fallback works,
+backfilled and un-backfilled rows both contribute and it equals `count`.
+
 Token usage is read from the denormalised `BillingRecord.totalTokens` /
 `promptTokens` / `completionTokens` / `cachedPromptTokens` columns, which are summed
 directly; rows written before those columns existed have them NULL, and for exactly
 those rows the aggregate falls back to summing the `costItems` JSON until
-`backfill-billing-record-token-columns.sql` has run. `avgPerCharge` divides by
-`chargesWithTokenData`, not `count`, so an un-backfilled remainder cannot drag the
-average toward zero.
+`backfill-billing-record-token-columns.sql` has run. Both paths apply the same
+all-or-nothing split rule as the write path: a row whose per_token items do not
+*all* carry a prompt/completion split contributes nothing to `prompt` / `completion`,
+because a partial sum would read as precise while failing to account for `total`.
+`avgPerCharge` divides by `chargesWithTokenData`, not `count`.
 
 `tokens` is **null**, and the response's `tokensAvailable` is false, only when the
 token aggregate could not be read at all. The costItems fallback is a separate
@@ -574,7 +582,11 @@ status)** pair, not per business type.
 
 #### GET /admin/billing/records/:id
 
-One record with parsed `costItems` and its resolved `scene`.
+One record with parsed `costItems`, its resolved `scene`, and the same `tokens`
+object `/records` returns — `{ total, prompt, completion, cached }`, with the split
+null unless every per_token item carries one. The four denormalised token columns
+are deliberately NOT returned: `tokens` is the single contract, and publishing both
+would give callers two sources for one number.
 
 #### PATCH /admin/billing/associate/:taskId
 

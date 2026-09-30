@@ -18,11 +18,17 @@
 --
 -- SAFE TO RE-RUN, and designed to be: it only touches rows whose totalTokens is
 -- still NULL, and processes at most `batch_size` of them per invocation so no
--- single transaction sits on a large ledger. Run it until it reports
--- `remaining 0`:
+-- single transaction sits on a large ledger. Loop it until it stops making
+-- PROGRESS — i.e. until it reports `backfilled 0`:
 --
 --   until psql "$DATABASE_URL" -f backfill-billing-record-token-columns.sql \
---         2>&1 | tee /dev/stderr | grep -q 'remaining 0'; do :; done
+--         2>&1 | tee /dev/stderr | grep -q 'backfilled 0'; do :; done
+--
+-- Do NOT loop on `remaining 0`: a row whose costItems cannot be cast is skipped
+-- and keeps totalTokens NULL, so `remaining` has a floor above zero as soon as one
+-- exists and the loop would spin forever — and if the skipped rows ever fill a
+-- whole batch, the same rows are re-selected every time and nothing progresses.
+-- `backfilled 0` is true in exactly both of the states where you want to stop.
 --
 -- A row whose costItems is not valid JSON cannot be cast, so it is SKIPPED and its
 -- id is printed — one bad row never aborts the run. Those rows keep totalTokens

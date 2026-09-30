@@ -11,11 +11,20 @@
 -- schema.prisma, so `pnpm run prisma-db-push` adds them like any other field.
 -- This file is the written record, the same role as its siblings here.
 --
--- ORDER MATTERS: push these columns FIRST, then run
+-- ORDER MATTERS, AND IT INCLUDES THE APP: every BillingRecord write path now
+-- names these four columns in its Prisma payload, so a build deployed AHEAD of the
+-- push cannot write a billing row at all. Push, then deploy, then backfill. (The
+-- charge path refuses rather than charging past a schema error — see
+-- STRUCTURAL_DB_ERROR_CODES in aisee-credit.service.ts — so the failure is a
+-- missed charge, not a silent one, but it is still a failure.)
+--
+-- Push these columns FIRST, then run
 -- backfill-billing-record-token-columns.sql. Between the two, /stats falls back
 -- to reading costItems for rows whose columns are still NULL, so the figures stay
--- correct throughout — `chargesWithTokenData` on each scene says how many rows
--- the backfill has reached.
+-- correct throughout. Progress is reported by the backfill script's own
+-- `remaining` NOTICE, NOT by `chargesWithTokenData` on a scene: while the fallback
+-- is working that field equals `count`, so watching it would say "done" before the
+-- backfill had run at all.
 
 ALTER TABLE "BillingRecord"
     ADD COLUMN IF NOT EXISTS "totalTokens" INTEGER;

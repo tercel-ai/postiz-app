@@ -30,6 +30,22 @@ export const ACCRUING_STATUS = 'accruing';
 /** Postgres serialization failure — the retryable outcome of a SERIALIZABLE conflict. */
 const SERIALIZATION_FAILURE_CODE = 'P2034';
 
+/**
+ * Prisma errors that mean the SCHEMA is wrong, not that the database blipped.
+ *   P2021 — table does not exist
+ *   P2022 — column does not exist
+ * These are not worth charging past: they persist for every request until a
+ * migration runs, so treating one as a transient write failure would charge every
+ * caller while writing no audit row at all.
+ *
+ * P2010 ("raw query failed") is deliberately NOT here. It cannot reach this catch
+ * — the create goes through Prisma's query builder, not `$queryRaw` — and it
+ * carries transient Postgres codes (deadlock 40P01, serialization 40001,
+ * statement timeout 57014), so listing it would only risk refusing a charge that
+ * a retry would have completed.
+ */
+const STRUCTURAL_DB_ERROR_CODES = new Set(['P2021', 'P2022']);
+
 export interface AiseeCreditExecOptions {
   userId: string;
   taskId: string;
@@ -992,6 +1008,26 @@ export class AiseeCreditService {
           return { success: true, skipped: true };
         }
         recordId = replay.recordId;
+      } else if (STRUCTURAL_DB_ERROR_CODES.has((dbErr as { code?: string })?.code ?? '')) {
+        // A schema mismatch — most likely this build deployed ahead of
+        // `prisma db push`, so a column it names does not exist yet. Charging
+        // past it would take the user's credits with NO local BillingRecord,
+        // which also means no taskId row to stop the next attempt charging
+        // again. Refuse instead: a missed charge is recoverable, a silent
+        // double charge with no audit row is not.
+        this.logger.error(
+          `Failed to create BillingRecord for task=${opts.taskId} with a ` +
+            `schema error — NOT charging. Deploy is likely ahead of ` +
+            `prisma db push:`,
+          dbErr
+        );
+        return {
+          success: false,
+          // retryable: a migration fixes this, so a caller that records a
+          // terminal failure would throw away work it could still bill for.
+          retryable: true,
+          error: 'billing_record_schema_error',
+        };
       } else {
         this.logger.error(
           `Failed to create BillingRecord for task=${opts.taskId}, proceeding:`,

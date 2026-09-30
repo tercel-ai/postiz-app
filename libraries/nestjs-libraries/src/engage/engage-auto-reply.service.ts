@@ -1,3 +1,4 @@
+import { AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import dayjs from 'dayjs';
 import { randomUUID } from 'crypto';
@@ -1087,6 +1088,9 @@ export class EngageAutoReplyService implements OnModuleInit {
         candidate.opportunityId
       );
       let text = '';
+      // Every LLM call this draft makes, recorded on the generation charge by
+      // settle — or by release when generation or the save fails.
+      const usages: AiUsageInfo[] = [];
       try {
         const outputLength = outputLengthForLength(opportunity.platform, lengthTier);
         for await (const chunk of this._engageDraftService.generateDraft(
@@ -1095,14 +1099,16 @@ export class EngageAutoReplyService implements OnModuleInit {
           50,
           policy.mentionTags,
           undefined,
-          outputLength
+          outputLength,
+          undefined,
+          usages
         )) {
           text += chunk;
         }
         assertDraftWithinPlatformLimit(opportunity.platform, text);
       } catch (err) {
         await this._engageService
-          .releaseReplyGeneration(reservation.taskId)
+          .releaseReplyGeneration(reservation.taskId, usages)
           .catch(() => undefined);
         throw err;
       }
@@ -1130,13 +1136,13 @@ export class EngageAutoReplyService implements OnModuleInit {
         });
       } catch (err) {
         await this._engageService
-          .releaseReplyGeneration(reservation.taskId)
+          .releaseReplyGeneration(reservation.taskId, usages)
           .catch(() => undefined);
         throw err;
       }
 
       await this._engageService
-        .settleReplyGeneration(org, reservation.taskId, lengthTier, reservation.cost)
+        .settleReplyGeneration(org, reservation.taskId, lengthTier, reservation.cost, usages)
         .catch((err) =>
           // A billing hiccup must not discard a draft that was already produced
           // AND durably saved; the reservation stays counted so the cap still

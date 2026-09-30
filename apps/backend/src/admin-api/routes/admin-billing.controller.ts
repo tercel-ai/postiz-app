@@ -20,6 +20,7 @@ import {
   AiseeBusinessType,
   AiseeClient,
   AiseeCostItem,
+  deriveTokenColumns,
 } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
 import {
   BILLING_SCENES,
@@ -100,9 +101,13 @@ interface BillingSceneStats {
          */
         chargesWithSplit: number;
         /**
-         * How many of `count` contributed a token figure at all. Less than
-         * `count` means some rows have neither the denormalised columns nor a
-         * readable costItems — i.e. the backfill has not reached them.
+         * How many of `count` contributed a token figure at all.
+         *
+         * Less than `count` means some rows' tokens could NOT be read — their
+         * `costItems` does not parse and their columns are not backfilled, so
+         * `total` is an under-count by those rows. It is NOT a backfill-progress
+         * signal: while the fallback is working, backfilled and un-backfilled
+         * rows both contribute, so this equals `count`.
          */
         chargesWithTokenData: number;
       })
@@ -194,7 +199,11 @@ export class AdminBillingController {
    * `chargesWithTokenData` is what makes the transition visible rather than
    * silent: less than `count` means some rows contributed no token figure.
    */
-  private async statsTokens(where: Prisma.Sql): Promise<Map<
+  private async statsTokens(
+    where: Prisma.Sql,
+    /** Filter summary, used only to make the fallback warn diagnosable. */
+    scope: Record<string, unknown>
+  ): Promise<Map<
     string,
     SceneTokenTotals
   > | null> {
@@ -260,10 +269,15 @@ export class AdminBillingController {
         rowsNeedingFallback += Number(row.chargesNeedingFallback) || 0;
       }
     } catch (error) {
-      this.logger.warn(
-        `Token column aggregate failed — reporting credits only: ${
-          error instanceof Error ? error.message : error
-        }`
+      // error, not warn: this statement casts nothing and touches no JSON, so it
+      // cannot be tripped by a bad row. It failing means the columns are missing
+      // (deploy ahead of `prisma db push`) or the compiler emitted something
+      // invalid — both persist for every request until someone acts.
+      this.logger.error(
+        `Token column aggregate failed — reporting credits only. The token ` +
+          `columns may be missing (run prisma-db-push): ${
+            error instanceof Error ? error.message : error
+          }`
       );
       return null;
     }
@@ -308,9 +322,14 @@ export class AdminBillingController {
     } catch (error) {
       // The columns still gave numbers for every backfilled row; the un-backfilled
       // ones stay uncovered, which chargesWithTokenData < count already says.
+      // Carries the filter scope: this fires on every /stats request until the
+      // offending row is fixed or backfilled, and without the scope there is no
+      // way to narrow down WHICH row from an otherwise identical line.
       this.logger.warn(
         `Token JSON fallback failed for ${rowsNeedingFallback} un-backfilled ` +
-          `row(s) — a costItems value is most likely not valid JSON: ${
+          `row(s); their tokens are excluded and chargesWithTokenData reports ` +
+          `the shortfall. A costItems value is most likely not valid JSON. ` +
+          `Filter scope: ${JSON.stringify(scope)}. ${
             error instanceof Error ? error.message : error
           }`
       );
@@ -320,49 +339,22 @@ export class AdminBillingController {
   }
 
   /**
-   * Total LLM tokens on one record, from its per_token cost items.
+   * Total LLM tokens on one record, in the response's key names.
    *
-   * The split is reported ONLY when every per_token item carries one — otherwise
-   * prompt+completion would not account for `total`, and a partial split reads as
-   * precise while under-reporting. A row written before the split was persisted
-   * therefore shows its total and nothing else, which is the intended behavior.
-   * per_image items are skipped: their `quantity` is an image count, not tokens.
+   * Delegates to `deriveTokenColumns` rather than re-deriving: that function
+   * declares itself the single source of truth for the rule, the backfill SQL
+   * mirrors it, and the two are parity-tested against each other. A second
+   * hand-written copy here would be a fourth implementation with nothing pinning
+   * it, free to drift until `/records` and `/stats` disagreed about the same row.
    */
   private summariseTokens(costItems: unknown[]): BillingTokenUsage {
-    let total = 0;
-    let prompt = 0;
-    let completion = 0;
-    let cached = 0;
-    let perTokenItems = 0;
-    let itemsWithSplit = 0;
-
-    for (const raw of costItems) {
-      const item = raw as Partial<AiseeCostItem> | null;
-      if (!item || item.billing_mode !== 'per_token') {
-        continue;
-      }
-      perTokenItems += 1;
-      total += Number(item.quantity) || 0;
-
-      if (
-        typeof item.prompt_tokens === 'number' &&
-        typeof item.completion_tokens === 'number'
-      ) {
-        itemsWithSplit += 1;
-        prompt += item.prompt_tokens;
-        completion += item.completion_tokens;
-        cached += item.cached_prompt_tokens ?? 0;
-      }
-    }
-
-    const splitCoversEverything =
-      perTokenItems > 0 && itemsWithSplit === perTokenItems;
+    const columns = deriveTokenColumns(costItems as AiseeCostItem[]);
 
     return {
-      total,
-      prompt: splitCoversEverything ? prompt : null,
-      completion: splitCoversEverything ? completion : null,
-      cached: splitCoversEverything ? cached : null,
+      total: columns.totalTokens,
+      prompt: columns.promptTokens,
+      completion: columns.completionTokens,
+      cached: columns.cachedPromptTokens,
     };
   }
 
@@ -538,9 +530,20 @@ export class AdminBillingController {
     }
 
     const costItems = this.parseCostItems(record.costItems, record.id);
+    // The four denormalised columns are stripped so this endpoint publishes the
+    // same token contract as /records — one derived `tokens` object. Exposing the
+    // raw columns alongside it would give callers two sources for one number and
+    // invite them to drift.
+    const {
+      totalTokens,
+      promptTokens,
+      completionTokens,
+      cachedPromptTokens,
+      ...rest
+    } = record;
 
     return {
-      ...record,
+      ...rest,
       costItems,
       tokens: this.summariseTokens(costItems),
       scene: resolveBillingSceneId(record),
@@ -611,6 +614,15 @@ export class AdminBillingController {
     const normalized = normalizeBillingQuery(query, organizationId);
     const where = buildBillingWhere(normalized);
     const { keys, select, groupBy } = buildSceneGrouping();
+    const {
+      page: _page,
+      pageSize: _pageSize,
+      sortBy: _sortBy,
+      sortOrder: _sortOrder,
+      from: _from,
+      to: _to,
+      ...scope
+    } = normalized;
 
     const [rows, tokensByBucket] = await Promise.all([
       this._billingRecord.model.$queryRaw<Record<string, any>[]>`
@@ -625,7 +637,15 @@ export class AdminBillingController {
       WHERE ${where}
       GROUP BY ${groupBy}, "status"
     `,
-      this.statsTokens(where),
+      // Everything except paging and sort: the surgical filters (taskId, relatedId,
+      // search, transactionId, the data markers) are exactly the ones that would
+      // pinpoint the offending row, and omitting them made a narrowed request log
+      // a line indistinguishable from an unfiltered one.
+      this.statsTokens(where, {
+        ...scope,
+        from: normalized.from?.toISOString(),
+        to: normalized.to?.toISOString(),
+      }),
     ]);
 
     const buckets = new Map<

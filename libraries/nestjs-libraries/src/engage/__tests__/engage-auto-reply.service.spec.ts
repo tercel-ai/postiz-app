@@ -399,7 +399,7 @@ describe('EngageAutoReplyService.getDueReplies', () => {
     });
 
     expect(await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'))).toEqual([]);
-    expect(engage.releaseReplyGeneration).toHaveBeenCalledWith('task-1');
+    expect(engage.releaseReplyGeneration).toHaveBeenCalledWith('task-1', expect.any(Array));
     expect(engage.queueAutoReply).not.toHaveBeenCalled();
   });
 
@@ -1329,9 +1329,16 @@ describe('EngageAutoReplyService.getDueReplies — per-platform overrides', () =
       50,
       ['@aisee', '@support'],
       undefined,
-      expect.any(Number)
+      expect.any(Number),
+      undefined,
+      expect.any(Array)
     );
-    expect(engage.settleReplyGeneration).toHaveBeenCalledWith(org, 'task-1', 'long', 3);
+    expect(engage.settleReplyGeneration).toHaveBeenCalledWith(
+      org, 'task-1', 'long', 3, expect.any(Array)
+    );
+    // The list the draft service filled is the one settle records on the charge.
+    const handedToDraft = draft.generateDraft.mock.calls[0][7];
+    expect(engage.settleReplyGeneration.mock.calls[0][4]).toBe(handedToDraft);
   });
 
   it('defaults to medium length and no mentions when the policy sets neither', async () => {
@@ -1416,7 +1423,7 @@ describe('EngageAutoReplyService.getDueReplies — settle ordering', () => {
     const due = await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
 
     expect(due).toEqual([]);
-    expect(engage.releaseReplyGeneration).toHaveBeenCalledWith('task-1');
+    expect(engage.releaseReplyGeneration).toHaveBeenCalledWith('task-1', expect.any(Array));
     expect(engage.settleReplyGeneration).not.toHaveBeenCalled();
   });
 

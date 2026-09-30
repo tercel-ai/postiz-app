@@ -79,7 +79,9 @@ describe('EngageController.generateDraft — billing contract', () => {
 
     expect(engageService.reserveReplyGeneration).toHaveBeenCalledWith(ORG, 'medium', 'opp1');
     expect(engageService.settleReplyGeneration).toHaveBeenCalledTimes(1);
-    expect(engageService.settleReplyGeneration).toHaveBeenCalledWith(ORG, 't1', 'medium', 3);
+    expect(engageService.settleReplyGeneration).toHaveBeenCalledWith(
+      ORG, 't1', 'medium', 3, expect.any(Array)
+    );
     expect(engageService.releaseReplyGeneration).not.toHaveBeenCalled();
     expect(frames.join('')).toContain('hello world');
     expect(frames.join('')).toContain('[DONE]');
@@ -211,7 +213,57 @@ describe('EngageController.generateDraft — billing contract', () => {
     await flush();
 
     expect(engageService.settleReplyGeneration).not.toHaveBeenCalled();
-    expect(engageService.releaseReplyGeneration).toHaveBeenCalledWith('t1');
+    expect(engageService.releaseReplyGeneration).toHaveBeenCalledWith('t1', expect.any(Array));
+  });
+
+  // The reply is priced by LENGTH, so the tokens it burns reach the ledger only
+  // if the list the draft service fills is the very list handed to settle.
+  const USAGE = {
+    servicer: 'anthropic',
+    provider: 'anthropic',
+    model: 'claude-sonnet-4-6',
+    type: 'text',
+    billing_mode: 'per_token',
+    method: 'engageDraftViaAnthropic',
+    usage: { prompt_tokens: 1200, completion_tokens: 300, total_tokens: 1500 },
+  };
+
+  it('hands settle the usage every LLM call of the generation recorded', async () => {
+    // Two calls, as a length retry makes.
+    const generateDraft = async function* (...args: any[]) {
+      const usages = args[7];
+      usages.push(USAGE, { ...USAGE, usage: { ...USAGE.usage } });
+      yield 'hello world';
+    };
+    const { controller, engageService } = build({ generateDraft });
+    const { res } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateDraft(ORG, 'opp1', BODY, req, res);
+
+    const settled = (engageService.settleReplyGeneration.mock.calls[0] as any[])[4];
+    expect(settled).toHaveLength(2);
+    expect(settled[0]).toBe(USAGE);
+  });
+
+  // A failed generation made paid calls before it threw — spend with no revenue,
+  // which a per-length pricing review needs to see.
+  it('hands release the usage of a generation that failed after calling the model', async () => {
+    const generateDraft = async function* (...args: any[]) {
+      args[7].push(USAGE);
+      throw new Error('Generated X draft exceeded 280 Twitter-weighted characters after retry.');
+      // eslint-disable-next-line no-unreachable
+      yield '';
+    };
+    const { controller, engageService } = build({ generateDraft });
+    const { res } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateDraft(ORG, 'opp1', BODY, req, res);
+    await flush();
+
+    expect(engageService.settleReplyGeneration).not.toHaveBeenCalled();
+    expect(engageService.releaseReplyGeneration).toHaveBeenCalledWith('t1', [USAGE]);
   });
 });
 

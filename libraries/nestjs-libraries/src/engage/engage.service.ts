@@ -1,3 +1,4 @@
+import { AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
 import {
   BadRequestException,
   ForbiddenException,
@@ -1613,19 +1614,26 @@ export class EngageService implements OnApplicationBootstrap {
     org: Organization,
     taskId: string,
     length: ReplyLength,
-    cost: number
+    cost: number,
+    /** The generation's LLM usage, recorded on the charge — see generateDraft. */
+    usages: AiUsageInfo[] = []
   ): Promise<void> {
     await this._entitlementService.settleReplyGeneration(
       org.id,
       taskId,
       length,
-      cost
+      cost,
+      usages
     );
   }
 
   /** Release a reservation when generation failed/aborted (uncounts it). */
-  async releaseReplyGeneration(taskId: string): Promise<void> {
-    await this._entitlementService.releaseReplyGeneration(taskId);
+  async releaseReplyGeneration(
+    taskId: string,
+    /** What the failed generation burned before it stopped — still real spend. */
+    usages: AiUsageInfo[] = []
+  ): Promise<void> {
+    await this._entitlementService.releaseReplyGeneration(taskId, usages);
   }
 
   // ─── Reference-Post Generation (docs/engage/reference-post-generation.md) ─

@@ -154,6 +154,8 @@ function build(opts: {
     count: vi.fn(async () => opts.billingCount ?? 0),
     create: vi.fn(async ({ data }: any) => data),
     update: vi.fn(async () => ({})),
+    // release reads the reserved amount back before stamping token usage.
+    findUnique: vi.fn(async () => ({ amount: '3.000000' })),
   };
   const billing = { model: { billingRecord } } as any;
   const organizationModel = {
@@ -883,6 +885,133 @@ describe('EngageEntitlementService.releaseReplyGeneration', () => {
       where: { taskId: 'task-1' },
       data: { status: 'released' },
     });
+  });
+});
+
+// A reply is PRICED by length, so its generation charge used to carry no token
+// count at all. The tokens ride on the same flat-rate line, so the row reads
+// "charged N credits, burned M tokens".
+describe('EngageEntitlementService reply generation token usage', () => {
+  const usage = (over: Record<string, any> = {}) =>
+    ({
+      servicer: 'anthropic',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      type: 'text',
+      billing_mode: 'per_token',
+      method: 'engageDraftViaAnthropic',
+      usage: { prompt_tokens: 1200, completion_tokens: 300, total_tokens: 1500 },
+      ...over,
+    }) as any;
+
+  const stampCall = (billingRecord: any) =>
+    billingRecord.update.mock.calls.find((c: any[]) => 'costItems' in c[0].data)?.[0];
+
+  it('stamps every call of the generation onto the charge before charging it', async () => {
+    const { service, aisee, billingRecord } = build({ limits: DEV_LIMITS });
+    const order: string[] = [];
+    billingRecord.update.mockImplementation(async ({ data }: any) => {
+      if ('costItems' in data) order.push('stamp');
+      return {};
+    });
+    aisee.deductReserved.mockImplementation(async () => {
+      order.push('charge');
+      return { success: true };
+    });
+
+    // Two calls — the length retry re-generates.
+    await service.settleReplyGeneration('org1', 'task-1', 'medium', 2, [
+      usage(),
+      usage({
+        model: 'claude-haiku-4-5',
+        usage: { prompt_tokens: 800, completion_tokens: 200, total_tokens: 1000, cached_prompt_tokens: 500 },
+      }),
+    ]);
+
+    // deductReserved never rewrites costItems, so the row learns its tokens here
+    // or nowhere — and it must, whatever the charge then does.
+    expect(order).toEqual(['stamp', 'charge']);
+
+    const { where, data } = stampCall(billingRecord);
+    expect(where).toEqual({ taskId: 'task-1' });
+    const [line] = JSON.parse(data.costItems);
+    expect(line).toMatchObject({
+      amount: '2.000000',
+      model: 'engage_reply',
+      billing_mode: 'per_token',
+      quantity: 2500,
+      prompt_tokens: 2000,
+      completion_tokens: 500,
+      cached_prompt_tokens: 500,
+    });
+    expect(data).toMatchObject({
+      totalTokens: 2500,
+      promptTokens: 2000,
+      completionTokens: 500,
+      cachedPromptTokens: 500,
+    });
+    // The line's `model` is the product label, so which LLM served lives here.
+    expect(data.data).toEqual({
+      length: 'medium',
+      generationModels: ['claude-sonnet-4-6', 'claude-haiku-4-5'],
+    });
+
+    // Aisee is charged with the same items the row now holds.
+    expect(aisee.deductReserved.mock.calls[0][0].costItems).toEqual([line]);
+  });
+
+  it('still charges when recording the token usage fails', async () => {
+    const { service, aisee, billingRecord } = build({ limits: DEV_LIMITS });
+    billingRecord.update.mockRejectedValueOnce(new Error('connection reset'));
+
+    await service.settleReplyGeneration('org1', 'task-1', 'medium', 2, [usage()]);
+
+    expect(aisee.deductReserved).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes nothing extra when the generation reported no usage', async () => {
+    const { service, billingRecord } = build({ limits: DEV_LIMITS });
+
+    await service.settleReplyGeneration('org1', 'task-1', 'medium', 2, []);
+
+    expect(stampCall(billingRecord)).toBeUndefined();
+  });
+
+  it('records a zero-cost reply\'s tokens too', async () => {
+    const { service, aisee, billingRecord } = build({ limits: DEV_LIMITS });
+
+    await service.settleReplyGeneration('org1', 'task-1', 'short', 0, [usage()]);
+
+    expect(aisee.deductReserved).not.toHaveBeenCalled();
+    expect(stampCall(billingRecord).data.totalTokens).toBe(1500);
+  });
+
+  // A generation that failed after calling the model burned tokens and earned
+  // nothing — the one figure a length-pricing review most needs.
+  it('records a released generation\'s tokens at the reserved amount', async () => {
+    const { service, billingRecord } = build({ limits: STARTER_LIMITS });
+
+    await service.releaseReplyGeneration('task-1', [usage()]);
+
+    const { data } = stampCall(billingRecord);
+    const [line] = JSON.parse(data.costItems);
+    // Not zeroed: "not charged" is what status=released says, and a zero here
+    // would disagree with the row's own `amount` column.
+    expect(line.amount).toBe('3.000000');
+    expect(data.totalTokens).toBe(1500);
+    expect(billingRecord.update).toHaveBeenLastCalledWith({
+      where: { taskId: 'task-1' },
+      data: { status: 'released' },
+    });
+  });
+
+  it('releases without a token write when nothing was generated', async () => {
+    const { service, billingRecord } = build({ limits: STARTER_LIMITS });
+
+    await service.releaseReplyGeneration('task-1', []);
+
+    expect(billingRecord.findUnique).not.toHaveBeenCalled();
+    expect(stampCall(billingRecord)).toBeUndefined();
   });
 });
 

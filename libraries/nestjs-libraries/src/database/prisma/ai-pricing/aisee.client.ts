@@ -179,6 +179,14 @@ export interface AiseeDeductResponse {
   /** Non-null when user balance went negative */
   debtAmount?: string;
   error?: string;
+  /**
+   * True when the refusal is a condition an operator fixes, not one the user can
+   * act on — today only a schema mismatch (a build deployed ahead of
+   * `prisma db push`). Callers that record a terminal failure must keep the work
+   * retryable instead: an "insufficient credits" rejection is final, a missing
+   * column stops being true the moment the migration runs.
+   */
+  retryable?: boolean;
 }
 
 export interface AiseeConfirmRequest {

@@ -274,3 +274,98 @@ describe('AiseeCreditService.reconcileAwaitedDeduction — retrying an unbilled 
     expect(aiseeClient.deductCredits).not.toHaveBeenCalled();
   });
 });
+
+
+/**
+ * The other way the create can fail, and the one that used to cost money: a
+ * SCHEMA error. Every write path now names the four denormalised token columns, so
+ * a build deployed ahead of `prisma db push` cannot write a billing row — and the
+ * generic catch used to log "proceeding" and charge Aisee anyway, leaving the user
+ * debited with no local record and therefore no taskId row to stop the retry
+ * charging again.
+ */
+function schemaErrorService(code: string) {
+  const billingRecordModel = {
+    create: vi.fn().mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError(
+        `The column \`BillingRecord.totalTokens\` does not exist in the current database.`,
+        { code, clientVersion: '5.0.0', meta: { column: 'totalTokens' } }
+      )
+    ),
+    findUnique: vi.fn(),
+    update: vi.fn(),
+  };
+  const aiseeClient = {
+    deductCredits: vi.fn().mockResolvedValue({ success: true, transactionId: 'tx-1' }),
+    confirmDeduction: vi.fn().mockResolvedValue({ success: true }),
+  };
+  const service = new AiseeCreditService(
+    aiseeClient as any,
+    {} as any,
+    { model: { billingRecord: billingRecordModel } } as any,
+    {
+      model: {
+        userOrganization: { findFirst: vi.fn().mockResolvedValue({ userId: 'user-1' }) },
+      },
+    } as any,
+    {
+      model: {
+        $transaction: () => {
+          throw new Error('schema-error tests must not reach the accrual path');
+        },
+      },
+    } as any
+  );
+  return { service, billingRecordModel, aiseeClient };
+}
+
+const deduct = (service: AiseeCreditService) =>
+  service.deductAndConfirm({
+    userId: 'org-1',
+    taskId: TASK_ID,
+    businessType: AiseeBusinessType.POST_OVERAGE,
+    description: 'Post overage',
+    costItems: COST_ITEMS,
+  });
+
+describe('AiseeCreditService — schema error on the billing record', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it.each(['P2021', 'P2022'])(
+    'refuses to charge when the create fails with %s',
+    async (code) => {
+      const { service, aiseeClient } = schemaErrorService(code);
+
+      const result = await deduct(service);
+
+      // The money assertion: no local row was written, so nothing may be charged.
+      expect(aiseeClient.deductCredits).not.toHaveBeenCalled();
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('billing_record_schema_error');
+    }
+  );
+
+  // retryable distinguishes "a migration fixes this" from "the user is out of
+  // credits". Callers that record a TERMINAL failure (operation-plan writes
+  // BILLING_FAILED, which nothing reconciles) must not burn the work on the first.
+  it('marks the refusal retryable', async () => {
+    const { service } = schemaErrorService('P2022');
+
+    expect((await deduct(service)).retryable).toBe(true);
+  });
+
+  // P2010 is Prisma's generic "raw query failed" and carries transient Postgres
+  // codes (deadlock, serialization, statement timeout). It cannot reach this catch
+  // — the create goes through the query builder — but if it ever did, refusing
+  // would throw away a charge a retry would have completed.
+  it('still charges past a non-structural create failure', async () => {
+    const { service, aiseeClient } = schemaErrorService('P2010');
+
+    const result = await deduct(service);
+
+    expect(aiseeClient.deductCredits).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(true);
+  });
+});

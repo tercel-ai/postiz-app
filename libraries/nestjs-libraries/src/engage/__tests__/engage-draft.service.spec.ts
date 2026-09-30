@@ -352,6 +352,90 @@ describe('EngageDraftService', () => {
       expect(create.mock.calls[1][0].model).toBe('openrouter/auto');
     });
 
+    // The billed usage is the call that SERVED — after a region fallback that is
+    // not the configured model, and the blocked first attempt burned nothing.
+    it('records the usage of the OpenRouter call that actually served', async () => {
+      const create = vi
+        .fn()
+        .mockRejectedValueOnce(
+          Object.assign(new Error('403 This model is not available in your region.'), {
+            status: 403,
+          })
+        )
+        .mockResolvedValueOnce({
+          model: 'openai/gpt-4.1-mini',
+          usage: {
+            prompt_tokens: 900,
+            completion_tokens: 100,
+            total_tokens: 1000,
+            prompt_tokens_details: { cached_tokens: 400 },
+          },
+          choices: [{ message: { content: 'Fallback draft' } }],
+        });
+      (service as any).openRouterClient = { chat: { completions: { create } } };
+      const usages: any[] = [];
+
+      await (service as any)._generateViaOpenRouter('s', 'u', undefined, 256, usages);
+
+      expect(usages).toHaveLength(1);
+      expect(usages[0]).toMatchObject({
+        servicer: 'openrouter',
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        type: 'text',
+        billing_mode: 'per_token',
+        usage: {
+          prompt_tokens: 900,
+          completion_tokens: 100,
+          total_tokens: 1000,
+          cached_prompt_tokens: 400,
+        },
+      });
+    });
+
+    // Anthropic reports input/output rather than prompt/completion/total.
+    it('maps Anthropic input/output usage onto prompt/completion/total', async () => {
+      (service as any).anthropicClient = {
+        messages: {
+          create: vi.fn().mockResolvedValue({
+            model: 'claude-sonnet-4-6',
+            usage: { input_tokens: 1200, output_tokens: 300, cache_read_input_tokens: 800 },
+            content: [{ type: 'text', text: 'Anthropic draft' }],
+          }),
+        },
+      };
+      const usages: any[] = [];
+
+      const text = await (service as any)._generateViaAnthropic('s', 'u', undefined, 256, usages);
+
+      expect(text).toBe('Anthropic draft');
+      expect(usages[0]).toMatchObject({
+        servicer: 'anthropic',
+        model: 'claude-sonnet-4-6',
+        usage: {
+          prompt_tokens: 1200,
+          completion_tokens: 300,
+          total_tokens: 1500,
+          cached_prompt_tokens: 800,
+        },
+      });
+    });
+
+    it('still returns the draft when the caller collects no usage', async () => {
+      (service as any).anthropicClient = {
+        messages: {
+          create: vi.fn().mockResolvedValue({
+            usage: { input_tokens: 10, output_tokens: 5 },
+            content: [{ type: 'text', text: 'ok' }],
+          }),
+        },
+      };
+
+      await expect(
+        (service as any)._generateViaAnthropic('s', 'u')
+      ).resolves.toBe('ok');
+    });
+
     it('does not retry unrelated OpenRouter authorization failures', async () => {
       const error = Object.assign(new Error('403 Invalid API key.'), { status: 403 });
       const create = vi.fn().mockRejectedValue(error);

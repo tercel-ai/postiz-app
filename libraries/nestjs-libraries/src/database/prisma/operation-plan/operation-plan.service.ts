@@ -1084,9 +1084,15 @@ export class OperationPlanService implements OnApplicationBootstrap {
       return null;
     }
     const http = /^HTTP (\d{3}):/.exec(error);
-    return http
-      ? `Credit deduction failed (billing service returned HTTP ${http[1]})`
-      : OperationPlanService.failureReason(error);
+    if (http) {
+      return `Credit deduction failed (billing service returned HTTP ${http[1]})`;
+    }
+    // Internal codes reach _toRecord's user-visible errorMessage verbatim, so the
+    // ones that are not the user's to act on get a sentence of their own.
+    if (error === 'billing_record_schema_error') {
+      return 'Credit deduction is temporarily unavailable (billing storage is mid-migration). This plan will be billed automatically once it completes.';
+    }
+    return OperationPlanService.failureReason(error);
   }
 
   // Background job for the real (non-dry-run) path: generate the plan, fold its
@@ -1238,8 +1244,13 @@ export class OperationPlanService implements OnApplicationBootstrap {
       this.logger.error(
         `Credit deduction rejected for plan ${plan.id}: ${billed.deduction.error ?? 'no reason given'}`
       );
+      // BILLING_FAILED is terminal — nothing reconciles a plan after it, so the
+      // LLM work is discarded and has to be paid for again. A `retryable` refusal
+      // is not the user's to act on (today: a build deployed ahead of
+      // `prisma db push`), and it stops being true the moment the migration runs,
+      // so the plan stays BILLING_PENDING for _reconcilePending to pick up.
       await this._repo.updateStatus(plan.id, {
-        status: 'BILLING_FAILED',
+        status: billed.deduction.retryable ? 'BILLING_PENDING' : 'BILLING_FAILED',
         errorCode: 'CREDIT_DEDUCTION_FAILED',
         // Usually "insufficient credits" — exactly the thing the user can act on.
         errorMessage: OperationPlanService.billingFailureReason(billed.deduction.error),
@@ -2288,8 +2299,11 @@ export class OperationPlanService implements OnApplicationBootstrap {
       this.logger.error(
         `Credit deduction rejected on reconcile for plan ${plan.id}: ${billed.deduction.error ?? 'no reason given'}`
       );
+      // Same classification as _generateAndBill: a retryable refusal stays
+      // BILLING_PENDING so the NEXT reconcile can settle it once the migration
+      // has run, instead of burning the plan on a condition nobody billed for.
       return this._toRecord(await this._repo.updateStatus(plan.id, {
-        status: 'BILLING_FAILED',
+        status: billed.deduction.retryable ? 'BILLING_PENDING' : 'BILLING_FAILED',
         errorCode: 'CREDIT_DEDUCTION_FAILED',
         errorMessage: OperationPlanService.billingFailureReason(billed.deduction.error),
       }));

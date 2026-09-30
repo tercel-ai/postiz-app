@@ -5,6 +5,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { randomBytes } from 'crypto';
+import { AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
@@ -1059,6 +1060,83 @@ export class EngageEntitlementService implements OnModuleInit {
   }
 
   /**
+   * The flat-rate line a reply generation records — at reservation with no usage
+   * yet, and again at settle/release carrying the tokens the generation burned.
+   *
+   * One line, not one per LLM call: the reply is PRICED by length, so this line's
+   * `amount` is the charge and `model` stays the product label (`engage_reply`,
+   * the same convention as `post_send` / `post_analytics`). The tokens ride on
+   * that same line so the row reads "charged N credits, burned M tokens" — the
+   * comparison that says whether a length tier's flat price covers its cost.
+   * Splitting them onto separate zero-amount lines would leave this line as a
+   * per_token item with no split, and deriveTokenColumns would then (correctly)
+   * refuse to report the split for the row at all.
+   *
+   * AiUsageInfo always carries prompt/completion as numbers (the draft service
+   * defaults a missing report to 0), so the split is present whenever usage is.
+   */
+  private static RESERVATION_ITEMS = (
+    cost: number,
+    usages: AiUsageInfo[] = []
+  ): AiseeCostItem[] => {
+    const line: AiseeCostItem = {
+      type: 'text',
+      amount: cost.toFixed(6),
+      model: 'engage_reply',
+      billing_mode: 'per_token',
+      quantity: 0,
+    };
+    if (!usages.length) {
+      return [line];
+    }
+
+    let cached = 0;
+    for (const usage of usages) {
+      line.quantity += usage.usage.total_tokens;
+      line.prompt_tokens = (line.prompt_tokens ?? 0) + usage.usage.prompt_tokens;
+      line.completion_tokens =
+        (line.completion_tokens ?? 0) + usage.usage.completion_tokens;
+      cached += usage.usage.cached_prompt_tokens ?? 0;
+    }
+    if (cached > 0) {
+      line.cached_prompt_tokens = cached;
+    }
+    return [line];
+  };
+
+  /**
+   * Write a generation's token usage onto its reservation row.
+   *
+   * Independent of how the charge ends — success, unbilled, internal or released
+   * — because the LLM already ran and the tokens are already spent. Best-effort
+   * like the rest of settle/release: a token-accounting failure must never block
+   * the reply or the charge it belongs to. The four columns are derived from the
+   * same items written to `costItems`, so the two can never disagree.
+   */
+  private async _stampReplyUsage(
+    taskId: string,
+    items: AiseeCostItem[],
+    data?: Record<string, unknown>
+  ): Promise<void> {
+    await this._billingRecord.model.billingRecord
+      .update({
+        where: { taskId },
+        data: {
+          costItems: JSON.stringify(items),
+          ...deriveTokenColumns(items),
+          ...(data && { data: data as any }),
+        },
+      })
+      .catch((error: unknown) => {
+        this.logger.warn(
+          `Could not record token usage on reply reservation ${taskId}: ${
+            error instanceof Error ? error.message : error
+          }`
+        );
+      });
+  }
+
+  /**
    * Reserve a reply generation (spec §3.3): balance check, then ATOMICALLY
    * re-count under the cap and write a 'reserved' BillingRecord. Writing the cap
    * ledger row up-front (instead of after generation) closes the TOCTOU race —
@@ -1068,17 +1146,6 @@ export class EngageEntitlementService implements OnModuleInit {
    * taskId; the caller MUST later settleReplyGeneration (success) or
    * releaseReplyGeneration (failure/abort). Throws ForbiddenException when blocked.
    */
-  /** The flat-rate line a reply reservation records. */
-  private static RESERVATION_ITEMS = (cost: number): AiseeCostItem[] => [
-    {
-      type: 'text',
-      amount: cost.toFixed(6),
-      model: 'engage_reply',
-      billing_mode: 'per_token',
-      quantity: 0,
-    },
-  ];
-
   async reserveReplyGeneration(
     orgId: string,
     length: ReplyLength,
@@ -1156,8 +1223,25 @@ export class EngageEntitlementService implements OnModuleInit {
     orgId: string,
     taskId: string,
     length: ReplyLength,
-    cost: number
+    cost: number,
+    /** Every LLM call the generation made — see EngageDraftService.generateDraft. */
+    usages: AiUsageInfo[] = []
   ): Promise<void> {
+    const items = EngageEntitlementService.RESERVATION_ITEMS(cost, usages);
+    const generationModels = [...new Set(usages.map((usage) => usage.model))];
+
+    // Stamped BEFORE the charge: deductReserved updates only the charge's
+    // status/transaction fields and never rewrites costItems, so this is the only
+    // place the row learns what it burned. `data` is rebuilt rather than merged —
+    // the reservation wrote exactly `{ length }`, and this adds which model(s)
+    // actually served, which the product-label `model` on the line cannot say.
+    // Only when there is usage to record: without it the row already holds
+    // exactly these items (written at reservation), so a write would change
+    // nothing.
+    if (usages.length) {
+      await this._stampReplyUsage(taskId, items, { length, generationModels });
+    }
+
     if (cost <= 0) {
       await this._billingRecord.model.billingRecord
         .update({ where: { taskId }, data: { status: 'success' } })
@@ -1168,9 +1252,8 @@ export class EngageEntitlementService implements OnModuleInit {
       userId: orgId,
       taskId,
       description: `Engage reply draft (${length})`,
-      costItems: [
-        { type: 'text', amount: cost.toFixed(6), model: 'engage_reply', billing_mode: 'per_token', quantity: 0 },
-      ],
+      // The same items the row now holds, so Aisee's ledger gets the tokens too.
+      costItems: items,
     });
   }
 
@@ -1179,7 +1262,31 @@ export class EngageEntitlementService implements OnModuleInit {
    * 'released' so it no longer counts toward the cap. Best-effort: the row may
    * not exist (reservation never written).
    */
-  async releaseReplyGeneration(taskId: string): Promise<void> {
+  async releaseReplyGeneration(
+    taskId: string,
+    /**
+     * Whatever the failed or aborted generation burned before it stopped. Usually
+     * non-empty: a draft that exceeds its length after the retry, or loses a
+     * required mention twice, has already made up to three paid calls. That is
+     * spend with no revenue against it, which is exactly the figure a
+     * per-length pricing review needs and would otherwise never see.
+     */
+    usages: AiUsageInfo[] = []
+  ): Promise<void> {
+    if (usages.length) {
+      // The line keeps the RESERVED amount, read back from the row: "not charged"
+      // is what `status: released` says, and zeroing the line would leave the
+      // row's `amount` column and its costItems disagreeing about one number.
+      const row = await this._billingRecord.model.billingRecord
+        .findUnique({ where: { taskId }, select: { amount: true } })
+        .catch(() => null);
+      if (row) {
+        await this._stampReplyUsage(
+          taskId,
+          EngageEntitlementService.RESERVATION_ITEMS(Number(row.amount) || 0, usages)
+        );
+      }
+    }
     await this._billingRecord.model.billingRecord
       .update({ where: { taskId }, data: { status: RELEASED_STATUS } })
       .catch(() => undefined);

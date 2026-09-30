@@ -1,3 +1,4 @@
+import { AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
 import {
   Body,
   Controller,
@@ -908,6 +909,10 @@ export class EngageController {
     // The reservation written at precheck. Held so we can release it (uncount it)
     // on any failure/abort after it was taken.
     let reservation: { cost: number; taskId: string } | null = null;
+    // Filled by every LLM call this generation makes (retries included), then
+    // recorded on the generation charge by settle — or by release if it fails.
+    // Declared beside `reservation` so the catch below can hand it to release.
+    const usages: AiUsageInfo[] = [];
 
     try {
       // Only generate drafts for actionable opportunities (not REPLIED/DISMISSED/EXPIRED).
@@ -949,14 +954,15 @@ export class EngageController {
         body.mentions,
         abortController.signal,
         outputLength,
-        maxWeighted
+        maxWeighted,
+        usages
       )) {
         if (abortController.signal.aborted) break;
         draft += chunk;
       }
       if (abortController.signal.aborted) {
         // Client gone mid-stream — uncount the reservation; nothing delivered.
-        await this._engageService.releaseReplyGeneration(reservation.taskId);
+        await this._engageService.releaseReplyGeneration(reservation.taskId, usages);
       } else {
         assertDraftWithinPlatformLimit(opportunity.platform, draft, maxWeighted);
         // Settle only after a successful, non-aborted generation (spec §3.3).
@@ -967,7 +973,8 @@ export class EngageController {
             org,
             reservation.taskId,
             length,
-            reservation.cost
+            reservation.cost,
+            usages
           );
         } catch (billErr) {
           this.logger.error(
@@ -1010,7 +1017,7 @@ export class EngageController {
       // Generation failed/aborted after the reservation was taken — uncount it.
       if (reservation) {
         await this._engageService
-          .releaseReplyGeneration(reservation.taskId)
+          .releaseReplyGeneration(reservation.taskId, usages)
           .catch(() => undefined);
       }
       if ((err as Error)?.name === 'AbortError') {

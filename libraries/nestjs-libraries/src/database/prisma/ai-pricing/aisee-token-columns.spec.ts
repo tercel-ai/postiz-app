@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AiseeCostItem, deriveTokenColumns } from './aisee.client';
+import { AiseeCreditService } from './aisee-credit.service';
 
 // deriveTokenColumns is the single source of truth every BillingRecord write path
 // uses, and the backfill migration reimplements it in SQL. Its parity with that
@@ -123,5 +124,117 @@ describe('deriveTokenColumns', () => {
         item({ type: 'image', billing_mode: 'per_image', quantity: 2 }),
       ])
     ).toEqual(none);
+  });
+});
+
+
+// mergeCostItems / mergeTokenSplit are the accrual path's only mutating helpers:
+// they fold a new call's cost items onto an hourly window that may predate the
+// split. Reached through the private methods because the surrounding public entry
+// needs a database; the arithmetic they perform is pure.
+describe('mergeCostItems token split', () => {
+  const service = new AiseeCreditService(
+    {} as any,
+    {} as any,
+    {} as any,
+    {} as any,
+    {} as any
+  );
+  const merge = (existing: AiseeCostItem[], incoming: AiseeCostItem[]) =>
+    (service as any).mergeCostItems(existing, incoming) as AiseeCostItem[];
+
+  it('adds the split when both sides carry one', () => {
+    const [merged] = merge(
+      [item({ quantity: 900, prompt_tokens: 700, completion_tokens: 200 })],
+      [item({ quantity: 500, prompt_tokens: 400, completion_tokens: 100 })]
+    );
+
+    expect(merged).toMatchObject({
+      quantity: 1400,
+      prompt_tokens: 1100,
+      completion_tokens: 300,
+    });
+    expect(deriveTokenColumns([merged])).toMatchObject({
+      totalTokens: 1400,
+      promptTokens: 1100,
+      completionTokens: 300,
+    });
+  });
+
+  // The transition this function exists for: a window opened before the split was
+  // persisted, now merging with an item that has one. Adding them as if the
+  // missing side were 0 would report 400/100 against a quantity of 1400.
+  it('drops the split when the EXISTING side predates it', () => {
+    const [merged] = merge(
+      [item({ quantity: 900 })],
+      [item({ quantity: 500, prompt_tokens: 400, completion_tokens: 100 })]
+    );
+
+    expect(merged.quantity).toBe(1400);
+    expect(merged.prompt_tokens).toBeUndefined();
+    expect(merged.completion_tokens).toBeUndefined();
+    expect(deriveTokenColumns([merged]).promptTokens).toBeNull();
+  });
+
+  it('drops the split when the INCOMING side lacks it', () => {
+    const [merged] = merge(
+      [item({ quantity: 900, prompt_tokens: 700, completion_tokens: 200 })],
+      [item({ quantity: 500 })]
+    );
+
+    expect(merged.prompt_tokens).toBeUndefined();
+    expect(merged.completion_tokens).toBeUndefined();
+  });
+
+  it('never mutates the arrays it was handed', () => {
+    const existing = [
+      item({ quantity: 900, prompt_tokens: 700, completion_tokens: 200 }),
+    ];
+    const incoming = [item({ quantity: 500 })];
+
+    merge(existing, incoming);
+
+    // The caller re-reads `existing` on a serialization retry, so a mutated input
+    // would compound on every attempt.
+    expect(existing[0]).toMatchObject({
+      quantity: 900,
+      prompt_tokens: 700,
+      completion_tokens: 200,
+    });
+    expect(incoming[0].quantity).toBe(500);
+  });
+
+  // cached_prompt_tokens is legitimately absent when a call cached nothing, so —
+  // unlike the pair — absent means zero once both sides do carry a split.
+  it('sums cached tokens across the merge and omits the key at zero', () => {
+    const [withCache] = merge(
+      [item({ quantity: 900, prompt_tokens: 700, completion_tokens: 200, cached_prompt_tokens: 500 })],
+      [item({ quantity: 500, prompt_tokens: 400, completion_tokens: 100 })]
+    );
+    expect(withCache.cached_prompt_tokens).toBe(500);
+
+    const [noCache] = merge(
+      [item({ quantity: 900, prompt_tokens: 700, completion_tokens: 200 })],
+      [item({ quantity: 500, prompt_tokens: 400, completion_tokens: 100 })]
+    );
+    expect(noCache.cached_prompt_tokens).toBeUndefined();
+    expect(deriveTokenColumns([noCache]).cachedPromptTokens).toBe(0);
+  });
+
+  // Different models stay separate line items, so a mixed window keeps one split
+  // item and one unsplit item — and deriveTokenColumns must then report no split.
+  it('keeps different models apart, leaving the ROW without a split', () => {
+    const merged = merge(
+      [item({ model: 'gpt-4.1', quantity: 900, prompt_tokens: 700, completion_tokens: 200 })],
+      [item({ model: 'gpt-4.1-mini', quantity: 500 })]
+    );
+
+    expect(merged).toHaveLength(2);
+    expect(deriveTokenColumns(merged)).toEqual({
+      totalTokens: 1400,
+      promptTokens: null,
+      completionTokens: null,
+      cachedPromptTokens: null,
+    });
   });
 });
