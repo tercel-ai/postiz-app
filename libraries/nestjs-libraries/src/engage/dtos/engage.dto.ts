@@ -1586,6 +1586,17 @@ export class ReportRepliesDisabledDto {
   reason?: string;
 }
 
+export class ReportReplyFailedDto extends ReportTargetGoneDto {
+  /** Explicit human decision to stop retries; absent reports remain retryable. */
+  @IsOptional()
+  @IsBoolean()
+  terminal?: boolean;
+
+  @IsOptional()
+  @IsIn(['manual'])
+  source?: 'manual';
+}
+
 export class ConfirmManualReplyDto {
   @IsString()
   @MaxLength(4000)

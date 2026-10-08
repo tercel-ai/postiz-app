@@ -1337,6 +1337,20 @@ export class EngageService implements OnApplicationBootstrap {
     }
   }
 
+  /** Persist a human decision to close a reply, with an explicit terminal acknowledgement. */
+  async closeManuallyFailedReply(
+    org: Organization,
+    sentReplyId: string,
+    reason: string
+  ) {
+    const message = reason.trim();
+    if (!message || message.length > 500) {
+      throw new BadRequestException('A failure reason of 1 to 500 characters is required');
+    }
+    await this._engageRepository.closeManuallyFailedReply(org.id, sentReplyId, message);
+    return { ok: true, terminal: true, state: 'ERROR' };
+  }
+
   /**
    * The extension reporting an ORDINARY (retryable) send failure — signed
    * out, rate limited, a selector that moved, a transient network error.

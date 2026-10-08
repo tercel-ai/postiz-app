@@ -59,6 +59,7 @@ import {
   ConfirmManualReplyDto,
   ReportRepliesDisabledDto,
   ReportTargetGoneDto,
+  ReportReplyFailedDto,
   DashboardImpressionsDto,
   DashboardRepliesTrendDto,
   DashboardSummaryDto,
@@ -1590,15 +1591,18 @@ export class EngageController {
 
   @ApiOperation({
     summary:
-      'Report an ORDINARY (retryable) reply-send failure — for failure-rate stats only. Does NOT close the record or notify the user: it stays QUEUE and may be retried on the next poll.',
+      'Report a reply-send failure. Ordinary reports stay retryable; terminal=true saves a manual failure and stops future retries.',
   })
   @ApiResponse({ status: 404, description: 'Sent reply not found' })
   @Post('/sent/:id/failed')
   reportReplyFailed(
     @GetOrgFromRequest() org: Organization,
     @Param('id') id: string,
-    @Body() body: ReportTargetGoneDto
+    @Body() body: ReportReplyFailedDto
   ) {
+    if (body.terminal === true) {
+      return this._engageService.closeManuallyFailedReply(org, id, body.reason || '');
+    }
     return this._engageService.reportReplyFailed(
       org,
       id,

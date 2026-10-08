@@ -431,6 +431,8 @@ export function isLiveScanUnit(
     : live.targets.has(`${normalizePlatform(cursor.platform)}:${cursor.scanKey}`);
 }
 
+const MANUAL_FAILURE_PREFIX = 'Manually marked failed: ';
+
 @Injectable()
 export class EngageRepository {
   private readonly _logger = new Logger(EngageRepository.name);
@@ -3568,6 +3570,44 @@ export class EngageRepository {
       data: { state: 'ERROR', error, releaseId: null },
     });
     return { closed: closed.count > 0 };
+  }
+
+  /** Close the reply and dismiss only its owner's opportunity, in one transaction. */
+  async closeManuallyFailedReply(
+    organizationId: string,
+    sentReplyId: string,
+    reason: string
+  ): Promise<void> {
+    await this._tx.model.$transaction(async (tx) => {
+      const reply = await tx.engageSentReply.findFirst({
+        where: { id: sentReplyId, organizationId },
+        select: { postId: true, opportunityId: true, projectId: true },
+      });
+      if (!reply) throw new NotFoundException('Sent reply not found');
+
+      const closed = await tx.post.updateMany({
+        where: {
+          id: reply.postId,
+          state: { in: ['DRAFT', 'QUEUE', 'ERROR'] },
+          releaseURL: null,
+          deletedAt: null,
+        },
+        // ERROR excludes the row from reply-due. Preserve claimedAt, the write clock.
+        data: { state: 'ERROR', error: MANUAL_FAILURE_PREFIX + reason, releaseId: null },
+      });
+      if (!closed.count) {
+        throw new ConflictException('This reply is already published or no longer available');
+      }
+      await tx.engageOpportunityState.updateMany({
+        where: {
+          organizationId,
+          projectId: reply.projectId ?? null,
+          opportunityId: reply.opportunityId,
+          status: { not: 'REPLIED' },
+        },
+        data: { status: 'DISMISSED' },
+      });
+    });
   }
 
   /**
@@ -6949,6 +6989,12 @@ export class EngageRepository {
       state: reply.post?.state ?? null,
       replyUrl: reply.post?.releaseURL ?? null,
       lastError: reply.post?.error ?? null,
+      ...(reply.post?.state === 'ERROR' && reply.post.error?.startsWith(MANUAL_FAILURE_PREFIX)
+        ? {
+            manuallyFailed: true,
+            manualFailureReason: reply.post.error.slice(MANUAL_FAILURE_PREFIX.length),
+          }
+        : {}),
       // The CURRENT address of the post being replied to. The extension holds
       // its own copy from when the reply was drafted, and a manual retry of an
       // old failure would otherwise re-send to an address that has since been
