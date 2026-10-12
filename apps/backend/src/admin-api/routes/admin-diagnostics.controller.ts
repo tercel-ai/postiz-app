@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Post } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Post, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { SuperAdmin } from '@gitroom/backend/services/auth/admin/super-admin.decorator';
 import { PostsRepository } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.repository';
@@ -20,6 +20,31 @@ import { PostPlanLimitsService } from '@gitroom/nestjs-libraries/database/prisma
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { isExtensionPublishProvider } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import { RiskControlTickService } from '@gitroom/nestjs-libraries/risk-control/risk-control-tick.service';
+
+type DiagnosticsRange = '7' | '30' | 'all';
+
+function diagnosticWindow(value: string = '7') {
+  if (value !== '7' && value !== '30' && value !== 'all') {
+    throw new BadRequestException('range must be 7, 30, or all');
+  }
+  return {
+    range: value as DiagnosticsRange,
+    since: value === 'all' ? null : new Date(Date.now() - Number(value) * 86_400_000),
+  };
+}
+
+function diagnosticPagination(page: string = '1', pageSize: string = '20') {
+  if (!/^[1-9]\d*$/.test(page) || !/^[1-9]\d*$/.test(pageSize)) {
+    throw new BadRequestException('page and pageSize must be positive integers');
+  }
+  const current = Number(page);
+  const take = Number(pageSize);
+  const skip = (current - 1) * take;
+  if (!Number.isSafeInteger(current) || take > 100 || !Number.isSafeInteger(skip)) {
+    throw new BadRequestException('page is out of range or pageSize exceeds 100');
+  }
+  return { page: current, pageSize: take, skip };
+}
 
 type ReleaseScanCursorBody = {
   platform?: string;
@@ -192,8 +217,10 @@ export class AdminDiagnosticsController {
    * 3. Missed cycles: expected publishDate passed with no clone
    */
   @Get('/recurring-posts')
-  async checkRecurringPosts() {
+  async checkRecurringPosts(@Query('range') range?: string) {
+    const window = diagnosticWindow(range);
     const results = {
+      range: window.range,
       checkedAt: new Date().toISOString(),
       prematureClones: [] as any[],
       duplicateClones: [] as any[],
@@ -222,7 +249,10 @@ export class AdminDiagnosticsController {
     const now = new Date();
 
     for (const post of recurringPosts) {
-      const clones = cloneMap.get(post.group) || [];
+      const groupClones = cloneMap.get(post.group) || [];
+      const clones = groupClones.filter((c) =>
+        window.since === null || new Date(c.publishDate) >= window.since
+      );
 
       // Check 1: Premature clones — createdAt is significantly before publishDate (>1h)
       for (const clone of clones) {
@@ -244,14 +274,16 @@ export class AdminDiagnosticsController {
 
       // Check 2: Duplicate clones — multiple PUBLISHED clones with same day publishDate
       const publishedByDay = new Map<string, typeof clones>();
-      for (const clone of clones) {
+      for (const clone of groupClones) {
         if (clone.state !== 'PUBLISHED') continue;
         const day = new Date(clone.publishDate).toISOString().slice(0, 10);
         if (!publishedByDay.has(day)) publishedByDay.set(day, []);
         publishedByDay.get(day)!.push(clone);
       }
       for (const [day, dayClones] of publishedByDay) {
-        if (dayClones.length > 1) {
+        // Keep the entire day together when it straddles the time cutoff.
+        const inWindow = window.since === null || dayClones.some((c) => new Date(c.publishDate) >= window.since!);
+        if (inWindow && dayClones.length > 1) {
           results.duplicateClones.push({
             sourcePostId: post.id,
             day,
@@ -267,21 +299,24 @@ export class AdminDiagnosticsController {
         }
       }
 
-      // Check 3: Missed cycles — past 7 days, expected publishDate with no clone
+      // Check 3: Missed cycles within the selected window, never before creation.
       if (post.intervalInDays && post.intervalInDays > 0) {
-        const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const firstExpected = new Date(Math.max(
+          new Date(post.createdAt).getTime(),
+          window.since?.getTime() ?? new Date(post.createdAt).getTime()
+        ));
         const cloneDates = new Set(
-          clones
+          groupClones
             .filter((c) => c.state === 'PUBLISHED' || c.state === 'ERROR')
             .map((c) => new Date(c.publishDate).toISOString().slice(0, 10))
         );
 
         let checkDate = new Date(post.publishDate);
-        while (checkDate > sevenDaysAgo) {
+        while (checkDate > firstExpected) {
           checkDate = new Date(checkDate.getTime() - post.intervalInDays * 24 * 60 * 60 * 1000);
         }
         while (checkDate < now) {
-          if (checkDate > sevenDaysAgo) {
+          if (checkDate >= firstExpected) {
             const dayStr = checkDate.toISOString().slice(0, 10);
             if (!cloneDates.has(dayStr)) {
               results.missedCycles.push({
@@ -446,27 +481,39 @@ export class AdminDiagnosticsController {
   /**
    * GET /admin/diagnostics/error-posts
    *
-   * Finds recent ERROR posts (last 7 days) with their error details.
+   * Finds ERROR posts updated within range=7 (default), 30, or all.
    */
   @Get('/error-posts')
-  async checkErrorPosts() {
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const errorPosts = await this._postsRepository.findRecentErrorPosts(sevenDaysAgo);
+  async checkErrorPosts(
+    @Query('range') range?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string
+  ) {
+    const window = diagnosticWindow(range);
+    const pagination = diagnosticPagination(page, pageSize);
+    const count = await this._postsRepository.countRecentErrorPosts(window.since);
+    // Resolving errors can remove the selected last page between refreshes.
+    pagination.page = Math.min(pagination.page, Math.max(1, Math.ceil(count / pagination.pageSize)));
+    pagination.skip = (pagination.page - 1) * pagination.pageSize;
+    const errorPosts = await this._postsRepository.findRecentErrorPosts(window.since, pagination.skip, pagination.pageSize);
 
     return {
       checkedAt: new Date().toISOString(),
+      range: window.range,
+      pagination: { page: pagination.page, pageSize: pagination.pageSize, total: count },
       errorPosts: errorPosts.map((p) => ({
         id: p.id,
         publishDate: p.publishDate,
         createdAt: p.createdAt,
+        updatedAt: p.updatedAt,
         error: p.error,
         sourcePostId: p.sourcePostId,
         integration: p.integration,
         organizationId: p.organizationId,
       })),
       summary: {
-        count: errorPosts.length,
-        healthy: errorPosts.length === 0,
+        count,
+        healthy: count === 0,
       },
     };
   }
@@ -497,7 +544,7 @@ export class AdminDiagnosticsController {
    *
    *   leased    within the lease — someone is scanning it right now. Not listed.
    *   stale     past the lease AND the enumerator still produces this unit.
-   *             Something that should be scanning is not. THE ONLY ALARM.
+   *             Advisory: a later extension claim can recover this lease.
    *   orphaned  past the lease and nothing will ever claim it again, with the
    *             reason attached so it can be cleaned up rather than re-read
    *             every week.
@@ -636,15 +683,17 @@ export class AdminDiagnosticsController {
    * got a historical backfill, so users see no opportunities for that keyword.
    */
   @Get('/engage-failed-scans')
-  async checkEngageFailedScans() {
+  async checkEngageFailedScans(@Query('range') range?: string) {
+    const window = diagnosticWindow(range);
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-    const failedScans = await this._engageRepository.findFailedKeywordScans(oneHourAgo);
+    const failedScans = await this._engageRepository.findFailedKeywordScans(oneHourAgo, window.since);
 
     const failedCount = failedScans.filter((s) => s.status === 'FAILED').length;
     const stuckCount = failedScans.filter((s) => s.status === 'RUNNING').length;
 
     return {
       checkedAt: new Date().toISOString(),
+      range: window.range,
       failedScans: failedScans.map((s) => ({
         id: s.id,
         organizationId: s.organizationId,
@@ -652,6 +701,7 @@ export class AdminDiagnosticsController {
         platform: s.platform,
         status: s.status,
         startedAt: s.startedAt,
+        updatedAt: s.updatedAt,
         attempts: s.attempts,
         error: s.error,
       })),
@@ -702,7 +752,15 @@ export class AdminDiagnosticsController {
    */
   @Get('/engage-dead-reply-accounts')
   async checkEngageDeadReplyAccounts() {
-    const deadAccounts = await this._engageRepository.findDeadReplyAccounts();
+    const accounts = await this._engageRepository.findDeadReplyAccounts();
+    const deadAccounts = accounts.map((a) => {
+      const sendPath = isExtensionPublishProvider(a.integration.providerIdentifier)
+        ? ('extension' as const) : ('api' as const);
+      const blocking = a.integration.disabled ||
+        (sendPath === 'api' && a.integration.refreshNeeded);
+      return { ...a, sendPath, blocking };
+    });
+    const blockingAccounts = deadAccounts.filter((a) => a.blocking);
 
     return {
       checkedAt: new Date().toISOString(),
@@ -710,6 +768,8 @@ export class AdminDiagnosticsController {
         id: a.id,
         organizationId: a.organizationId,
         integrationId: a.integrationId,
+        sendPath: a.sendPath,
+        blocking: a.blocking,
         projectId: a.projectId,
         integration: {
           id: a.integration.id,
@@ -720,12 +780,14 @@ export class AdminDiagnosticsController {
         },
       })),
       summary: {
-        count: deadAccounts.length,
+        count: blockingAccounts.length,
+        total: deadAccounts.length,
+        advisory: deadAccounts.length - blockingAccounts.length,
         // Distinct ACCOUNTS, not bindings: one dead integration shared by three
         // projects is one thing to fix, and counting it three times would make
         // the number read as a bigger outage than it is.
-        affectedIntegrations: new Set(deadAccounts.map((a) => a.integrationId)).size,
-        healthy: deadAccounts.length === 0,
+        affectedIntegrations: new Set(blockingAccounts.map((a) => a.integrationId)).size,
+        healthy: blockingAccounts.length === 0,
       },
     };
   }
@@ -734,16 +796,28 @@ export class AdminDiagnosticsController {
    * GET /admin/diagnostics/engage-reply-errors
    *
    * Finds EngageSentReply rows whose linked Post has state=ERROR within the
-   * last 7 days. These represent replies the user believes were sent (the
-   * opportunity shows REPLIED) but that actually failed at the publish layer.
+   * selected range (7 days by default), using the linked post update time.
+   * These replies failed at the publish layer; page totals remain independent
+   * of the bounded detail rows.
    */
   @Get('/engage-reply-errors')
-  async checkEngageReplyErrors() {
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const replyErrors = await this._engageRepository.findEngageReplyErrors(sevenDaysAgo);
+  async checkEngageReplyErrors(
+    @Query('range') range?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string
+  ) {
+    const window = diagnosticWindow(range);
+    const pagination = diagnosticPagination(page, pageSize);
+    const count = await this._engageRepository.countEngageReplyErrors(window.since);
+    // Resolving errors can remove the selected last page between refreshes.
+    pagination.page = Math.min(pagination.page, Math.max(1, Math.ceil(count / pagination.pageSize)));
+    pagination.skip = (pagination.page - 1) * pagination.pageSize;
+    const replyErrors = await this._engageRepository.findEngageReplyErrors(window.since, pagination.skip, pagination.pageSize);
 
     return {
       checkedAt: new Date().toISOString(),
+      range: window.range,
+      pagination: { page: pagination.page, pageSize: pagination.pageSize, total: count },
       replyErrors: replyErrors.map((r) => ({
         id: r.id,
         organizationId: r.organizationId,
@@ -754,10 +828,11 @@ export class AdminDiagnosticsController {
         externalPostUrl: r.opportunity.externalPostUrl,
         postError: r.post.error,
         postCreatedAt: r.post.createdAt,
+        postUpdatedAt: r.post.updatedAt,
       })),
       summary: {
-        count: replyErrors.length,
-        healthy: replyErrors.length === 0,
+        count,
+        healthy: count === 0,
       },
     };
   }
@@ -768,29 +843,31 @@ export class AdminDiagnosticsController {
    * Aggregated health check across all diagnostics.
    */
   @Get('/overview')
-  async overview() {
+  async overview(@Query('range') range?: string) {
+    const window = diagnosticWindow(range);
     const [recurring, stuck, integrations, errors, scanCursors, failedScans, deadReplyAccounts, replyErrors, writeLimits] =
       await Promise.all([
-        this.checkRecurringPosts(),
+        this.checkRecurringPosts(window.range),
         this.checkStuckPosts(),
         this.checkIntegrations(),
-        this.checkErrorPosts(),
-        this.checkEngageScanCursors(),
-        this.checkEngageFailedScans(),
+        this.checkErrorPosts(window.range),
+        this.checkEngageScanCursors().catch(() => null),
+        this.checkEngageFailedScans(window.range).catch(() => null),
         this.checkEngageDeadReplyAccounts(),
-        this.checkEngageReplyErrors(),
+        this.checkEngageReplyErrors(window.range),
         this.checkWriteLimits(),
       ]);
 
     return {
       checkedAt: new Date().toISOString(),
+      range: window.range,
       healthy:
         recurring.summary.healthy &&
         stuck.summary.healthy &&
         integrations.summary.healthy &&
         errors.summary.healthy &&
-        scanCursors.summary.healthy &&
-        failedScans.summary.healthy &&
+        // Scan records are advisory: extension claims recover expired leases.
+        // Legacy initial scans do not describe the extension executor.
         deadReplyAccounts.summary.healthy &&
         replyErrors.summary.healthy &&
         writeLimits.summary.healthy,
@@ -799,14 +876,16 @@ export class AdminDiagnosticsController {
       integrations: integrations.summary,
       errorPosts: errors.summary,
       engageScans: {
-        // Only the units that should be scanning and are not. The orphans ride
-        // beside it rather than inside: they are a cleanup backlog, and folding
-        // them in is what made this number read as 53 outages.
-        stuckCursors: scanCursors.summary.count,
-        orphanedCursors: scanCursors.summary.orphanedCount,
-        failedKeywordScans: failedScans.summary.total,
-        stuckKeywordScans: failedScans.summary.stuckCount,
-        healthy: scanCursors.summary.healthy && failedScans.summary.healthy,
+        // Auxiliary counters never determine overall health. Unavailable
+        // counters are explicitly marked so zero is not mistaken for a check.
+        available: scanCursors !== null && failedScans !== null,
+        stuckCursors: scanCursors?.summary.count ?? 0,
+        orphanedCursors: scanCursors?.summary.orphanedCount ?? 0,
+        failedKeywordScans: failedScans?.summary.total ?? 0,
+        stuckKeywordScans: failedScans?.summary.stuckCount ?? 0,
+        healthy: scanCursors && failedScans
+          ? scanCursors.summary.healthy && failedScans.summary.healthy
+          : null,
       },
       engageReplies: {
         deadReplyAccounts: deadReplyAccounts.summary.count,

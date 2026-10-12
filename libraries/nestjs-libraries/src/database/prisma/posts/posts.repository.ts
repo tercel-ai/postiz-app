@@ -26,6 +26,15 @@ dayjs.extend(isSameOrBefore);
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
+function diagnosticErrorPostsWhere(since: Date | null): Prisma.PostWhereInput {
+  return {
+    state: 'ERROR',
+    deletedAt: null,
+    // No errorAt column exists; updatedAt is the available state-change proxy.
+    ...(since ? { updatedAt: { gte: since } } : {}),
+  };
+}
+
 function displayToUnit(display: 'day' | 'week' | 'month'): 'day' | 'isoWeek' | 'month' {
   if (display === 'day') return 'day';
   if (display === 'week') return 'isoWeek';
@@ -1578,18 +1587,21 @@ export class PostsRepository {
   /**
    * Find recent posts with ERROR state.
    */
-  findRecentErrorPosts(since: Date) {
+  countRecentErrorPosts(since: Date | null) {
+    return this._post.model.post.count({ where: diagnosticErrorPostsWhere(since) });
+  }
+
+  findRecentErrorPosts(since: Date | null, skip = 0, take = 20) {
     return this._post.model.post.findMany({
-      where: {
-        state: 'ERROR',
-        createdAt: { gte: since },
-        deletedAt: null,
-      },
+      where: diagnosticErrorPostsWhere(since),
+      skip,
+      take,
       select: {
         id: true,
         publishDate: true,
         createdAt: true,
         error: true,
+        updatedAt: true,
         sourcePostId: true,
         organizationId: true,
         integration: {
@@ -1602,8 +1614,7 @@ export class PostsRepository {
           },
         },
       },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
     });
   }
 

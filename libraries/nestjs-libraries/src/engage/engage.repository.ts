@@ -433,6 +433,16 @@ export function isLiveScanUnit(
 
 const MANUAL_FAILURE_PREFIX = 'Manually marked failed: ';
 
+function diagnosticReplyErrorsWhere(since: Date | null): Prisma.EngageSentReplyWhereInput {
+  return {
+    post: {
+      state: 'ERROR',
+      deletedAt: null,
+      ...(since ? { updatedAt: { gte: since } } : {}),
+    },
+  };
+}
+
 @Injectable()
 export class EngageRepository {
   private readonly _logger = new Logger(EngageRepository.name);
@@ -7754,13 +7764,14 @@ export class EngageRepository {
     });
   }
 
-  async findFailedKeywordScans(stuckBefore: Date) {
+  async findFailedKeywordScans(stuckBefore: Date, since: Date | null = null) {
     return this._keywordInitialScan.model.engageKeywordInitialScan.findMany({
       where: {
         OR: [
           { status: 'FAILED' },
           { status: 'RUNNING', startedAt: { lt: stuckBefore } },
         ],
+        ...(since ? { updatedAt: { gte: since } } : {}),
       },
       select: {
         id: true,
@@ -7771,6 +7782,7 @@ export class EngageRepository {
         startedAt: true,
         attempts: true,
         error: true,
+        updatedAt: true,
       },
       orderBy: { createdAt: 'asc' },
     });
@@ -7813,11 +7825,15 @@ export class EngageRepository {
     });
   }
 
-  async findEngageReplyErrors(since: Date) {
+  countEngageReplyErrors(since: Date | null) {
+    return this._sentReply.model.engageSentReply.count({ where: diagnosticReplyErrorsWhere(since) });
+  }
+
+  async findEngageReplyErrors(since: Date | null, skip = 0, take = 20) {
     return this._sentReply.model.engageSentReply.findMany({
-      where: {
-        post: { state: 'ERROR', createdAt: { gte: since } },
-      },
+      where: diagnosticReplyErrorsWhere(since),
+      skip,
+      take,
       select: {
         id: true,
         organizationId: true,
@@ -7825,11 +7841,11 @@ export class EngageRepository {
         postId: true,
         createdAt: true,
         post: {
-          select: { id: true, state: true, error: true, createdAt: true },
+          select: { id: true, state: true, error: true, createdAt: true, updatedAt: true },
         },
         opportunity: { select: { externalPostUrl: true, platform: true } },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ post: { updatedAt: 'desc' } }, { id: 'desc' }],
     });
   }
 
