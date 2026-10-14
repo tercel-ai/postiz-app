@@ -452,7 +452,7 @@ Seeded on backend boot (`OperationPlanService.onApplicationBootstrap`, insert-if
 |---|---|---|---|
 | `operation_plan.max_duration_days` | number | `30` | Max plan length in whole days; a longer range → `400 DURATION_EXCEEDS_MAX`. |
 | `operation_plan.allowed_platforms` | json (string[]) | `[]` | Allowlist of platforms a plan may use. **Empty = no extra restriction.** Violations → `400 PLATFORM_NOT_ALLOWED`. |
-| `operation_plan.platform_cadence` | json | per-platform defaults | Publishing rhythm fed to the generator as **input** (`platformPlaybook`), so content volume follows the team's playbook instead of the model's guess. Optional per platform: a requested platform with no (non-empty) entry falls back to the built-in default cadence, else a generic one — the playbook always covers **every** requested platform. |
+| `operation_plan.platform_cadence` | json | per-platform defaults | Advisory publishing rhythm fed to the generator as **input** (`platformPlaybook`). Weekly post counts are **not** enforced by a numeric validator. A requested platform with no non-empty entry falls back to its built-in default, else a generic rhythm. See [Platform generation rules](#platform-generation-rules). |
 | `operation_plan.max_thread_parts` | number | `3` | Max follow-up posts in a generated thread (anchor separate → full chain is 1 + this). Over-long threads are truncated. **`0` disables threads.** Only platforms whose provider supports follow-up posting (`comment` capability, e.g. x/reddit) are ever threaded. |
 | `operation_plan.publish_time_jitter_minutes` | number | `30` | Random `±N` minutes applied to each generated post's `publishDate` at materialization, so a plan does not fire every post at the same clock time day after day (the model gives zero time-of-day guidance on its own). `0` disables jitter. Clamped to the same UTC calendar day it was generated for. A thread's segments share **one** jittered time (rolled once per content item, not once per segment). |
 
@@ -466,19 +466,57 @@ Seeded on backend boot (`OperationPlanService.onApplicationBootstrap`, insert-if
 
 > **Per-platform character limits.** The generator's hard content ceiling for each platform is read from that platform's own provider `maxLength()` — the exact limit the publisher enforces — so it covers **every** provider (and variants like `linkedin-page`, `mastodon-custom`) from a single source of truth, with a `3000`-char default only for an unrecognized platform. The **soft budget** the model is told to write to is that hard limit capped at 3000 chars (X is hand-tuned to 240 under its weighted 280), so a platform with a huge ceiling (facebook 63206, blog providers 100000) still yields concise, marketing-appropriate posts rather than novels. Content over the hard ceiling is shrunk to fit before the plan is accepted (see [Billing & token accounting](#billing--token-accounting) for how those shrink calls are billed).
 
-`platform_cadence` shape — all fields optional free-form prose (it is editorial guidance, not a machine rule). Only the **requested** platforms are forwarded, and **every** requested platform gets an entry: the configured value when at least one field is filled, else the built-in default for that platform, else a generic rhythm. (Previously an unconfigured platform was skipped entirely — which read as "no volume" to the model and was the root cause of whole platforms coming back with zero generated posts.)
+### Platform generation rules
 
-> **Platform coverage guarantee.** The generation prompt requires content for **every requested platform**, and the plan is validated after generation: a plan missing any requested platform is rejected (the row goes `FAILED` / `GENERATION_FAILED`, nothing is billed or materialized). Score-driven weighting only shifts volume between platforms — it can never drop one to zero.
+`operation_plan.platform_cadence` controls the publishing guidance supplied to the LLM as `platformPlaybook`. It is **editorial guidance, not a fixed weekly quota**. The generator is instructed to derive counts from the actual UTC dates, treat weeks as ISO calendar weeks (Monday–Sunday, including partial first/last weeks), and favor weekdays over weekends. The backend does **not** calculate a deterministic weekly count, prorate partial weeks with a fixed formula, or reject an otherwise valid plan for missing the suggested frequency.
+
+The built-in defaults in `OperationPlanService` are:
+
+| Platform identifier | Publishing cadence | Citation weight |
+|---|---|---|
+| `x` | 1 post per weekday, lighter on weekends; 1–2 threads per week | medium |
+| `linkedin` | 3–4 posts per week | medium |
+| `instagram` | 3–5 posts per week | low |
+| `reddit` | 2–3 self-posts per week across relevant subreddits | high |
+| `medium` | 1–2 articles per week | medium |
+| `devto` | 1–2 articles per week | medium |
+| `hackernews` | 1–2 submissions per week | medium |
+| `quora` | 2–3 answers per week | medium |
+| Any other requested identifier without configured guidance | 2–3 posts per week | unspecified |
+
+These are application defaults, not platform-mandated limits. `citationWeight` is the team's qualitative priority supplied to the model; it is not a numeric multiplier, measured citation probability, or guaranteed score improvement. The prompt allows extra volume to favor higher-citation channels and weaknesses in the analysis, while requiring coverage of every requested platform.
+
+**Counting generated content.** Count the entries in `contentItems[].platforms[]` matching each platform, grouped by the item's UTC date/week. Do not use `contentItems.length` as a per-platform count: one item can contain X, LinkedIn, and Medium variants and counts once for each. Each platform entry is one publishing item, even when it has a thread; materialization creates a separate `Post` row for the anchor and each follow-up. For example, four full weeks of the default LinkedIn rhythm suggest 12–16 publishing items, and Instagram suggests 12–20; these are planning expectations, not acceptance criteria. The X default suggests five weekday items in a full week, but leaves the weekend quantity and whether threads replace or supplement those items unspecified, so it does not define an exact weekly total. Use explicit prose in `cadence` or `notes` to clarify that intent for the model.
+
+**Configuration fields and fallback.** The setting value is an object keyed by platform identifier. Each entry may contain optional string fields `cadence` (publishing frequency), `citationWeight` (citation priority/rationale), and `notes` (additional editorial instructions). Only requested platforms are forwarded. Every requested platform gets an entry: its configured entry when at least one field is non-empty, otherwise its built-in default, otherwise the generic `2-3 posts per week` rhythm. The configured entry **replaces the whole platform entry**; fields are not individually merged with defaults. For example, `{ "linkedin": { "citationWeight": "high" } }` forwards only that weight and does not retain the built-in `3-4 posts per week` cadence. Include `cadence` when frequency matters.
+
+**Admin API response.** `GET /admin/settings/operation_plan.platform_cadence` returns `{ key, value }` for the stored setting. It does not return the generator's resolved fallback table. A value containing only X, LinkedIn, and Instagram is valid: its other requested platforms still receive built-in or generic fallback guidance during generation. Existing settings are preserved on backend boot, so adding new built-in defaults does not expand an already-stored value.
 
 ```json
 {
-  "x": {
-    "cadence": "1 post per weekday, lighter on weekends; 1-2 threads per week",
-    "citationWeight": "medium — Grok reads X directly",
-    "notes": "optional"
+  "key": "operation_plan.platform_cadence",
+  "value": {
+    "x": {
+      "cadence": "1 post per weekday, lighter on weekends; 1-2 threads per week",
+      "citationWeight": "medium — Grok reads X directly; threads split into data points are more quotable"
+    },
+    "linkedin": {
+      "cadence": "3-4 posts per week",
+      "citationWeight": "medium — B2B authority signal"
+    },
+    "instagram": {
+      "cadence": "3-5 posts per week",
+      "citationWeight": "low — rarely cited as a text source"
+    }
   }
 }
 ```
+
+The three entries above match the built-in defaults. When updating through `PUT /admin/settings/operation_plan.platform_cadence`, send `{ "type": "json", "value": { ... } }`; the stored value is the platform map, not the GET response's `{ key, value }` envelope. Updates affect subsequent generation calls, not content already generated or an idempotent request returning an existing plan.
+
+Publishing frequency is separate from Engage reply pacing (`engagePolicies[].targetRepliesPerDay` / `dailyTargets`). Changing `platform_cadence` does not set a daily reply quota. Likewise, `operation_plan.max_thread_parts` limits follow-ups **per thread**, not threads per week. Inspect a new task's `dryRun` preview to see the actual per-platform counts produced for the requested range.
+
+> **Platform coverage guarantee.** The generation prompt requires content for **every requested platform**, and the plan is validated after generation: a plan missing any requested platform is rejected (the row goes `FAILED` / `GENERATION_FAILED`, nothing is billed or materialized). Score-driven weighting only shifts volume between platforms — it can never drop one to zero.
 
 ## Integration-testing Quickstart
 
