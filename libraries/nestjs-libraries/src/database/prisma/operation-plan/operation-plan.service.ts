@@ -13,6 +13,13 @@ import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import { OperationPlan } from '@prisma/client';
 import { OperationPlanRepository } from './operation-plan.repository';
+import {
+  canonicalOperationPlanPlatform,
+  DEFAULT_PLATFORM_CADENCE,
+  OPERATION_PLAN_PLATFORM_CADENCE_KEY,
+  PlatformCadence,
+  resolvePlatformCadence,
+} from './platform-cadence';
 import { AiseeClient, AiseeBusinessType, AiseeTaskDetail } from '../ai-pricing/aisee.client';
 import { AiseeCreditService } from '../ai-pricing/aisee-credit.service';
 import { SettingsService } from '../settings/settings.service';
@@ -39,6 +46,8 @@ import {
 } from '@gitroom/nestjs-libraries/integrations/platform-content-profile';
 import { createHash, randomUUID } from 'crypto';
 import { z } from 'zod';
+
+export { OPERATION_PLAN_PLATFORM_CADENCE_KEY } from './platform-cadence';
 
 dayjs.extend(utc);
 
@@ -149,7 +158,6 @@ const OPERATION_PLAN_PROGRESS_MAX_RATIO = 0.95;
 // ── Settings keys (admin-editable; seeded on boot so they appear in the UI) ──
 export const OPERATION_PLAN_MAX_DURATION_DAYS_KEY = 'operation_plan.max_duration_days';
 export const OPERATION_PLAN_ALLOWED_PLATFORMS_KEY = 'operation_plan.allowed_platforms';
-export const OPERATION_PLAN_PLATFORM_CADENCE_KEY = 'operation_plan.platform_cadence';
 export const OPERATION_PLAN_MAX_THREAD_PARTS_KEY = 'operation_plan.max_thread_parts';
 // Not really "admin-editable" in spirit (see the seed description below) —
 // the service keeps it up to date itself. Seeded like the others purely so
@@ -182,54 +190,8 @@ const DEFAULT_PUBLISH_TIME_JITTER_MINUTES = 30;
 // Empty/absent = no extra restriction (every connected platform is allowed).
 const DEFAULT_ALLOWED_PLATFORMS: string[] = [];
 
-// Per-platform publishing rhythm fed to the generator as INPUT, so it stops
-// guessing content counts. Free-form strings on purpose — this mirrors the
-// human "platform playbook" (frequency + how strongly AI systems cite that
-// channel), which is editorial guidance, not a machine rule.
-type PlatformCadence = { cadence?: string; citationWeight?: string; notes?: string };
-const DEFAULT_PLATFORM_CADENCE: Record<string, PlatformCadence> = {
-  x: {
-    cadence: '1 post per weekday, lighter on weekends; 1-2 threads per week',
-    citationWeight: 'medium — Grok reads X directly; threads split into data points are more quotable',
-  },
-  linkedin: {
-    cadence: '3-4 posts per week',
-    citationWeight: 'medium — B2B authority signal',
-  },
-  instagram: {
-    cadence: '3-5 posts per week',
-    citationWeight: 'low — rarely cited as a text source',
-  },
-  reddit: {
-    cadence: '2-3 self-posts per week across relevant subreddits',
-    citationWeight: 'high — Reddit threads are a top retrieval source for AI search engines',
-  },
-  medium: {
-    cadence: '1-2 articles per week',
-    citationWeight: 'medium — long-form articles get indexed and quoted',
-  },
-  devto: {
-    cadence: '1-2 articles per week',
-    citationWeight: 'medium — strong reach for developer topics via tag feeds',
-  },
-  hackernews: {
-    cadence: '1-2 submissions per week',
-    citationWeight: 'medium — high visibility when a submission lands; lead with substance, overt promotion is punished',
-  },
-  quora: {
-    cadence: '2-3 answers per week',
-    citationWeight: 'medium — Q&A format maps directly onto AI answer retrieval',
-  },
-};
-
-// Last-resort rhythm for a requested platform with neither an admin-configured
-// nor a built-in cadence entry. The playbook must cover EVERY requested
-// platform: an absent entry reads as "no volume" to the model, and that is
-// exactly how whole platforms used to end up with zero generated content.
-const GENERIC_PLATFORM_CADENCE: PlatformCadence = { cadence: '2-3 posts per week' };
-
-// Per-platform ENGAGE reply volume — the sibling of DEFAULT_PLATFORM_CADENCE
-// above: cadence steers how much a plan POSTS, OPERATION_PLAN_REPLY_VOLUME steers how
+// Per-platform ENGAGE reply volume — the sibling of DEFAULT_PLATFORM_CADENCE:
+// cadence steers how much a plan POSTS, OPERATION_PLAN_REPLY_VOLUME steers how
 // much it REPLIES. The generator used to get no number at all for replies. The
 // prompt asked for "a sustainable weekday-level reply count" and pointed at the
 // playbook, which only ever described posting, so `targetRepliesPerDay` came out
@@ -1306,16 +1268,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
   private async _buildPlatformPlaybook(
     platforms: string[]
   ): Promise<Record<string, PlatformCadence>> {
-    const cadenceConfig = await this._getPlatformCadence();
-    const hasGuidance = (entry?: PlatformCadence): entry is PlatformCadence =>
-      !!entry && !!(entry.cadence || entry.citationWeight || entry.notes);
-    return platforms.reduce<Record<string, PlatformCadence>>((all, platform) => {
-      const configured = cadenceConfig[platform];
-      all[platform] = hasGuidance(configured)
-        ? configured
-        : DEFAULT_PLATFORM_CADENCE[platform] ?? GENERIC_PLATFORM_CADENCE;
-      return all;
-    }, {});
+    return resolvePlatformCadence(platforms, await this._getPlatformCadence());
   }
 
   // Dry-run mirror of materializePlanPosts' linkedin resolution (personal
@@ -1377,7 +1330,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         input.platforms
           .map((value) => value.trim())
           .filter(Boolean)
-          .map((platform) => (platform === 'linkedin-page' ? 'linkedin' : platform))
+          .map(canonicalOperationPlanPlatform)
       ),
     ];
     // Publishing is by platform (a plugin reads Post.settings.__type), NOT by an
@@ -1387,7 +1340,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
     // the only platform gate.
     const allowed = this._asKeywordArray(
       await this._settingsService!.get(OPERATION_PLAN_ALLOWED_PLATFORMS_KEY)
-    ).map((platform) => (platform === 'linkedin-page' ? 'linkedin' : platform));
+    ).map(canonicalOperationPlanPlatform);
     if (allowed.length) {
       const allowSet = new Set(allowed);
       const disallowed = platforms.filter((platform) => !allowSet.has(platform));

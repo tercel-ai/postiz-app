@@ -488,9 +488,11 @@ These are application defaults, not platform-mandated limits. `citationWeight` i
 
 **Counting generated content.** Count the entries in `contentItems[].platforms[]` matching each platform, grouped by the item's UTC date/week. Do not use `contentItems.length` as a per-platform count: one item can contain X, LinkedIn, and Medium variants and counts once for each. Each platform entry is one publishing item, even when it has a thread; materialization creates a separate `Post` row for the anchor and each follow-up. For example, four full weeks of the default LinkedIn rhythm suggest 12–16 publishing items, and Instagram suggests 12–20; these are planning expectations, not acceptance criteria. The X default suggests five weekday items in a full week, but leaves the weekend quantity and whether threads replace or supplement those items unspecified, so it does not define an exact weekly total. Use explicit prose in `cadence` or `notes` to clarify that intent for the model.
 
-**Configuration fields and fallback.** The setting value is an object keyed by platform identifier. Each entry may contain optional string fields `cadence` (publishing frequency), `citationWeight` (citation priority/rationale), and `notes` (additional editorial instructions). Only requested platforms are forwarded. Every requested platform gets an entry: its configured entry when at least one field is non-empty, otherwise its built-in default, otherwise the generic `2-3 posts per week` rhythm. The configured entry **replaces the whole platform entry**; fields are not individually merged with defaults. For example, `{ "linkedin": { "citationWeight": "high" } }` forwards only that weight and does not retain the built-in `3-4 posts per week` cadence. Include `cadence` when frequency matters.
+**Configuration fields and fallback.** The setting value is an object keyed by platform identifier. Each entry may contain optional string fields `cadence` (publishing frequency), `citationWeight` (citation priority/rationale), and `notes` (additional editorial instructions). Only requested platforms are forwarded to the generator. Every requested platform gets an entry: its configured entry when at least one field contains non-blank string guidance, otherwise its built-in default, otherwise the generic `2-3 posts per week` rhythm. Malformed maps/entries and invalid or blank fields are ignored. The configured entry **replaces the whole platform entry**; fields are not individually merged with defaults. For example, `{ "linkedin": { "citationWeight": "high" } }` forwards only that weight and does not retain the built-in `3-4 posts per week` cadence. Include `cadence` when frequency matters. LinkedIn profiles and pages share the canonical `linkedin` generation slot: edit `linkedin` for both. A legacy `linkedin-page` setting is used only when no usable `linkedin` entry exists.
 
-**Admin API response.** `GET /admin/settings/operation_plan.platform_cadence` returns `{ key, value }` for the stored setting. It does not return the generator's resolved fallback table. A value containing only X, LinkedIn, and Instagram is valid: its other requested platforms still receive built-in or generic fallback guidance during generation. Existing settings are preserved on backend boot, so adding new built-in defaults does not expand an already-stored value.
+**Admin API response.** `GET /admin/settings/operation_plan.platform_cadence` returns `{ key, value }`, where `value` contains the **effective rules for every currently supported operation-plan platform**, using the same resolver as generation: database-configured entry → built-in platform default → generic `2-3 posts per week` rhythm. The platform set comes from the same registry as `GET /admin/social-providers`, with `linkedin-page` folded into `linkedin`, independently of connected accounts and `operation_plan.allowed_platforms`; stored identifiers outside that set are omitted except for the legacy LinkedIn fallback described above. A missing setting still returns `200` with defaults. Other `GET /admin/settings/:key` responses retain their stored-value behavior and `404` for a missing setting.
+
+Existing settings are preserved on backend boot. For example, if the database contains only X, LinkedIn, and Instagram, this GET response also includes Reddit, Medium, Dev.to, Hacker News, Quora, and all other supported operation-plan platforms with their fallback rules. Resolving this response does not write defaults back to the database. The following is an **excerpt** of that response; the real `value` includes every canonical operation-plan platform:
 
 ```json
 {
@@ -507,12 +509,25 @@ These are application defaults, not platform-mandated limits. `citationWeight` i
     "instagram": {
       "cadence": "3-5 posts per week",
       "citationWeight": "low — rarely cited as a text source"
+    },
+    "reddit": {
+      "cadence": "2-3 self-posts per week across relevant subreddits",
+      "citationWeight": "high — Reddit threads are a top retrieval source for AI search engines"
+    },
+    "medium": {
+      "cadence": "1-2 articles per week",
+      "citationWeight": "medium — long-form articles get indexed and quoted"
+    },
+    "mastodon": {
+      "cadence": "2-3 posts per week"
     }
   }
 }
 ```
 
-The three entries above match the built-in defaults. When updating through `PUT /admin/settings/operation_plan.platform_cadence`, send `{ "type": "json", "value": { ... } }`; the stored value is the platform map, not the GET response's `{ key, value }` envelope. Updates affect subsequent generation calls, not content already generated or an idempotent request returning an existing plan.
+When updating through `PUT /admin/settings/operation_plan.platform_cadence`, send `{ "type": "json", "value": { ... } }`; the stored value is the platform map, not the GET response's `{ key, value }` envelope. PUT still replaces the stored map: send only the overrides you intend to persist. Saving the entire effective GET map makes its fallback entries explicit database overrides. Updates affect subsequent GET responses and generation calls, not content already generated or an idempotent request returning an existing plan.
+
+**Save and apply.** After PUT succeeds, each new plan generation reads the setting again (no cadence cache) and forwards the saved `cadence`, `citationWeight`, and `notes` for its requested platforms as `platformPlaybook`. This applies to dry-run previews and newly created asynchronous plans. Use a new task to test the update: repeating a task that already has a plan returns that plan without regenerating it. An asynchronous generation already started keeps the rules resolved for that request; saving new rules does not rewrite an in-flight or completed plan. Removing a platform override from the saved map restores its default on the next generation.
 
 Publishing frequency is separate from Engage reply pacing (`engagePolicies[].targetRepliesPerDay` / `dailyTargets`). Changing `platform_cadence` does not set a daily reply quota. Likewise, `operation_plan.max_thread_parts` limits follow-ups **per thread**, not threads per week. Inspect a new task's `dryRun` preview to see the actual per-platform counts produced for the requested range.
 

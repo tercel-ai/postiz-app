@@ -60,13 +60,16 @@ describe('AdminDiagnosticsController.checkEngageScanCursors', () => {
   it('asks for rows past the LEASE, not past a fixed number of hours', async () => {
     const { controller, engageRepository } = makeController([]);
 
-    const before = Date.now();
-    await controller.checkEngageScanCursors();
+    const now = new Date('2026-10-14T00:00:00.000Z').getTime();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      await controller.checkEngageScanCursors();
 
-    const cutoff: Date = engageRepository.findStuckScanCursors.mock.calls[0][0];
-    const ageMs = before - cutoff.getTime();
-    expect(ageMs).toBeGreaterThanOrEqual(SCAN_LEASE_TTL_MS);
-    expect(ageMs).toBeLessThan(SCAN_LEASE_TTL_MS + 5_000);
+      const cutoff: Date = engageRepository.findStuckScanCursors.mock.calls[0][0];
+      expect(cutoff.getTime()).toBe(now - SCAN_LEASE_TTL_MS);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('reports a unit the enumerator still produces as STALE', async () => {

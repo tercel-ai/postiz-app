@@ -18,6 +18,10 @@ import { UpdateAiPricingDto } from '@gitroom/nestjs-libraries/dtos/admin/ai-pric
 import { ListSettingsQueryDto } from '@gitroom/nestjs-libraries/dtos/admin/settings-query.dto';
 import { UpdateSettingDto } from '@gitroom/nestjs-libraries/dtos/admin/settings-body.dto';
 import {
+  OPERATION_PLAN_PLATFORM_CADENCE_KEY,
+  resolvePlatformCadence,
+} from '@gitroom/nestjs-libraries/database/prisma/operation-plan/platform-cadence';
+import {
   EXTENSION_PUBLISH_SEGMENT_GAP_KEY,
   ExtensionPublishConfigService,
 } from '@gitroom/nestjs-libraries/database/prisma/posts/extension-publish-config.service';
@@ -195,6 +199,11 @@ export class AdminSettingsController {
   @Get('/settings/:key')
   async getSetting(@Param('key') key: string) {
     const value = await this._settingsService.get(key);
+    if (key === OPERATION_PLAN_PLATFORM_CADENCE_KEY) {
+      const platforms = this._integrationManager.getSocialProviderList()
+        .map((provider) => provider.identifier);
+      return { key, value: resolvePlatformCadence(platforms, value) };
+    }
     if (value === null) {
       throw new HttpException(`Setting "${key}" not found`, 404);
     }
