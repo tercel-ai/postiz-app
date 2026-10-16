@@ -51,6 +51,10 @@ async function start() {
         // page contexts that do not — and a header missing from this list fails
         // preflight, which would take out every call rather than just this one.
         'x-aisee-ext-version',
+        'x-extension-node-id',
+        'x-extension-node-token',
+      'x-send-lease-token',
+        'x-extension-protocol-version',
         ...(process.env.NOT_SECURED ? ['auth', 'showorg', 'impersonate'] : []),
       ],
       exposedHeaders: [

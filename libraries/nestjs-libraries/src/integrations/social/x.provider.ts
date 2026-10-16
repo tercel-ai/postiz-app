@@ -1,3 +1,4 @@
+import { controlledSubmit, currentSendContext } from '../../extension/controlled-api-submit';
 import { PrismaClient } from '@prisma/client';
 import { TweetV2, TwitterApi } from 'twitter-api-v2';
 import { weightedLength } from '@gitroom/helpers/utils/count.length';
@@ -584,6 +585,12 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   }
 
   // v2.me() can be unstable; fallback to v1.1 verifyCredentials
+  async getSendActor(integration: Integration) {
+    const client = await this.getClient(integration.token);
+    const actor = await this._getUserInfo(client);
+    return { id: actor.id, idNamespace: 'x.rest_id' };
+  }
+
   private async _getUserInfo(client: TwitterApi): Promise<{ id: string; username: string; verified: boolean; profile_image_url: string; name: string }> {
     let result: Awaited<ReturnType<typeof client.v2.me>>;
     try {
@@ -1065,11 +1072,11 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         async () => {
           try {
             // @ts-ignore
-            return await client.v2.tweet({
+            return await controlledSubmit(() => client.v2.tweet({
               ...commonV2Params,
               text: firstPost.message,
               ...(quoteTweetId ? { quote_tweet_id: quoteTweetId } : {}),
-            });
+            }));
           } catch (tweetErr: any) {
             // Log the original twitter-api-v2 error here before runInConcurrent wraps it,
             // because formatTweetError in the outer catch receives an ApplicationFailure
@@ -1081,7 +1088,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
             // --- 403 idempotency fallback: check if the tweet already exists on X ---
             const is403 = tweetErr?.code === 403 || tweetErr?.data?.status === 403
               || String(tweetErr?.message || '').includes('403');
-            if (is403) {
+            if (is403 && !currentSendContext()) {
               const existing = await this._findExistingTweet(client, userId, firstPost.message);
               if (existing) {
                 console.log(`[x] 403 on v2.tweet but found existing tweet ${existing.id} — treating as success`);
@@ -1097,7 +1104,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       // Intermediate fallback: if we attempted a native quote (quote_tweet_id) and v2 failed,
       // retry v2 *without* quote_tweet_id and append the URL to the text instead. This keeps
       // community_id / reply_settings intact for restricted-tier users (e.g. Pay Per Use).
-      if (quoteTweetId && rawQuoteUrl) {
+      if (quoteTweetId && rawQuoteUrl && !currentSendContext()) {
         console.warn(
           `[x] v2.tweet with quote_tweet_id=${quoteTweetId} failed for post ${firstPost.id}, retrying v2 with URL-append fallback. Original error:`,
           this.formatTweetError(err)
@@ -1191,11 +1198,11 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       const { data }: { data: { id: string } } = await this.runInConcurrent(
         async () =>
           // @ts-ignore
-          client.v2.tweet({
+          controlledSubmit(() => client.v2.tweet({
             text: commentPost.message,
             ...(media_ids.length ? { media: { media_ids } } : {}),
             reply: { in_reply_to_tweet_id: replyToId },
-          })
+          }))
       );
       tweetId = data.id;
     } catch (err: any) {

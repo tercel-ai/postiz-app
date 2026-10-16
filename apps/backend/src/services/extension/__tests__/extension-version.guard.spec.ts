@@ -175,3 +175,16 @@ describe('readMinExtensionVersion', () => {
     expect(await readMinExtensionVersion(settings(null, { throws: true }))).toBe('');
   });
 });
+
+describe('account-bound settlement remains available during an upgrade pause', () => {
+  const execution = '00000000-0000-4000-8000-000000000001';
+  const requestContext = (method: string, path: string) => ({ switchToHttp: () => ({ getRequest: () => ({ method, path, headers: { 'x-aisee-ext-version': '1.0.0' } }), getResponse: () => ({ setHeader }) }) } as any);
+  it('allows authenticated status, protocol discovery, and outcome/stop endpoints through the version gate', async () => {
+    const { guard } = buildGuard('2.0.0');
+    for (const [method, path] of [['GET', '/extension/send-protocol'], ['GET', `/api/extension/send-attempts/${execution}`], ['POST', `/extension/send-attempts/${execution}/segments/0/outcome`], ['POST', `/extension/send-attempts/${execution}/segments/0/stop-confirmation`]]) await expect(guard.canActivate(requestContext(method, path))).resolves.toBe(true);
+  });
+  it('continues to refuse claims, lease renewal, preflight, authorization, and legacy callbacks', async () => {
+    const { guard } = buildGuard('2.0.0');
+    for (const path of ['/extension/send-attempts/claim', `/extension/send-attempts/${execution}/renew`, `/extension/send-attempts/${execution}/segments/0/preflight`, `/extension/send-attempts/${execution}/segments/0/start`, '/posts/publish-result']) await expect(guard.canActivate(requestContext('POST', path))).rejects.toMatchObject({ status: 426 });
+  });
+});

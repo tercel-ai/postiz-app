@@ -174,6 +174,8 @@ describe('OperationPlanRepository', () => {
       organizationId: 'org-1',
       deletedAt: null,
     });
+    expect(postFindMany.mock.calls[0][0].select).toMatchObject({ routeRevision: true, contentRevision: true, sendTarget: true, integrationId: true, executionProtocol: true });
+
   });
 
   it('getSentRepliesInRange scopes by organizationId, projectId, PUBLISHED state, and the publishDate window', async () => {
@@ -289,16 +291,7 @@ describe('OperationPlanRepository', () => {
       }
     );
 
-    expect(integrationFindMany).toHaveBeenCalledWith({
-      where: {
-        organizationId: 'org-1',
-        disabled: false,
-        deletedAt: null,
-        providerIdentifier: { in: ['x'] },
-      },
-      orderBy: { createdAt: 'asc' },
-      select: { id: true, providerIdentifier: true },
-    });
+    expect(integrationFindMany).not.toHaveBeenCalled();
     expect(postFindMany).toHaveBeenCalledWith({
       where: {
         id: {
@@ -714,7 +707,7 @@ describe('OperationPlanRepository', () => {
   // linkedin has two backing integration types (personal profile vs company
   // page) but the generator only ever emits the canonical 'linkedin' platform
   // — materializePlanPosts must resolve which one to actually publish through.
-  describe('materializePlanPosts linkedin -> linkedin-page resolution', () => {
+  describe('materializePlanPosts canonical LinkedIn drafts', () => {
     const linkedinPayload = {
       contentItems: [
         {
@@ -740,7 +733,7 @@ describe('OperationPlanRepository', () => {
       campaignId: 'campaign-1',
     } as any;
 
-    it('resolves to the personal integration when only linkedin is connected', async () => {
+    it('keeps an unbound canonical draft without querying connected accounts', async () => {
       const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
       const integrationFindMany = vi
         .fn()
@@ -749,11 +742,7 @@ describe('OperationPlanRepository', () => {
 
       await repo.materializePlanPosts(plan, linkedinPayload);
 
-      expect(integrationFindMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({ providerIdentifier: { in: ['linkedin', 'linkedin-page'] } }),
-        })
-      );
+      expect(integrationFindMany).not.toHaveBeenCalled();
       expect(postCreateMany).toHaveBeenCalledWith({
         data: [
           expect.objectContaining({
@@ -766,7 +755,7 @@ describe('OperationPlanRepository', () => {
       });
     });
 
-    it('falls back to the company page integration when only linkedin-page is connected', async () => {
+    it('does not infer a page actor from organization connections', async () => {
       const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
       const integrationFindMany = vi
         .fn()
@@ -779,8 +768,8 @@ describe('OperationPlanRepository', () => {
         data: [
           expect.objectContaining({
             integrationId: null,
-            group: 'plan-1:D01:linkedin-page',
-            settings: expect.stringContaining('"__type":"linkedin-page"'),
+            group: 'plan-1:D01:linkedin',
+            settings: expect.stringContaining('"__type":"linkedin"'),
           }),
         ],
         skipDuplicates: true,

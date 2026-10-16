@@ -147,6 +147,15 @@ export class LinkedinPageProvider
     };
   }
 
+  async getSendActor(integration: Integration) {
+    if (integration.providerIdentifier !== 'linkedin-page' || !this._isValidOrgId(integration.internalId))
+      throw new Error('LINKEDIN_ORGANIZATION_ID_REQUIRED');
+    const companies = await this.companies(integration.token);
+    if (!companies.some((company: { id: string }) => company.id === integration.internalId))
+      throw new Error('LINKEDIN_ORGANIZATION_ADMIN_REQUIRED');
+    return { id: integration.internalId, idNamespace: 'linkedin.organization_id' };
+  }
+
   async companies(accessToken: string) {
     const { elements, ...all } = await (
       await fetch(

@@ -1,5 +1,7 @@
+import { ConflictException } from '@nestjs/common';
+import { isLegacyExecution, legacyExecutionWhere } from '../../../extension/legacy-execution';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
-import { Injectable } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { Post as PostBody } from '@gitroom/nestjs-libraries/dtos/posts/create.post.dto';
 import { APPROVED_SUBMIT_FOR_ORDER, Post, Prisma, PublishMethod, State } from '@prisma/client';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
@@ -877,6 +879,7 @@ export class PostsRepository {
     return this._post.model.post.updateMany({
       where: {
         group,
+        sendIntentId: null,
         deletedAt: null,
         state: { in: ['QUEUE', 'DRAFT'] },
         ...(opts.organizationId ? { organizationId: opts.organizationId } : {}),
@@ -887,6 +890,8 @@ export class PostsRepository {
   }
 
   async deletePost(orgId: string, group: string) {
+    const controlled = await this._post.model.post.findFirst({ where: { organizationId: orgId, group, sendIntentId: { not: null } }, select: { id: true } });
+    if (controlled) throw new ConflictException('SEND_INTENT_IMMUTABLE');
     // For recurring posts: preserve PUBLISHED/ERROR clones (publish history).
     // For non-recurring posts: delete everything including PUBLISHED — the user
     // wants the post gone, there are no separate clone rows to preserve.
@@ -899,7 +904,7 @@ export class PostsRepository {
       await this.softDeleteGroupPosts(group, { organizationId: orgId });
     } else {
       await this._post.model.post.updateMany({
-        where: { organizationId: orgId, group, deletedAt: null },
+        where: { organizationId: orgId, group, deletedAt: null, sendIntentId: null },
         data: { parentPostId: null, deletedAt: new Date() },
       });
     }
@@ -1007,6 +1012,7 @@ export class PostsRepository {
     return this._post.model.post.update({
       where: {
         id,
+        AND: [legacyExecutionWhere()],
       },
       data: {
         state: 'PUBLISHED',
@@ -1032,6 +1038,7 @@ export class PostsRepository {
     cyclePublishDate: Date,
     claimToken: string
   ): Promise<{ clone: any; alreadyHandled: boolean }> {
+    if (!isLegacyExecution(originalPost.executionProtocol)) throw new ServiceUnavailableException('ACCOUNT_BOUND_SEND_NOT_ENABLED');
     const existing = await this._post.model.post.findFirst({
       where: {
         group: originalPost.group,
@@ -1167,6 +1174,7 @@ export class PostsRepository {
       error?: string;
     }
   ) {
+    if (originalPost.sendIntentId || !isLegacyExecution(originalPost.executionProtocol)) throw new ConflictException('SEND_INTENT_IMMUTABLE');
     // Check if a clone already exists for this (sourcePostId, releaseId) pair
     // to prevent duplicates from retry loops.
     const existing = await this._post.model.post.findFirst({
@@ -1225,6 +1233,7 @@ export class PostsRepository {
     await this._post.model.post.updateMany({
       where: {
         id,
+        sendIntentId: null,
         state: 'QUEUE',
         releaseId: { not: null },
       },
@@ -1327,6 +1336,7 @@ export class PostsRepository {
     };
 
     const staleWhere: Prisma.PostWhereInput = {
+      sendIntentId: null,
       state: 'QUEUE',
       deletedAt: null,
       parentPostId: null,
@@ -1428,6 +1438,7 @@ export class PostsRepository {
     const result = await this._post.model.post.updateMany({
       where: {
         id,
+        AND: [legacyExecutionWhere()],
         state: 'QUEUE',
         releaseId: null,
       },
@@ -1941,6 +1952,7 @@ export class PostsRepository {
     const update = await this._post.model.post.update({
       where: {
         id,
+        AND: [legacyExecutionWhere()],
       },
       data: {
         state,
@@ -2052,6 +2064,7 @@ export class PostsRepository {
       where: {
         organizationId: orgId,
         id,
+        sendIntentId: null,
       },
       data: {
         publishDate: dayjs(date).toDate(),
@@ -2131,6 +2144,10 @@ export class PostsRepository {
       // account, and rejects an accountless post that doesn't carry its own.
       const updateData = (type: 'create' | 'update') => ({
         publishDate: dayjs(date).toDate(),
+        // Persist explicit input provenance; a later enqueue must not guess from a non-null FK.
+        ...(body.integration?.id
+          ? { accountSelectionMode: 'EXPLICIT' }
+          : type === 'create' ? { accountSelectionMode: 'INHERIT' } : {}),
         // integrationId is nullable: an operation-plan post for an unconnected
         // platform has no account and is published by the extension. Connect
         // only what the caller actually sent — omitting the key on an update
@@ -2224,6 +2241,8 @@ export class PostsRepository {
         await this._post.model.post.upsert({
           where: {
             id: value.id || uuidv4(),
+            organizationId: orgId,
+            AND: [legacyExecutionWhere()],
           },
           create: { ...updateData('create') },
           update: {
@@ -2689,6 +2708,7 @@ export class PostsRepository {
       PostsRepository.extensionRouteBranches(providerIdentifiers);
     return {
       organizationId,
+      AND: [legacyExecutionWhere()],
       deletedAt: null,
       state: State.QUEUE,
       parentPostId: null, // roots only — children ride along as segments
@@ -2811,6 +2831,7 @@ export class PostsRepository {
         where: {
           id: node.id,
           organizationId,
+          AND: [legacyExecutionWhere()],
           deletedAt: null,
           state: State.QUEUE,
         },
@@ -2865,6 +2886,7 @@ export class PostsRepository {
     return this._post.model.post.updateMany({
       where: {
         organizationId,
+        AND: [legacyExecutionWhere()],
         group,
         deletedAt: null,
         integrationId: null,
@@ -2891,6 +2913,7 @@ export class PostsRepository {
       where: {
         id: { in: ids },
         organizationId,
+        AND: [legacyExecutionWhere()],
         deletedAt: null,
         state: State.QUEUE,
       },
@@ -2920,6 +2943,7 @@ export class PostsRepository {
     return this._post.model.post.updateMany({
       where: {
         organizationId,
+        AND: [legacyExecutionWhere()],
         group,
         deletedAt: null,
         parentPostId: { not: null },
@@ -2945,6 +2969,7 @@ export class PostsRepository {
     return this._post.model.post.updateMany({
       where: {
         organizationId,
+        AND: [legacyExecutionWhere()],
         group,
         deletedAt: null,
         parentPostId: { not: null },
@@ -3043,10 +3068,11 @@ export class PostsRepository {
     now: Date,
     limit: number,
     leaseToken: string,
-    leaseCutoff: Date
+    leaseCutoff: Date,
+    blockedPlatforms: string[] = []
   ) {
     const available = PostsRepository.extensionLeaseAvailableWhere(leaseCutoff);
-    const dueWhere = this.extensionDueWhere(organizationId, providerIdentifiers, now);
+    const dueWhere = { ...this.extensionDueWhere(organizationId, providerIdentifiers, now), ...(blockedPlatforms.length ? { NOT: { OR: [{ providerIdentifier: { in: blockedPlatforms } }, { integration: { providerIdentifier: { in: blockedPlatforms } } }] } } : {}) };
 
     const candidates = await this._post.model.post.findMany({
       where: { AND: [dueWhere, available] },
@@ -3060,7 +3086,7 @@ export class PostsRepository {
     await this._post.model.post.updateMany({
       // Re-check availability at write time so a concurrent claim of the same
       // candidate loses the race for that row (guard is a no-op there).
-      where: { id: { in: ids }, state: State.QUEUE, ...available },
+      where: { AND: [dueWhere, available, { id: { in: ids } }] },
       data: { releaseId: leaseToken, claimedAt: now },
     });
 
@@ -3091,6 +3117,7 @@ export class PostsRepository {
         group: true,
         state: true,
         integrationId: true,
+        executionProtocol: true,
         settings: true,
         providerIdentifier: true,
         operationPlanId: true,
@@ -3208,6 +3235,7 @@ export class PostsRepository {
         publishDate: true,
         state: true,
         releaseId: true,
+        sendIntentId: true,
       },
     });
   }
@@ -3281,6 +3309,7 @@ export class PostsRepository {
         projectId,
         operationPlanId: { not: null },
         state: State.QUEUE,
+        sendIntentId: null,
         deletedAt: null,
         parentPostId: null,
         source: { not: 'engage' },
@@ -3325,6 +3354,7 @@ export class PostsRepository {
         organizationId,
         group: { in: groups },
         state: State.QUEUE,
+        sendIntentId: null,
         deletedAt: null,
         operationPlanId: { not: null },
         source: { not: 'engage' },
@@ -3349,7 +3379,7 @@ export class PostsRepository {
     publishDate: Date
   ) {
     return this._post.model.post.updateMany({
-      where: { organizationId, group, state, deletedAt: null },
+      where: { organizationId, group, state, deletedAt: null, sendIntentId: null },
       data: { publishDate },
     });
   }
@@ -3396,6 +3426,7 @@ export class PostsRepository {
     return this._post.model.post.updateMany({
       where: {
         organizationId,
+        AND: [legacyExecutionWhere()],
         group,
         state: State.DRAFT,
         deletedAt: null,

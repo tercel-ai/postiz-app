@@ -207,10 +207,8 @@ describe('SaveAutomationRepliesDto', () => {
     ).toEqual([]);
   });
 
-  it('ignores a per-account payload — the field no longer exists', () => {
-    // Automation never picks an account (everything sends through the
-    // extension's own browser session), so a body carrying one is simply an
-    // unrecognised property, not a validation error.
+  it('continues to ignore retired account array payloads', () => {
+    // Old arrays remain ignored; new versioned account maps are validated.
     expect(
       check(SaveAutomationRepliesDto, {
         autoReplyEnabled: true,

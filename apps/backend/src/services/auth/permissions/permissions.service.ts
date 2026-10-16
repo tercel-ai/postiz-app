@@ -38,6 +38,15 @@ export class PermissionsService {
     };
   }
 
+  async channelCreationLimit(orgId: string, userId: string): Promise<number | null> {
+    const limits = await this._usersService.getUserLimits(userId);
+    if (limits && (limits.postChannelLimit !== null || 'periodEnd' in limits))
+      return limits.postChannelLimit;
+    if (!process.env.STRIPE_PUBLISHABLE_KEY) return null;
+    const { subscription, options } = await this.getPackageOptions(orgId);
+    return Math.max(0, options.channel ?? 0, subscription?.totalChannels ?? 0);
+  }
+
   async check(
     orgId: string,
     created_at: Date,

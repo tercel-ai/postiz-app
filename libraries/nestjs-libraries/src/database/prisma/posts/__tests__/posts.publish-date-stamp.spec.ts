@@ -46,7 +46,7 @@ describe('PostsRepository.updatePost — the send time lands on publishDate', ()
     await repo.updatePost('p1', 'rel-1', 'https://x.com/u/1', sentAt);
 
     expect(update).toHaveBeenCalledWith({
-      where: { id: 'p1' },
+      where: { id: 'p1', AND: [{ OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] }] },
       data: {
         state: 'PUBLISHED',
         publishDate: sentAt,

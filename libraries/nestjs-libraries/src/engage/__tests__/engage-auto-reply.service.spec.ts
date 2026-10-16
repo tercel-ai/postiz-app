@@ -1918,3 +1918,13 @@ describe('EngageAutoReplyService.getReplyQueueStatus', () => {
     ]);
   });
 });
+
+it('does not generate controlled work for a platform without a submission adapter', async () => {
+ vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true');
+ try {
+  const { svc, engage } = makeService({ configs: [{ ...enabledConfig, replyPolicies: { unsupported: { autoReplyEnabled: true } } }] });
+  const owner = vi.fn().mockResolvedValue('user'); Object.assign(svc, { _automaticSends: { owner, adoptPendingReplies: vi.fn().mockResolvedValue(0) } });
+  expect(await svc.getDueReplies(org, DURING_ACTIVE_HOURS, { coordinated: true })).toEqual([]);
+  expect(owner).not.toHaveBeenCalled(); expect(engage.reserveReplyGeneration).not.toHaveBeenCalled();
+ } finally { vi.unstubAllEnvs(); }
+});

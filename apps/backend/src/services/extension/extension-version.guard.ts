@@ -132,6 +132,14 @@ export class ExtensionVersionGuard implements CanActivate {
     );
 
     if (compareVersions(version, floor) >= 0) return true;
+    // Settlements still pass normal authentication and execution fencing. A version
+    // pause must never prevent recording a write that already reached a platform.
+    const path = (request.path || request.originalUrl || '').split('?')[0];
+    const uuid = '[a-fA-F0-9]{8}-[a-fA-F0-9-]{27}';
+    const read = request.method === 'GET' && (path === '/extension/send-protocol' || path === '/api/extension/send-protocol' || new RegExp(`^/(?:api/)?extension/send-attempts/${uuid}$`).test(path));
+    const settle = request.method === 'POST' && new RegExp(`^/(?:api/)?extension/send-attempts/${uuid}/segments/\\d+/(?:outcome|stop-confirmation)$`).test(path);
+    if (read || settle) return true;
+
 
     throw new HttpException(
       {

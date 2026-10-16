@@ -4,15 +4,19 @@ import {
   IsBoolean,
   IsDateString,
   IsIn,
+  IsInt,
+  IsObject,
   IsOptional,
   IsString,
   MaxLength,
+  Max,
+  Min,
   ValidateNested,
 } from 'class-validator';
 import { VALID_CHANNELS } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
 
 /**
- * One platform's login state from the extension's session-maintenance probe
+ * One platform actor's login state from the extension's session-maintenance probe
  * (aisee-browser-extension's `PlatformLoginEntry`). `id` is the platform-side
  * account id, comparable to `Integration.internalId` — the primary match key.
  * `handle` is the username without any @/u/ prefix, used as a fallback match
@@ -55,10 +59,34 @@ export class ExtensionSessionPlatformDto {
   @IsString()
   @MaxLength(2048)
   picture?: string;
+
+  @IsOptional() @IsIn(['VERIFIED', 'UNKNOWN', 'UNSUPPORTED', 'LOGGED_OUT'])
+  verificationStatus?: string;
+
+  @IsOptional() @IsIn(['LIVE_COOKIE_ID', 'LIVE_PAGE_ACTOR', 'CACHED', 'UNKNOWN'])
+  evidenceKind?: string;
+
+  @IsOptional() @IsString() @MaxLength(256)
+  controllerId?: string;
+
+  @IsOptional() @IsIn(['COMPANY_ADMIN', 'COMPOSER'])
+  actorContext?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  identityNamespace?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  probeId?: string;
+
+  @IsOptional() @IsDateString()
+  identityObservedAt?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  preflightChallenge?: string;
 }
 
 /**
- * Body for PATCH /integrations/extension-session — the browser extension's
+ * Body for POST (legacy PATCH remains compatible) /integrations/extension-session — the browser extension's
  * hourly session-maintenance job reports what it already probed, once per
  * platform. The server fans this out across every Integration the org has
  * for a reported platform: the matching one (by internalId, falling back to
@@ -66,8 +94,19 @@ export class ExtensionSessionPlatformDto {
  * on that platform is marked not reachable. This never blocks the 'api' send
  * path or the publish-due queue — see extensionRouteBranches() — it only
  * feeds diagnostics and CLI display.
+ * ACCOUNT_BOUND_V1 uses per-node actor sessions instead: one personal slot per
+ * platform plus independent LinkedIn company slots derived from stable IDs.
  */
 export class ExtensionSessionReportDto {
+  @IsOptional() @IsInt() @Min(1) @Max(2147483647)
+  reportSequence?: number;
+
+  @IsOptional() @IsString() @MaxLength(32)
+  extensionVersion?: string;
+
+  @IsOptional() @IsObject()
+  capabilities?: Record<string, { post?: boolean; reply?: boolean; strictAccountVerification?: boolean }>;
+
   @IsDateString()
   checkedAt!: string;
 

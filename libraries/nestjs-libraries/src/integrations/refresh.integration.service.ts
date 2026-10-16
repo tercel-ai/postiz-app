@@ -137,7 +137,13 @@ export class RefreshIntegrationService {
       integration.providerIdentifier,
       refresh.accessToken,
       refresh.refreshToken,
-      refresh.expiresIn
+      refresh.expiresIn,
+      integration.profile ?? undefined,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      integration.identityNamespace ?? 'legacy'
     );
 
     // Re-arm the proactive refresh workflow so the next expiry is handled

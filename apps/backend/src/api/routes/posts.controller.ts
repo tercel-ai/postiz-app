@@ -1,3 +1,6 @@
+import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { Headers, Optional } from '@nestjs/common';
+import { SendExecutionService } from '@gitroom/nestjs-libraries/extension/send-execution.service';
 import {
   Body,
   Controller,
@@ -9,7 +12,9 @@ import {
   Put,
   Query,
   Res,
+  UseGuards,
 } from '@nestjs/common';
+import { ExtensionExecutionReadyGuard } from '@gitroom/nestjs-libraries/extension/extension-execution.guard';
 import { Throttle } from '@nestjs/throttler';
 import {
   limitFor,
@@ -58,7 +63,8 @@ export class PostsController {
     private _shortLinkService: ShortLinkService,
     private _engageEntitlement: EngageEntitlementService,
     private _engageScanConfig: EngageScanConfigService,
-    private _platformPacing: PlatformPacingConfigService
+    private _platformPacing: PlatformPacingConfigService,
+    @Optional() private _sendExecutions?: SendExecutionService
   ) {}
 
   /**
@@ -449,8 +455,10 @@ export class PostsController {
   @Post('/schedule')
   async schedulePosts(
     @GetOrgFromRequest() org: Organization,
-    @Body() body: SchedulePostsDto
+    @Body() body: SchedulePostsDto,
+    @GetUserFromRequest() user?: User
   ) {
+    if (isAccountBoundSendingEnabled()) return this._postsService.schedulePosts(org.id, body.posts, { userId: user?.id ?? '', origin: 'MANUAL' });
     return this._postsService.schedulePosts(org.id, body.posts);
   }
 
@@ -541,10 +549,21 @@ export class PostsController {
    * API call (backend = scheduler, extension = executor — same as metrics/due).
    */
   @Post('/publish-due')
+  @UseGuards(ExtensionExecutionReadyGuard)
   async getDuePublish(
     @GetOrgFromRequest() org: Organization,
-    @Body() body: { limit?: number }
+    @Body() body: { limit?: number; requestId?: string },
+    @GetUserFromRequest() user?: User,
+    @Headers() headers?: Record<string, string>
   ) {
+    if (headers?.['x-extension-node-id']) {
+      if (!this._sendExecutions || !user) throw new Error('SEND_COORDINATOR_REQUIRED');
+      const [claimed, pacing] = await Promise.all([
+        this._sendExecutions.claim({ org: org.id, user: user.id, nodeId: headers['x-extension-node-id'], token: headers['x-extension-node-token'] }, { requestId: body?.requestId!, action: 'POST' }),
+        this._platformPacing.getPlatformPacing(),
+      ]);
+      return { due: claimed.items, pacing, executionProtocol: 'ACCOUNT_BOUND_V1' };
+    }
     const [due, pacing] = await Promise.all([
       this._postsService.getDuePublishPosts(org.id, body?.limit),
       this._platformPacing.getPlatformPacing(),

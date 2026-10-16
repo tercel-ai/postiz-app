@@ -1,3 +1,4 @@
+import { SendExecutionsController, SendIntentsController, SendReconciliationController, SendProtocolController } from './routes/send-executions.controller';
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { AuthController } from '@gitroom/backend/api/routes/auth.controller';
 import { AuthService } from '@gitroom/backend/services/auth/auth.service';
@@ -35,6 +36,9 @@ import { MonitorController } from '@gitroom/backend/api/routes/monitor.controlle
 import { InternalController } from '@gitroom/backend/api/routes/internal.controller';
 import { SsoClient } from '@gitroom/backend/services/auth/sso.client';
 import { InternalAuthGuard } from '@gitroom/backend/services/auth/internal-auth.guard';
+import { ExtensionNodesController } from '@gitroom/backend/api/routes/extension-nodes.controller';
+import { SendingAccountsController } from '@gitroom/backend/api/routes/sending-accounts.controller';
+import { SendPreferencesController } from '@gitroom/backend/api/routes/send-preferences.controller';
 
 const authenticatedController = [
   UsersController,
@@ -52,6 +56,13 @@ const authenticatedController = [
   SetsController,
   ThirdPartyController,
   DashboardController,
+  ExtensionNodesController,
+  SendExecutionsController,
+  SendIntentsController,
+  SendReconciliationController,
+  SendProtocolController,
+  SendingAccountsController,
+  SendPreferencesController,
 ];
 @Module({
   imports: [UploadModule],

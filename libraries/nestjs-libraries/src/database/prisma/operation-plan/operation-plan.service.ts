@@ -1,3 +1,5 @@
+import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { AutomaticSendProducerService } from '../../../extension/automatic-send-producer.service';
 import {
   BadRequestException,
   ConflictException,
@@ -12,6 +14,8 @@ import {
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import { OperationPlan } from '@prisma/client';
+import { PlanExecutionService } from '../../../extension/plan-execution.service';
+import { PlanRouteMap } from '../../../extension/plan-execution.dto';
 import { OperationPlanRepository } from './operation-plan.repository';
 import {
   canonicalOperationPlanPlatform,
@@ -106,6 +110,7 @@ export interface CreateOperationPlanInput {
   // Optional curated Engage keyword set. Non-empty → used verbatim; omitted or
   // empty → fall back to the task's product_snapshot.keywords.
   keywords?: string[];
+  executionRoutes?: PlanRouteMap;
 }
 
 // Output budget for plan generation. A ~30-day plan carries publish-ready
@@ -478,7 +483,9 @@ export class OperationPlanService implements OnApplicationBootstrap {
     // Optional for the same reason. Used only to align freshly materialized
     // DRAFT posts with the project's publish time windows — see
     // _materializePlanPosts.
-    private _postsService?: PostsService
+    private _postsService?: PostsService,
+    private _planExecution?: PlanExecutionService,
+    private _automaticSends?: AutomaticSendProducerService
   ) {}
 
   /**
@@ -527,7 +534,10 @@ export class OperationPlanService implements OnApplicationBootstrap {
       await this._postsService.schedulePlanPosts(
         plan.organizationId,
         plan.id,
-        plan.projectId
+        plan.projectId,
+        undefined,
+        undefined,
+        ...(isAccountBoundSendingEnabled() ? [{ userId: await this._automaticSends!.owner(plan.organizationId, plan.projectId, 'POST'), origin: 'AUTOMATION' as const }] : [])
       );
     } catch (err) {
       this.logger.warn(
@@ -620,6 +630,13 @@ export class OperationPlanService implements OnApplicationBootstrap {
     input: CreateOperationPlanInput,
     options: { dryRun?: boolean } = {}
   ) {
+    if (input.executionRoutes !== undefined) {
+      throw new BadRequestException({
+        code: 'PLAN_ACCOUNT_SELECTION_MOVED',
+        message: 'Select sending accounts on drafts or in project defaults',
+        sendingAccountsPath: `/projects/${projectId}/sending-accounts`,
+      });
+    }
     if (!this._aiseeClient || !this._creditService || !this._settingsService || !this._openaiService) {
       throw new ServiceUnavailableException({
         code: 'OPERATION_PLAN_UNAVAILABLE',
@@ -679,12 +696,12 @@ export class OperationPlanService implements OnApplicationBootstrap {
         return { ...this._toRecord(existing), dryRun: true };
       }
       if (existing.status === 'BILLING_PENDING') {
-        return this._reconcilePending(existing);
+        return { ...await this._reconcilePending(existing) };
       }
       if (existing.status === 'READY') {
         await this._materializePlanPosts(existing, existing.planPayload);
       }
-      return this._toRecord(existing);
+      return { ...this._toRecord(existing) };
     }
 
     if (!(await this._creditService.hasCredits(organizationId))) {
@@ -728,14 +745,6 @@ export class OperationPlanService implements OnApplicationBootstrap {
     // itself (real token cost to us, but NO user-credit deduction).
     if (options.dryRun) {
       const { generation, planData, usages } = await this._generatePlanArtifacts(projectId, ctx);
-      // Preview the SAME linkedin personal/page resolution materializePlanPosts
-      // applies for real, so what a caller sees here matches what actually
-      // publishes once this plan is submitted (a dry-run for an org with only a
-      // linkedin-page integration would otherwise always show 'linkedin').
-      const previewContentItems = await this._resolveLinkedinForPreview(
-        organizationId,
-        generation.data.contentItems
-      );
       return {
         id: null as string | null,
         projectId,
@@ -749,7 +758,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         startsAt: start.toISOString(),
         endsAt: end.toISOString(),
         data: planData,
-        contentItems: previewContentItems,
+        contentItems: generation.data.contentItems,
         // Preview keeps keyword TEXT keys (no EngageKeyword rows are created).
         engagePolicies: this._foldKeywordTargets(
           generation.data.engagePolicies,
@@ -757,6 +766,8 @@ export class OperationPlanService implements OnApplicationBootstrap {
         ),
         warnings: generation.data.warnings ?? [],
         dryRun: true,
+        executionRoutes: null,
+        executionRevision: 0,
         // Total tokens across the main generation AND every shrink call, so the
         // preview estimate reflects the true cost (the real bill prices each
         // usage per its own model; this summed view is a client-facing estimate).
@@ -1271,30 +1282,6 @@ export class OperationPlanService implements OnApplicationBootstrap {
     return resolvePlatformCadence(platforms, await this._getPlatformCadence());
   }
 
-  // Dry-run mirror of materializePlanPosts' linkedin resolution (personal
-  // profile vs company page): prefer a connected `linkedin` integration,
-  // falling back to `linkedin-page` only when the org has no personal
-  // integration. Kept as a plain map over the generated payload (no Post
-  // rows exist yet in a dry-run) so the preview's `platform` field matches
-  // what materialization would actually attach an integration to.
-  private async _resolveLinkedinForPreview(
-    organizationId: string,
-    contentItems: z.infer<typeof GeneratedPlanSchema>['contentItems']
-  ): Promise<z.infer<typeof GeneratedPlanSchema>['contentItems']> {
-    if (!contentItems.some((item) => item.platforms.some((post) => post.platform === 'linkedin'))) {
-      return contentItems;
-    }
-    const connected = new Set(await this._repo.getConnectedPlatforms(organizationId));
-    const resolvePlatform = (platform: string): string =>
-      platform === 'linkedin' && !connected.has('linkedin') && connected.has('linkedin-page')
-        ? 'linkedin-page'
-        : platform;
-    return contentItems.map((item) => ({
-      ...item,
-      platforms: item.platforms.map((post) => ({ ...post, platform: resolvePlatform(post.platform) })),
-    }));
-  }
-
   private async _validateInput(organizationId: string, input: CreateOperationPlanInput) {
     if (!input.taskId || !Array.isArray(input.platforms) || !input.platforms.length) {
       throw new BadRequestException('taskId and at least one platform are required');
@@ -1320,9 +1307,8 @@ export class OperationPlanService implements OnApplicationBootstrap {
     // generation always targets a single canonical `linkedin` slot; the
     // generated posts, `hardLimitFor`/`targetFor` (both keyed by provider
     // identifier), the model prompt, and the admin cadence table all only
-    // know about `linkedin`. materializePlanPosts resolves which actual
-    // integration (personal vs page) to publish through, based on what the
-    // org has connected. Normalizing `linkedin-page` -> `linkedin` here means
+    // know about `linkedin`. Enqueue selects the actual authorized actor.
+    // Normalizing `linkedin-page` -> `linkedin` here means
     // a caller can never make the generator see both as independent
     // platforms and produce duplicate LinkedIn content for the same plan.
     const platforms = [
@@ -1333,11 +1319,9 @@ export class OperationPlanService implements OnApplicationBootstrap {
           .map(canonicalOperationPlanPlatform)
       ),
     ];
-    // Publishing is by platform (a plugin reads Post.settings.__type), NOT by an
-    // OAuth integration, so a platform need not have a connected account at plan
-    // time — materializePlanPosts creates the Post with a null integrationId and
-    // the plugin picks it up by platform. The admin allowlist below is therefore
-    // the only platform gate.
+    // Generation does not select a sender. Materialization creates an inherited
+    // draft; enqueue must resolve the actor before coordinated execution.
+    // A connected account is therefore not required by the generation allowlist.
     const allowed = this._asKeywordArray(
       await this._settingsService!.get(OPERATION_PLAN_ALLOWED_PLATFORMS_KEY)
     ).map(canonicalOperationPlanPlatform);
@@ -2197,6 +2181,8 @@ export class OperationPlanService implements OnApplicationBootstrap {
       startsAt: plan.startsAt.toISOString(),
       endsAt: plan.endsAt.toISOString(),
       data: plan.data ?? null,
+      executionRoutes: plan.executionRoutes ?? null,
+      executionRevision: plan.executionRevision ?? 0,
       contentItems: payload.contentItems ?? [],
       engagePolicies: payload.engagePolicies ?? [],
       billingTransactionId: plan.billingTransactionId ?? undefined,
@@ -2390,6 +2376,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
 
   async getOverview(organizationId: string, planId: string) {
     const plan = await this._repo.getById(planId, organizationId);
+    if (this._planExecution) await this._planExecution.assertAccess(organizationId, plan.projectId);
     const [posts, engageStats, engageView, progress] = await Promise.all([
       this._repo.getPostsForPlan(plan.id, organizationId),
       this._getReplyPacingByDay(plan),
@@ -2420,6 +2407,8 @@ export class OperationPlanService implements OnApplicationBootstrap {
         startsAt: plan.startsAt,
         endsAt: plan.endsAt,
         data: plan.data ?? null,
+        executionRoutes: plan.executionRoutes ?? null,
+        executionRevision: plan.executionRevision ?? 0,
       },
       // getPostsForPlan returns every part flat (anchor + thread follow-ups as
       // separate rows). Nest each thread under its anchor so the overview shows

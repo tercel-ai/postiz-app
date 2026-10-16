@@ -10,6 +10,7 @@ import {
   IsOptional,
   IsString,
   MinLength,
+  MaxLength,
   Validate,
   ValidateIf,
   ValidateNested,
@@ -54,6 +55,9 @@ export class PostContent {
 }
 
 export class Post {
+  @IsOptional() @IsString() @MaxLength(128)
+  itemKey?: string;
+
   // Optional: `Post.integrationId` is nullable, and operation-plan posts for a
   // platform the org has NOT connected are materialized without one — they are
   // published in-browser by the extension, which resolves the platform from
@@ -116,6 +120,9 @@ class Tags {
 }
 
 export class CreatePostDto {
+  @IsOptional() @IsString() @MaxLength(128)
+  requestId?: string;
+
   @IsDefined()
   @IsIn(['draft', 'schedule', 'now'])
   type: 'draft' | 'schedule' | 'now';

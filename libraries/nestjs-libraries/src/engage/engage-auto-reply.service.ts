@@ -1,3 +1,7 @@
+import { CONTROLLED_SEND_PLATFORMS } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
+import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { AutomaticSendProducerService } from '../extension/automatic-send-producer.service';
+import { SendCoordinatorService } from '../extension/send-coordinator.service';
 import { AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import dayjs from 'dayjs';
@@ -258,7 +262,9 @@ export class EngageAutoReplyService implements OnModuleInit {
     // Optional so the positional constructors in existing specs keep working,
     // mirroring EngageService. A missing client means no Aisee notification,
     // which is the correct degradation for a side channel.
-    private _aiseeNotificationClient?: AiseeNotificationClient
+    private _aiseeNotificationClient?: AiseeNotificationClient,
+    private _sendCoordinator?: SendCoordinatorService,
+    private _automaticSends?: AutomaticSendProducerService
   ) {}
 
   /**
@@ -456,7 +462,8 @@ export class EngageAutoReplyService implements OnModuleInit {
    * on a short cadence, so a trickle per poll spreads a day's target across the
    * day by construction — no separate scheduling clock needed.
    */
-  async getDueReplies(org: Organization, now = new Date()): Promise<DueReply[]> {
+  async getDueReplies(org: Organization, now = new Date(), options?: { coordinated: boolean }): Promise<DueReply[]> {
+    const coordinated = options?.coordinated === true && isAccountBoundSendingEnabled();
     // All resolved ONCE. The window, the floor and the day's ceiling are
     // consulted per (project × platform) below, and each of these is a settings
     // query — reading them inside the loop was an N+1 on global admin values.
@@ -510,6 +517,7 @@ export class EngageAutoReplyService implements OnModuleInit {
       ]
     );
 
+    const blockedPlatforms = await this._sendCoordinator?.legacyBlockedPlatforms(org.id) ?? [];
     const due: DueReply[] = [];
     // Counted per PLATFORM, not globally: `maxPerPoll` caps each platform's own
     // rate-limit risk independently, so a busy reddit slate must not starve x
@@ -543,6 +551,13 @@ export class EngageAutoReplyService implements OnModuleInit {
       // and get skipped — not rejected, not logged, just quietly never driven.
       for (const rawPlatform of Object.keys(policies)) {
         const platform = rawPlatform.toLowerCase();
+        // Controlled producers must not charge generation for an unsupported write adapter.
+        if (coordinated && !(CONTROLLED_SEND_PLATFORMS as readonly string[]).includes(platform)) continue;
+        if (!coordinated && blockedPlatforms.includes(platform)) continue;
+        if (coordinated) {
+          try { await this._automaticSends!.owner(org.id, projectId, 'REPLY'); }
+          catch { continue; }
+        }
         if ((perPlatformCount.get(platform) ?? 0) >= pacing.maxPerPoll) continue;
 
         // Per-platform policy refines the project-level switch. Absent = the
@@ -725,7 +740,8 @@ export class EngageAutoReplyService implements OnModuleInit {
         // spacing above is the point, and draining a backlog in one burst is
         // precisely what gets an account rate-limited. A backlog therefore
         // clears at the configured pace, deliberately.
-        const claimed = await this._engageRepository.claimDueEngageReplies(
+        if (coordinated) await this._automaticSends!.adoptPendingReplies(org.id, projectId, platform);
+        const claimed = coordinated ? [] : await this._engageRepository.claimDueEngageReplies(
           org.id,
           projectId,
           platform,
@@ -785,10 +801,10 @@ export class EngageAutoReplyService implements OnModuleInit {
             } keywords=${budget.keywords.length})`
         );
         const drafted = await this._draftOne(
-          org, projectId, platform, budget, pacing, policy, excludeChannelIds
+          org, projectId, platform, budget, pacing, policy, excludeChannelIds, coordinated
         );
         if (drafted) {
-          due.push(drafted);
+          if (!coordinated) due.push(drafted);
           perPlatformCount.set(platform, (perPlatformCount.get(platform) ?? 0) + 1);
         }
       }
@@ -1023,7 +1039,8 @@ export class EngageAutoReplyService implements OnModuleInit {
     pacing: EngageReplyPacing,
     policy: EngageReplyPolicy,
     /** Channels that have had their allowance today; never drafted into. */
-    excludeChannelIds: string[] = []
+    excludeChannelIds: string[] = [],
+    coordinated = false
   ): Promise<DueReply | null> {
     const hungryKeywords = budget.keywords
       .filter((k) => k.remaining > 0)
@@ -1133,6 +1150,7 @@ export class EngageAutoReplyService implements OnModuleInit {
           content: text,
           inputData: { strategy, brandStrength: 50 },
           projectId,
+          ...(coordinated ? { coordinated: true } : {}),
         });
       } catch (err) {
         await this._engageService

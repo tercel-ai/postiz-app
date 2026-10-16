@@ -288,6 +288,7 @@ describe('PostsRepository.deletePost', () => {
   it('should delete everything for non-recurring posts', async () => {
     // No recurring post in group
     mockPrismaPost.findFirst
+      .mockResolvedValueOnce(null) // Controlled send guard
       .mockResolvedValueOnce(null) // hasRecurring check
       .mockResolvedValueOnce({ id: 'post-1' }); // return value
     mockPrismaPost.updateMany.mockResolvedValue({ count: 3 });
@@ -302,6 +303,7 @@ describe('PostsRepository.deletePost', () => {
   it('should only delete QUEUE/DRAFT for recurring posts', async () => {
     // Has recurring post in group
     mockPrismaPost.findFirst
+      .mockResolvedValueOnce(null) // Controlled send guard
       .mockResolvedValueOnce({ id: 'recurring-1' }) // hasRecurring check
       .mockResolvedValueOnce({ id: 'recurring-1' }); // return value
     mockPrismaPost.updateMany.mockResolvedValue({ count: 1 });
@@ -314,6 +316,7 @@ describe('PostsRepository.deletePost', () => {
 
   it('should preserve PUBLISHED clones after deleting recurring post', async () => {
     mockPrismaPost.findFirst
+      .mockResolvedValueOnce(null) // Controlled send guard
       .mockResolvedValueOnce({ id: 'recurring-1' }) // hasRecurring
       .mockResolvedValueOnce({ id: 'recurring-1' });
     mockPrismaPost.updateMany.mockResolvedValue({ count: 1 });
@@ -930,7 +933,7 @@ describe('PostsRepository.changeState — claim-token cleanup', () => {
     await repo.changeState('post-1', 'ERROR', '403 Forbidden');
 
     const call = mockPrismaPost.update.mock.calls[0][0];
-    expect(call.where).toEqual({ id: 'post-1' });
+    expect(call.where).toEqual({ id: 'post-1', AND: [{ OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] }] });
     expect(call.data.state).toBe('ERROR');
     expect(call.data.releaseId).toBe(null);
     expect(call.data.error).toContain('403');

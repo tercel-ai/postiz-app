@@ -1,3 +1,7 @@
+import { AutomaticSendProducerService } from '../../extension/automatic-send-producer.service';
+import { SendExecutionService } from '../../extension/send-execution.service';
+import { SendCoordinatorService } from '../../extension/send-coordinator.service';
+import { SendQuotaService } from '../../extension/send-quota.service';
 import { Global, Module } from '@nestjs/common';
 import { PrismaRepository, PrismaService, PrismaTransaction } from './prisma.service';
 import { OrganizationRepository } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.repository';
@@ -76,6 +80,11 @@ import { OperationPlanRepository } from '@gitroom/nestjs-libraries/database/pris
 import { OperationPlanService } from '@gitroom/nestjs-libraries/database/prisma/operation-plan/operation-plan.service';
 import { ProjectPublishingService } from '@gitroom/nestjs-libraries/automation/project-publishing.service';
 import { AutomationService } from '@gitroom/nestjs-libraries/automation/automation.service';
+import { ExtensionNodeService } from '@gitroom/nestjs-libraries/extension/extension-node.service';
+import { ExtensionExecutionReadyGuard } from '@gitroom/nestjs-libraries/extension/extension-execution.guard';
+import { PlanExecutionService } from '@gitroom/nestjs-libraries/extension/plan-execution.service';
+import { SendBindingService } from '@gitroom/nestjs-libraries/extension/send-binding.service';
+import { SendPolicyService } from '@gitroom/nestjs-libraries/extension/send-policy.service';
 
 @Global()
 @Module({
@@ -161,6 +170,15 @@ import { AutomationService } from '@gitroom/nestjs-libraries/automation/automati
     OperationPlanRepository,
     OperationPlanService,
     AutomationService,
+    ExtensionNodeService,
+    ExtensionExecutionReadyGuard,
+    SendBindingService,
+    SendPolicyService,
+    SendCoordinatorService,
+    AutomaticSendProducerService,
+    SendExecutionService,
+    SendQuotaService,
+    PlanExecutionService,
   ],
   get exports() {
     return this.providers;

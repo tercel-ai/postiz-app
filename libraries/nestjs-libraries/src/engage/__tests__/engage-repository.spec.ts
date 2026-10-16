@@ -5054,7 +5054,7 @@ describe('EngageRepository.getOrgScanStatus', () => {
         organizationId: 'org1',
         projectId: null,
         opportunityId: 'opp1',
-        post: { state: 'DRAFT' },
+        post: { state: 'DRAFT', sendIntentId: null, sendOrigin: { not: 'AUTOMATION' } },
       });
       // A DRAFT engage Post is created (not published, no claim).
       expect(postCreate.mock.calls[0][0].data).toMatchObject({
@@ -5703,5 +5703,16 @@ describe('locateSentReply', () => {
       limit: 20,
       totalPages: 3,
     });
+  });
+});
+
+
+describe('controlled automatic draft isolation', () => {
+  it('never selects or overwrites a human draft and marks a recoverable automatic draft before enqueue', async () => {
+    const { repo, sentFindFirst, postCreate, sentCreate } = buildRepo();
+    sentFindFirst.mockResolvedValue(null); postCreate.mockResolvedValue({ id: 'automatic-post' }); sentCreate.mockResolvedValue({ id: 'automatic-reply' });
+    await repo.upsertDraft('org1', 'opp1', { platform: 'x', content: 'automatic', inputData: {}, state: 'DRAFT', coordinatedAutomatic: true }, 'project1');
+    expect(sentFindFirst.mock.calls[0][0].where.post).toMatchObject({ state: 'DRAFT', sendIntentId: null, executionProtocol: 'ACCOUNT_BOUND_V1', sendOrigin: 'AUTOMATION' });
+    expect(postCreate.mock.calls[0][0].data).toMatchObject({ state: 'DRAFT', executionProtocol: 'ACCOUNT_BOUND_V1', sendOrigin: 'AUTOMATION' });
   });
 });

@@ -1,3 +1,4 @@
+import { PlanExecutionService } from '../../../extension/plan-execution.service';
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { v5 as uuidv5 } from 'uuid';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
@@ -149,7 +150,8 @@ export class OperationPlanRepository {
     private _post: PrismaRepository<'post'>,
     private _sentReply: PrismaRepository<'engageSentReply'>,
     private _keyword: PrismaRepository<'engageKeyword'>,
-    private _integration?: PrismaRepository<'integration'>
+    private _integration?: PrismaRepository<'integration'>,
+    private _planExecution?: PlanExecutionService
   ) {}
 
   async getById(id: string, organizationId: string) {
@@ -326,6 +328,13 @@ export class OperationPlanRepository {
         // exposing it lets the overview nest a thread instead of listing its
         // parts as separate top-level posts. null = a standalone/anchor post.
         parentPostId: true,
+        integrationId: true,
+        providerIdentifier: true,
+        routeRevision: true,
+        contentRevision: true,
+        sendTarget: true,
+        sendBlockCode: true,
+        executionProtocol: true,
         integration: {
           select: {
             id: true,
@@ -470,41 +479,6 @@ export class OperationPlanRepository {
       });
     }
 
-    const platforms = [...new Set(materializedPosts.map(({ platform }) => platform))];
-    // The generator only ever targets the canonical `linkedin` slot (see
-    // operation-plan.service.ts _validateInput), never `linkedin-page`
-    // directly, so also look up `linkedin-page` integrations whenever
-    // `linkedin` was requested — that's the fallback resolved below.
-    const queryProviderIdentifiers = platforms.includes('linkedin')
-      ? [...new Set([...platforms, 'linkedin-page'])]
-      : platforms;
-    const integrations = await this._integration!.model.integration.findMany({
-      where: {
-        organizationId: plan.organizationId,
-        disabled: false,
-        deletedAt: null,
-        providerIdentifier: { in: queryProviderIdentifiers },
-      },
-      orderBy: { createdAt: 'asc' },
-      select: { id: true, providerIdentifier: true },
-    });
-    const integrationByPlatform = new Map(
-      integrations.map((integration) => [integration.providerIdentifier, integration.id])
-    );
-    // Resolve `linkedin` to whichever integration type this org actually has
-    // connected: prefer a personal profile integration (matches the
-    // canonical platform value everywhere else — cadence, content limits,
-    // prompt), falling back to the company page only when no personal
-    // integration exists. An org with neither, or with both, is unaffected
-    // beyond this default (both connected → personal wins, same as before
-    // this fallback existed).
-    const resolvePlatform = (platform: string): string =>
-      platform === 'linkedin' &&
-      !integrationByPlatform.has('linkedin') &&
-      integrationByPlatform.has('linkedin-page')
-        ? 'linkedin-page'
-        : platform;
-
     const postsToCreate = materializedPosts
       .filter(({ node }) => !existingById.has(node.id))
       // A Reddit post needs EITHER a resolved target or a parked marker. Having
@@ -529,7 +503,7 @@ export class OperationPlanRepository {
         // publishMethod. This avoids silently locking a plan post to whichever
         // integration happened to exist (or be oldest) when the plan was
         // generated, letting the user pick the account when they schedule.
-        const resolvedPlatform = resolvePlatform(platform);
+        const resolvedPlatform = platform;
         const title = postTitleFromTheme(item.themeTitle);
         // On title-submitting platforms (reddit/hackernews/medium/devto) the
         // title is published from Post.title, so a headline the model repeated
@@ -550,6 +524,8 @@ export class OperationPlanRepository {
           publishDate: jitteredPublishDate(item),
           organizationId: plan.organizationId,
           integrationId: null,
+          accountSelectionMode: 'INHERIT',
+          accountResolution: 'DRAFT',
           // No bound account at generation time (see comment above), so this is
           // the only record of the post's platform until schedule time binds an
           // integration — mirrors settings.__type below.
@@ -571,13 +547,7 @@ export class OperationPlanRepository {
           title,
           description: null,
           settings: JSON.stringify({
-            // __type mirrors the RESOLVED platform (matches the rest of the
-            // codebase: __type is always set from the bound integration's
-            // providerIdentifier, e.g. posts.service.ts / autopost.service.ts),
-            // so a 'linkedin' plan post that resolved to a linkedin-page
-            // integration is tagged consistently for any code that reads
-            // settings.__type directly (e.g. getSocialTaskQueue) instead of
-            // going through post.integration.
+            // Generation keeps the canonical platform. Enqueue resolves the actor.
             __type: resolvedPlatform,
             campaignId: payload?.campaignId ?? plan.campaignId,
             contentId: item.contentId,
@@ -661,10 +631,9 @@ export class OperationPlanRepository {
       });
 
     const result = postsToCreate.length
-      ? await this._post.model.post.createMany({
-          data: postsToCreate,
-          skipDuplicates: true,
-        })
+      ? this._planExecution
+        ? await this._planExecution.materialize(plan.organizationId, plan.id, postsToCreate)
+        : await this._post.model.post.createMany({ data: postsToCreate, skipDuplicates: true })
       : { count: 0 };
 
     // Single-active-plan semantics: the latest materialized plan supersedes every

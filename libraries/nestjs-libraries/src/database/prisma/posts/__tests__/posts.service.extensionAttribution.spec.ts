@@ -183,6 +183,7 @@ describe('attributeExtensionPublisher — what the stamp may touch', () => {
         organizationId: 'org-1',
         group: 'g1',
         deletedAt: null,
+        AND: [{ OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] }],
         // Never overwrite an account the user chose when scheduling.
         integrationId: null,
         // A resolution for one platform can't land on a row of another.

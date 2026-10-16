@@ -132,10 +132,10 @@ describe('claimDueExtensionPublishPosts (lease)', () => {
     // racing puller can't steal an already-leased row.
     const claim = updateMany.mock.calls[0][0];
     expect(claim.where).toEqual({
-      id: { in: ['p1', 'p2'] },
-      state: 'QUEUE',
-      OR: [{ releaseId: null }, { claimedAt: { lte: cutoff } }],
+      AND: [candidateWhere.AND[0], candidateWhere.AND[1], { id: { in: ['p1', 'p2'] } }],
     });
+    expect(candidateWhere.AND[0].organizationId).toBe('org-1');
+    expect(candidateWhere.AND[0].AND).toContainEqual({ OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] });
     expect(claim.data).toEqual({ releaseId: 'ext_token_123', claimedAt: now });
 
     // Read-back is scoped to OUR token — the rows we actually won.
@@ -181,6 +181,7 @@ describe('schedulePostGroupToQueue', () => {
       group: 'plan-1:c1:x',
       state: 'DRAFT',
       deletedAt: null,
+      AND: [{ OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] }],
     });
     expect(arg.data).toEqual({ state: 'QUEUE', publishMethod: 'EXTENSION' });
   });

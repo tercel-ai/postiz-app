@@ -69,6 +69,7 @@ describe('EngageRepository.recordReplyAttemptFailure — the row stays sendable'
     await repo.recordReplyAttemptFailure('org-1', 'r1', 'network');
 
     expect(postUpdateMany.mock.calls[0][0].where).toEqual({
+      sendIntentId: null,
       id: 'p1',
       state: { in: ['DRAFT', 'QUEUE'] },
     });

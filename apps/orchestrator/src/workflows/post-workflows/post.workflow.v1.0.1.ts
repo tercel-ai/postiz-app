@@ -5,6 +5,7 @@ import {
   continueAsNew,
   proxyActivities,
   sleep,
+  workflowInfo,
 } from '@temporalio/workflow';
 import dayjs from 'dayjs';
 import { Integration } from '@prisma/client';
@@ -145,6 +146,25 @@ export async function postWorkflowV101({
         new Date(freshPost.publishDate).getTime() !== new Date(post.publishDate).getTime()) {
       return;
     }
+  }
+
+  if (post.executionProtocol === 'ACCOUNT_BOUND_V1') {
+    const safe = proxyTaskQueueHeavy(taskQueue, true);
+    const execution = await safe.reserveCoordinatedSend(organizationId, post.id, `${workflowInfo().workflowId}:${workflowInfo().runId}`);
+    if (execution.status === 'CAPABILITY_UNSUPPORTED') return;
+    for (let index = 0; index < postsListBefore.length; index++) {
+      for (;;) {
+        const result = await safe.sendCoordinatedSegment(organizationId, execution.executionId, index);
+        if (result.status === 'WAIT' && result.waitUntil) {
+          await sleep(Math.max(0, new Date(result.waitUntil).getTime() - Date.now()));
+          continue;
+        }
+        if (result.status !== 'CONFIRMED') return;
+        break;
+      }
+    }
+    await syncEngageOnPublish(post.id);
+    return;
   }
 
   const isRecurring = !!(post as any).intervalInDays;

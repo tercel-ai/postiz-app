@@ -653,6 +653,29 @@ describe('OperationPlanService.create', () => {
     return { result, background };
   }
 
+  it('rejects experimental account selection before task lookup, generation, billing or persistence', async () => {
+    const { service, repo, aiseeClient, creditService, openaiService } = createGenerationDependencies({});
+    const input = { taskId: 'task-1', startAt: '2030-01-01T00:00:00.000Z', endAt: '2030-01-02T00:00:00.000Z', platforms: ['x'], executionRoutes: { x: { POST: { integrationId: 'account' } } } };
+    for (const options of [{}, { dryRun: true }]) {
+      await expect(service.create('org-1', 'proj-1', input, options)).rejects.toMatchObject({
+        status: 400, response: { code: 'PLAN_ACCOUNT_SELECTION_MOVED' },
+      });
+    }
+    expect(aiseeClient.getTaskDetail).not.toHaveBeenCalled();
+    expect(repo.create).not.toHaveBeenCalled();
+    expect(creditService.hasCredits).not.toHaveBeenCalled();
+    expect(openaiService.generateStructuredText).not.toHaveBeenCalled();
+  });
+  it('retains historical account snapshots when returning an existing plan without new selection input', async () => {
+    const { service, repo, creditService, openaiService } = createGenerationDependencies({});
+    const existing = makePlan({ startsAt: new Date('2030-01-01T00:00:00.000Z'), endsAt: new Date('2030-01-02T00:00:00.000Z'), executionRevision: 2, executionRoutes: { version: 1, platforms: {} } });
+    repo.findManyByTaskId.mockResolvedValue([existing]);
+    const result = await service.create('org-1', 'proj-1', { taskId: 'task-1', startAt: '2030-01-01T00:00:00.000Z', endAt: '2030-01-02T00:00:00.000Z', platforms: ['x'] });
+    expect(result).toMatchObject({ id: 'plan-1', executionRevision: 2, executionRoutes: existing.executionRoutes });
+    expect(repo.create).not.toHaveBeenCalled();
+    expect(creditService.hasCredits).not.toHaveBeenCalled();
+    expect(openaiService.generateStructuredText).not.toHaveBeenCalled();
+  });
   it('persists a GENERATING stub and returns immediately, then generates + bills in the background (BILLING_PENDING -> READY + materialize)', async () => {
     const { repo, creditService, service } = createGenerationDependencies({
       contentItems: [],
@@ -1092,10 +1115,7 @@ describe('OperationPlanService.create', () => {
     });
   });
 
-  // The preview must match what materializePlanPosts would actually attach an
-  // integration to (personal linkedin vs company linkedin-page) — otherwise a
-  // dry-run for an org with only a Page integration would misleadingly show
-  // 'linkedin' even though the real plan would publish through 'linkedin-page'.
+  // Generation keeps the canonical platform; enqueue selects the authorized actor.
   describe('dryRun linkedin preview resolution', () => {
     const linkedinFixture = {
       contentItems: [
@@ -1113,7 +1133,7 @@ describe('OperationPlanService.create', () => {
       warnings: [],
     };
 
-    it('previews "linkedin-page" when the org only has a company page integration connected', async () => {
+    it('keeps canonical linkedin even when only a company page is connected', async () => {
       const { repo, service } = createGenerationDependencies(linkedinFixture);
       repo.getConnectedPlatforms.mockResolvedValue(['linkedin-page']);
 
@@ -1124,7 +1144,7 @@ describe('OperationPlanService.create', () => {
         platforms: ['linkedin'],
       }, { dryRun: true });
 
-      expect(result.contentItems[0].platforms[0].platform).toBe('linkedin-page');
+      expect(result.contentItems[0].platforms[0].platform).toBe('linkedin');
     });
 
     it('previews "linkedin" when the org has a personal integration connected (even if a page is also connected)', async () => {

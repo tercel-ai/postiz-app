@@ -1,3 +1,4 @@
+import { controlledSubmit, currentSendContext } from '../extension/controlled-api-submit';
 import { timer } from '@gitroom/helpers/utils/timer';
 import { Integration } from '@prisma/client';
 import { ApplicationFailure } from '@temporalio/activity';
@@ -214,7 +215,9 @@ export abstract class SocialAbstract {
     totalRetries = 0,
     ignoreConcurrency = false
   ): Promise<Response> {
-    const request = await fetch(url, options);
+    const controlledMutation = !!currentSendContext() && (options.method ?? 'GET').toUpperCase() === 'POST' && /^https:\/\/oauth\.reddit\.com\/api\/(comment|submit)(?:\?|$)/.test(url);
+    const request = await (controlledMutation ? controlledSubmit(() => fetch(url, options)) : fetch(url, options));
+    if (controlledMutation && !request.ok) throw new Error(`CONTROLLED_PLATFORM_HTTP_${request.status}`);
 
     if (request.status === 200 || request.status === 201) {
       return request;

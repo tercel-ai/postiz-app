@@ -316,6 +316,7 @@ describe('EngageRepository.closeUnconfirmedReply', () => {
     await repo.closeUnconfirmedReply('org-1', 'sent-1', 'unconfirmed');
 
     expect(postUpdateMany.mock.calls[0][0].where).toEqual({
+      sendIntentId: null,
       id: 'p1',
       state: { in: ['DRAFT', 'QUEUE'] },
     });

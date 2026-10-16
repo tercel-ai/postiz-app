@@ -1,3 +1,4 @@
+import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
 import {
   Body,
   Controller,
@@ -8,6 +9,7 @@ import {
   Post,
   Put,
   Query,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
@@ -26,8 +28,12 @@ import {
   ExtensionPublishConfigService,
 } from '@gitroom/nestjs-libraries/database/prisma/posts/extension-publish-config.service';
 import { SuperAdmin } from '@gitroom/backend/services/auth/admin/super-admin.decorator';
+import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
+import { User } from '@prisma/client';
+import { SEND_ACCOUNT_POLICY_KEY, SendPolicyService } from '@gitroom/nestjs-libraries/extension/send-policy.service';
+import { SaveSystemSendPolicyDto } from '@gitroom/nestjs-libraries/extension/send-policy.dto';
 
-const RESERVED_KEYS = ['ai_model_pricing'];
+const RESERVED_KEYS = ['ai_model_pricing', SEND_ACCOUNT_POLICY_KEY];
 
 function safePage(val?: string): number {
   const n = val ? Number(val) : 1;
@@ -49,7 +55,8 @@ export class AdminSettingsController {
     private _aiPricingService: AiPricingService,
     private _engageScanConfigService: EngageScanConfigService,
     private _extensionPublishConfigService: ExtensionPublishConfigService,
-    private _integrationManager: IntegrationManager
+    private _integrationManager: IntegrationManager,
+    private _sendPolicy?: SendPolicyService
   ) {}
 
   // ============ Social providers ============
@@ -194,6 +201,27 @@ export class AdminSettingsController {
       key: EXTENSION_PUBLISH_SEGMENT_GAP_KEY,
       value: await this._extensionPublishConfigService.getSegmentGaps(),
     };
+  }
+
+  private sendPolicy() {
+    if (!isAccountBoundSendingEnabled() || !this._sendPolicy)
+      throw new ServiceUnavailableException('ACCOUNT_BINDINGS_NOT_ENABLED');
+    return this._sendPolicy;
+  }
+
+  @Get('/settings/sending.account_selection_policy')
+  async getSendPolicy() {
+    return { key: SEND_ACCOUNT_POLICY_KEY, value: await this.sendPolicy().getSystem() };
+  }
+
+  @Post('/settings/sending.account_selection_policy')
+  saveSendPolicy(@GetUserFromRequest() user: User, @Body() body: SaveSystemSendPolicyDto) {
+    return this.sendPolicy().saveSystem(user.id, body);
+  }
+
+  @Put('/settings/sending.account_selection_policy')
+  putSendPolicy(@GetUserFromRequest() user: User, @Body() body: SaveSystemSendPolicyDto) {
+    return this.saveSendPolicy(user, body);
   }
 
   @Get('/settings/:key')

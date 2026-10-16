@@ -1,3 +1,5 @@
+import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { oauthSocialIdentity } from '@gitroom/nestjs-libraries/extension/social-account-identity.service';
 import {
   Body,
   Controller,
@@ -11,7 +13,10 @@ import {
   Query,
   Req,
   UseFilters,
-  Logger
+  Logger,
+  Headers,
+  Optional,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { Request } from 'express';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
@@ -46,6 +51,7 @@ import { TelegramProvider } from '@gitroom/nestjs-libraries/integrations/social/
 import {
   AuthorizationActions,
   Sections,
+  SubscriptionException,
 } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
 import { uniqBy } from 'lodash';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
@@ -56,6 +62,7 @@ import { PermissionsService } from '@gitroom/backend/services/auth/permissions/p
 // columns (resolveExtensionPublisher): one definition of "this reading is
 // too old to act on", so diagnostics and attribution can never disagree.
 import { isExtensionSessionStale } from '@gitroom/nestjs-libraries/database/prisma/integrations/extension-session.utils';
+import { ExtensionNodeService } from '@gitroom/nestjs-libraries/extension/extension-node.service';
 
 @ApiTags('Integrations')
 @Controller('/integrations')
@@ -67,7 +74,8 @@ export class IntegrationsController {
     private _refreshIntegrationService: RefreshIntegrationService,
     private _dataTicksService: DataTicksService,
     private _aiseeClient: AiseeCreditService,
-    private _permissionsService: PermissionsService
+    private _permissionsService: PermissionsService,
+    @Optional() private _extensionNodes?: ExtensionNodeService
   ) {}
 
   private resolveCallbackBaseUrl(origin?: string): string {
@@ -146,8 +154,11 @@ export class IntegrationsController {
       },
     },
   })
-  async getIntegrationList(@GetOrgFromRequest() org: Organization) {
+  async getIntegrationList(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user?: User) {
     const integrations = await this._integrationService.getIntegrationsList(org.id);
+    const views = user && isAccountBoundSendingEnabled() && this._extensionNodes
+      ? await this._extensionNodes.accountViews(org.id, user.id, integrations)
+      : undefined;
 
     // Fire-and-forget: sync account metrics in background
     for (const p of integrations) {
@@ -163,6 +174,7 @@ export class IntegrationsController {
           return {
             name: p.name,
             id: p.id,
+            ...(views?.get(p.id) ?? {}),
             internalId: p.internalId,
             disabled: p.disabled,
             editor: findIntegration.editor,
@@ -211,8 +223,21 @@ export class IntegrationsController {
   async reportExtensionSession(
     @GetOrgFromRequest() org: Organization,
     @GetUserFromRequest() user: User,
-    @Body() body: ExtensionSessionReportDto
+    @Body() body: ExtensionSessionReportDto,
+    @Headers('x-extension-node-id') nodeId?: string,
+    @Headers('x-extension-node-token') nodeToken?: string,
+    @Headers('x-extension-protocol-version') protocolVersion?: string
   ) {
+    if (nodeId || nodeToken || protocolVersion || body.reportSequence !== undefined) {
+      if (!isAccountBoundSendingEnabled() || !this._extensionNodes) throw new ServiceUnavailableException('EXTENSION_NODES_NOT_ENABLED');
+      if (protocolVersion && protocolVersion !== 'ACCOUNT_BOUND_V1') throw new HttpException('EXTENSION_PROTOCOL_UNSUPPORTED', 400);
+      let maxChannels: number | null | undefined;
+      try { maxChannels = await this._permissionsService.channelCreationLimit(org.id, user.id); }
+      catch { /* Existing actors still report when creation entitlement is unavailable. */ }
+      return this._extensionNodes.report(org.id, user.id, nodeId, nodeToken, body, {
+        canCreateChannels: maxChannels !== undefined, maxChannels,
+      });
+    }
     let canCreateChannels = false;
     try {
       const ability = await this._permissionsService.check(
@@ -241,6 +266,24 @@ export class IntegrationsController {
     return this._integrationService.reportExtensionSession(org.id, body, {
       canCreateChannels,
     });
+  }
+
+  @Post('/extension-session')
+  reportExtensionSessionPost(
+    @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
+    @Body() body: ExtensionSessionReportDto,
+    @Headers('x-extension-node-id') nodeId?: string,
+    @Headers('x-extension-node-token') nodeToken?: string,
+    @Headers('x-extension-protocol-version') protocolVersion?: string
+  ) {
+    return this.reportExtensionSession(org, user, body, nodeId, nodeToken, protocolVersion);
+  }
+
+  @Post('/:id/identity/verify')
+  verifyStableIdentity(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User, @Param('id') id: string) {
+    if (!isAccountBoundSendingEnabled()) throw new ServiceUnavailableException('ACCOUNT_BINDINGS_NOT_ENABLED');
+    return this._integrationService.verifyStableIdentity(org.id,user.id,id);
   }
 
   @Post('/:id/settings')
@@ -365,15 +408,16 @@ export class IntegrationsController {
   }
 
   @Get('/social/:integration')
-  @CheckPolicies([AuthorizationActions.Create, Sections.CHANNEL])
   async getIntegrationUrl(
     @Req() req: Request,
     @GetOrgFromRequest() org: Organization,
     @Param('integration') integration: string,
     @Query('refresh') refresh: string,
     @Query('externalUrl') externalUrl: string,
-    @Query('onboarding') onboarding: string
+    @Query('onboarding') onboarding: string,
+    @GetUserFromRequest() user: User
   ) {
+    await this.assertUnscopedChannelCreation(org, user, integration);
     if (
       !this._integrationManager
         .getAllowedSocialsIntegrations()
@@ -519,7 +563,8 @@ export class IntegrationsController {
   @Get('/integration-project/list')
   async listProjectIntegrations(
     @GetOrgFromRequest() org: Organization,
-    @Query('projectId') projectId: string
+    @Query('projectId') projectId: string,
+    @GetUserFromRequest() user?: User
   ) {
     if (!projectId) {
       throw new HttpException('projectId is required', 400);
@@ -528,6 +573,9 @@ export class IntegrationsController {
       org.id,
       projectId
     );
+    const views = user && isAccountBoundSendingEnabled() && this._extensionNodes
+      ? await this._extensionNodes.accountViews(org.id, user.id, rows.map(row => ({ id: row.integration.id, disabled: row.integration.disabled || row.disabled })))
+      : undefined;
     return {
       integrations: rows.map((row) => {
         const p = row.integration;
@@ -540,6 +588,7 @@ export class IntegrationsController {
           internalId: p.internalId,
           disabled: p.disabled,
           projectDisabled: row.disabled,
+          ...(views?.get(p.id) ?? {}),
           editor: findIntegration.editor,
           picture: p.picture || '/no-picture.jpg',
           identifier: p.providerIdentifier,
@@ -769,13 +818,14 @@ export class IntegrationsController {
   }
 
   @Post('/social/:integration/connect')
-  @CheckPolicies([AuthorizationActions.Create, Sections.CHANNEL])
   @UseFilters(new NotEnoughScopesFilter())
   async connectSocialMedia(
     @GetOrgFromRequest() org: Organization,
     @Param('integration') integration: string,
-    @Body() body: ConnectIntegrationDto
+    @Body() body: ConnectIntegrationDto,
+    @GetUserFromRequest() user: User
   ) {
+    await this.assertUnscopedChannelCreation(org, user, integration);
     if (
       !this._integrationManager
         .getAllowedSocialsIntegrations()
@@ -903,7 +953,8 @@ export class IntegrationsController {
       throw new NotEnoughScopes('Invalid API key');
     }
 
-    if (refresh && String(id) !== String(refresh)) {
+    if (refresh && (oauthSocialIdentity(integration, 'legacy', String(id))?.id ?? String(id)) !==
+      (oauthSocialIdentity(integration, 'legacy', String(refresh))?.id ?? String(refresh))) {
       console.error(
         `[Refresh mismatch] provider=${integration}, oauth_id="${String(id)}", expected_internalId="${String(refresh)}", state=${body.state}`
       );
@@ -955,7 +1006,9 @@ export class IntegrationsController {
           ? AuthService.fixedEncryption(
               Buffer.from(body.code, 'base64').toString()
             )
-          : undefined
+          : undefined,
+        'legacy',
+        isAccountBoundSendingEnabled() ? { maxChannels: await this._permissionsService.channelCreationLimit(org.id, user.id) } : undefined
       );
 
     this._refreshIntegrationService
@@ -995,6 +1048,15 @@ export class IntegrationsController {
       ...createUpdate,
       onboarding: onboarding === 'true',
     };
+  }
+
+  private async assertUnscopedChannelCreation(org: Organization, user: User, provider: string) {
+    // Stable actors are counted only after identity resolution, inside the creation transaction.
+    if (isAccountBoundSendingEnabled() && ['x', 'reddit'].includes(provider)) return;
+    const ability = await this._permissionsService.check(org.id, org.createdAt,
+      (org as any).users[0].role, [[AuthorizationActions.Create, Sections.CHANNEL]], user.id);
+    if (!ability.can(AuthorizationActions.Create, Sections.CHANNEL))
+      throw new SubscriptionException({section:Sections.CHANNEL,action:AuthorizationActions.Create});
   }
 
   @Post('/disable')

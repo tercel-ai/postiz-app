@@ -12,6 +12,7 @@ import {
   EngageOpportunityStatus,
   State,
 } from '@prisma/client';
+import { publicIntegration } from '../extension/public-integration';
 import {
   PrismaRepository,
   PrismaTransaction,
@@ -2044,7 +2045,7 @@ export class EngageRepository {
       orderBy: { createdAt: 'asc' },
     });
     return integrations.map(({ integrationProjects, ...integration }: any) => ({
-      ...integration,
+      ...publicIntegration(integration),
       engageEnabled: integrationProjects?.[0]?.engageEnabled ?? true,
     }));
   }
@@ -3392,7 +3393,7 @@ export class EngageRepository {
       // the row either way: `state: 'ERROR'` already excludes it from
       // claimDueEngageReplies, whose where-clause requires `post.state: 'QUEUE'`.
       const closed = await tx.post.updateMany({
-        where: { id: { in: parked.map((p) => p.postId) }, state: 'QUEUE' },
+        where: { sendIntentId: null, id: { in: parked.map((p) => p.postId) }, state: 'QUEUE' },
         data: { state: 'ERROR', error, releaseId: null },
       });
       // `retired` reports what actually happened, not what was asked for: an
@@ -3571,7 +3572,7 @@ export class EngageRepository {
       // between the extension's attempt and this call went out for real, and
       // marking it ERROR would contradict a confirmed send. An already-ERROR row
       // keeps the reason that closed it.
-      where: { id: reply.postId, state: { in: ['DRAFT', 'QUEUE'] } },
+      where: { sendIntentId: null, id: reply.postId, state: { in: ['DRAFT', 'QUEUE'] } },
       // `claimedAt` is preserved — see markOpportunityTargetGone for why. It
       // matters most HERE: this method's own premise is that the send FIRED, so
       // this row's claimedAt is the most recent moment the platform account was
@@ -3596,7 +3597,7 @@ export class EngageRepository {
       if (!reply) throw new NotFoundException('Sent reply not found');
 
       const closed = await tx.post.updateMany({
-        where: {
+        where: { sendIntentId: null,
           id: reply.postId,
           state: { in: ['DRAFT', 'QUEUE', 'ERROR'] },
           releaseURL: null,
@@ -3666,7 +3667,7 @@ export class EngageRepository {
     if (!reply) throw new NotFoundException('Sent reply not found');
 
     const recorded = await this._post.model.post.updateMany({
-      where: {
+      where: { sendIntentId: null,
         id: reply.postId,
         // Re-asserted at write time so a report racing a commit cannot stamp a
         // failure onto a reply that is already live.
@@ -3891,6 +3892,7 @@ export class EngageRepository {
       inputData: object;
       /** Automated replies queue for sending; a person's draft waits for them. */
       state?: 'DRAFT' | 'QUEUE';
+      coordinatedAutomatic?: boolean;
     },
     projectId?: string | null
   ) {
@@ -3912,7 +3914,7 @@ export class EngageRepository {
           organizationId,
           projectId: projectId ?? null,
           opportunityId,
-          post: { state },
+          post: { state, sendIntentId: null, ...(data.coordinatedAutomatic ? { executionProtocol: 'ACCOUNT_BOUND_V1', sendOrigin: 'AUTOMATION' } : state === 'DRAFT' ? { sendOrigin: { not: 'AUTOMATION' } } : {}) },
         },
         select: {
           id: true,
@@ -3925,9 +3927,10 @@ export class EngageRepository {
 
       if (existing) {
         await tx.post.update({
-          where: { id: existing.postId },
+          where: { sendIntentId: null, id: existing.postId },
           data: {
             content: data.content,
+            ...(data.coordinatedAutomatic ? { executionProtocol: 'ACCOUNT_BOUND_V1', sendOrigin: 'AUTOMATION' } : {}),
             // Re-stamp the platform on every save, so a row written before this
             // was fixed repairs itself the next time its draft is edited rather
             // than waiting on the backfill migration. Idempotent: an
@@ -3958,6 +3961,7 @@ export class EngageRepository {
           content: data.content,
           publishDate: new Date(),
           state,
+          ...(data.coordinatedAutomatic ? { executionProtocol: 'ACCOUNT_BOUND_V1', sendOrigin: 'AUTOMATION' } : {}),
           source: 'engage',
           image: '[]',
           // The opportunity's OWN platform, verbatim. This used to be
@@ -6442,7 +6446,7 @@ export class EngageRepository {
         }),
       },
       orderBy: { createdAt: 'desc' },
-      include: { post: { select: { id: true, state: true } } },
+      include: { post: { select: { id: true, state: true, sendIntentId: true } } },
     });
   }
 
@@ -6648,7 +6652,7 @@ export class EngageRepository {
     }
 
     return this._post.model.post.update({
-      where: { id: reply.postId },
+      where: { sendIntentId: null, id: reply.postId },
       data: {
         // Empty/absent URL persists as null (never '') so every "awaiting its
         // link" check — which tests releaseURL for null — keeps working.
@@ -6822,7 +6826,7 @@ export class EngageRepository {
     });
 
     await this._post.model.post.update({
-      where: { id: reply.postId },
+      where: { sendIntentId: null, id: reply.postId },
       data: {
         state: 'PUBLISHED',
         // Only when the extension captured one — never overwrite a stored URL

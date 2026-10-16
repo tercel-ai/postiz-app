@@ -660,3 +660,27 @@ describe('PermissionsService.check', () => {
     });
   });
 });
+
+describe('channel creation entitlement snapshot',()=>{
+  afterEach(()=>vi.unstubAllEnvs());
+  it('returns the user channel cap independently of the current row count',async()=>{
+    const mocks=createMocks();mocks.usersService.getUserLimits.mockResolvedValue({postChannelLimit:2,postSendLimit:100} as any);
+    expect(await createService(mocks).channelCreationLimit(ORG_ID,USER_ID)).toBe(2);
+    expect(mocks.integrationService.getIntegrationsList).not.toHaveBeenCalled();
+  });
+  it('preserves unlimited active user packages',async()=>{
+    const mocks=createMocks();mocks.usersService.getUserLimits.mockResolvedValue({postChannelLimit:null,periodEnd:'future'} as any);
+    vi.stubEnv('STRIPE_PUBLISHABLE_KEY','stripe');
+    expect(await createService(mocks).channelCreationLimit(ORG_ID,USER_ID)).toBeNull();
+  });
+  it('uses the Stripe allowance only when there is no explicit user package',async()=>{
+    const mocks=createMocks();mocks.usersService.getUserLimits.mockResolvedValue({postChannelLimit:null} as any);
+    mocks.subscriptionService.getSubscriptionByOrganizationId.mockResolvedValue({subscriptionTier:'FREE',totalChannels:7} as any);
+    vi.stubEnv('STRIPE_PUBLISHABLE_KEY','stripe');
+    expect(await createService(mocks).channelCreationLimit(ORG_ID,USER_ID)).toBe(7);
+  });
+  it('allows self-hosted unlimited creation without an explicit cap',async()=>{
+    const mocks=createMocks();mocks.usersService.getUserLimits.mockResolvedValue(null as any);vi.stubEnv('STRIPE_PUBLISHABLE_KEY','');
+    expect(await createService(mocks).channelCreationLimit(ORG_ID,USER_ID)).toBeNull();
+  });
+});

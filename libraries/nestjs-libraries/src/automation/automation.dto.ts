@@ -8,8 +8,12 @@ import {
   IsString,
   registerDecorator,
   ValidationOptions,
+  ValidateIf,
+  MaxLength,
 } from 'class-validator';
+import { Transform } from 'class-transformer';
 import { IsReplyPolicyMap } from '@gitroom/nestjs-libraries/engage/reply-policy.validator';
+import { AccountBindingMap, IsAccountBindingMap } from '@gitroom/nestjs-libraries/extension/send-binding.dto';
 
 /** 'HH:MM', 24-hour. Same shape the admin-level publish window setting uses. */
 const CLOCK_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -85,10 +89,17 @@ export class SaveAutomationPublishingDto {
   @IsBoolean()
   enabled?: boolean;
 
+  @ValidateIf(body => body.platforms !== undefined || body.accounts === undefined)
   @IsArray()
   @ArrayMaxSize(50)
   @IsString({ each: true })
-  platforms!: string[];
+  platforms?: string[];
+
+  @ValidateIf(body => body.accounts !== undefined) @IsAccountBindingMap()
+  accounts?: AccountBindingMap;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  requestId?: string;
 
   // Per-platform publish-time windows, keyed by platform id. Only the platforms
   // named here are changed; a platform's stored window survives a save that
@@ -121,14 +132,20 @@ export class SaveAutomationPublishingDto {
  * half of Automation: whether Engage runs for this project, how unattended it
  * is, and the per-platform reply policy.
  *
- * Per-ACCOUNT authorization is deliberately not here: Automation sends through
- * the extension's own browser session and never picks an account. Choosing a
- * specific account is a per-post edit, on a different surface.
+ * Optional account defaults are saved independently of participation flags;
+ * omitting accounts leaves existing defaults unchanged.
  *
  * Every field is optional and only what is present is written, so a client can
  * flip one switch without restating the rest.
  */
 export class SaveAutomationRepliesDto {
+  // Retired array payloads were ignored; only the new versioned map is applied.
+  @Transform(({ value }) => Array.isArray(value) ? undefined : value)
+  @ValidateIf(body => body.accounts !== undefined) @IsAccountBindingMap()
+  accounts?: AccountBindingMap;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  requestId?: string;
   /**
    * The managed-reply switch — the ONLY switch this endpoint accepts, because
    * the Automation page has exactly one control for replying.

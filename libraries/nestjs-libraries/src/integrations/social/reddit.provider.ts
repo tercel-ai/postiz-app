@@ -441,6 +441,15 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
     return [...(await d.text()).matchAll(/<Location>(.*?)<\/Location>/g)][0][1];
   }
 
+  async getSendActor(integration: Integration) {
+    const response = await this.fetch('https://oauth.reddit.com/api/v1/me', {
+      headers: { Authorization: `Bearer ${integration.token}`, 'User-Agent': 'Aisee/1.0' },
+    });
+    const actor = await response.json();
+    if (!actor.id) throw new Error('REDDIT_ACTOR_PROBE_FAILED');
+    return { id: actor.id, idNamespace: 'reddit.user_id' };
+  }
+
   async post(
     id: string,
     accessToken: string,

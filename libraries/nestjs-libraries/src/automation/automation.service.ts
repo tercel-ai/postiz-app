@@ -1,4 +1,6 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { AutomaticSendProducerService } from '../extension/automatic-send-producer.service';
+import { BadRequestException, Injectable, Logger, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { Organization } from '@prisma/client';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { OperationPlanService } from '@gitroom/nestjs-libraries/database/prisma/operation-plan/operation-plan.service';
@@ -29,6 +31,9 @@ import {
   SaveAutomationRepliesDto,
 } from '@gitroom/nestjs-libraries/automation/automation.dto';
 import { EXTENSION_PUBLISHABLE_PLATFORMS } from '@gitroom/helpers/extension/post-publish';
+import { SendBindingService } from '@gitroom/nestjs-libraries/extension/send-binding.service';
+import { ExtensionNodeService } from '@gitroom/nestjs-libraries/extension/extension-node.service';
+import type { EngageConfigMetadata } from '@gitroom/nestjs-libraries/engage/engage-config-metadata';
 
 /**
  * The four keys the publishing half owns inside the shared
@@ -63,7 +68,10 @@ export class AutomationService {
     private readonly _engageService: EngageService,
     private readonly _engageRepository: EngageRepository,
     private readonly _projectPublishing: ProjectPublishingService,
-    private readonly _engageAutoReply: EngageAutoReplyService
+    private readonly _engageAutoReply: EngageAutoReplyService,
+    @Optional() private readonly _bindings?: SendBindingService,
+    @Optional() private readonly _extensionNodes?: ExtensionNodeService,
+    @Optional() private readonly _automaticSends?: AutomaticSendProducerService
   ) {}
 
   /**
@@ -76,7 +84,7 @@ export class AutomationService {
    * scan cursor per keyword, channel and tracked account — none of it shown
    * here).
    */
-  async getOverview(org: Organization, projectId: string) {
+  async getOverview(org: Organization, projectId: string, userId?: string) {
     const [
       config,
       publishing,
@@ -85,6 +93,7 @@ export class AutomationService {
       ceilings,
       warmupTiers,
       channelDailyLimits,
+      bindingRows,
     ] = await Promise.all([
       this._engageRepository.getConfigCore(org.id, projectId),
       this._projectPublishing.resolve(org.id, projectId),
@@ -98,6 +107,7 @@ export class AutomationService {
       this._engageAutoReply.getReplyDailyCeilings(),
       this._engageAutoReply.getReplyWarmupTiers(),
       this._engageAutoReply.getChannelDailyLimits(),
+      isAccountBoundSendingEnabled() && this._bindings ? this._bindings.list(org.id, projectId) : null,
     ]);
 
     // Resolved once so the hoisted default and the per-window overrides below
@@ -167,6 +177,10 @@ export class AutomationService {
       { ceilings, warmupTiers, channelDailyLimits }
     );
 
+    const views = this._extensionNodes && userId && bindingRows && isAccountBoundSendingEnabled()
+      ? await Promise.all((['POST', 'REPLY'] as const).map(action => this._extensionNodes!.accountViews(org.id, userId, bindingRows.filter(row => row.action === action && row.integrationId !== null).map(row => ({ id: row.integrationId!, disabled: row.accountDisabled })), action === 'POST' ? 'post' : 'reply')))
+      : null;
+
     return {
       projectId,
       // The master switch. Everything below it is only reachable when this is on
@@ -196,7 +210,7 @@ export class AutomationService {
         // They used to be a `platforms` array beside a `windows` map, which the
         // client had to cross-reference — and the array was a lossy projection
         // of the same information.
-        platforms: buildPublishingPlatforms(publishing, commonTimezone),
+        platforms: withAccountBindings(buildPublishingPlatforms(publishing, commonTimezone), bindingRows, 'POST', views?.[0]),
       },
       replies: {
         // Engage's post-SCAN switch — whether opportunities are discovered at
@@ -222,18 +236,8 @@ export class AutomationService {
           : {}),
         // ONE entry per platform, same shape rationale as publishing above.
         //
-        // Connected reply ACCOUNTS are deliberately absent, because Automation
-        // does not pick an account at all: it sends through the extension's own
-        // browser session, so the identity is whoever the user is already
-        // signed in as. Choosing a specific account is a per-post edit, on a
-        // different surface.
-        //
-        // Two smaller confirmations of the same conclusion:
-        // `IntegrationProject.engageEnabled` is never read by any gate (the
-        // reply driver does not filter on it, and pickXReplyIntegration matches
-        // by handle and ignores it), and this page had no per-account control to
-        // set it with — so listing accounts here only invited a managed-reply
-        // save to write an Engage-owned flag on every account at once.
+        // Versioned account defaults are appended without changing reply
+        // participation flags or rewriting already queued task identities.
         //
         // Each entry also carries its EFFECTIVE reply schedule — `activeHours`
         // and `dailyReplyLimit` with the defaults already applied — plus
@@ -245,7 +249,7 @@ export class AutomationService {
         // still driven on the default 8 AM–6 PM / 4-a-day schedule, so a client
         // rendering the stored blob alone would show blanks for hours the driver
         // is in fact enforcing.
-        platforms: withResolvedSchedule(
+        platforms: withAccountBindings(withResolvedSchedule(
           stripPublishingKeys(storedPolicies),
           repliesActive,
           lastSentAtByPlatform,
@@ -254,7 +258,7 @@ export class AutomationService {
           { minGapMinutes: pacing.minGapMinutes, sentTodayByPlatform },
           commonReplyTimezone,
           now
-        ),
+        ), bindingRows, 'REPLY', views?.[1]),
       },
     };
   }
@@ -272,14 +276,26 @@ export class AutomationService {
   async savePublishing(
     org: Organization,
     projectId: string,
-    dto: SaveAutomationPublishingDto
+    dto: SaveAutomationPublishingDto,
+    userId?: string
   ) {
+    if (isAccountBoundSendingEnabled()) {
+      if (!this._automaticSends) throw new ServiceUnavailableException('AUTOMATIC_SEND_PRODUCER_REQUIRED');
+      await this._automaticSends.assertOwnerAvailable(org.id, userId!);
+    }
+    const writer = dto.accounts !== undefined ? this.bindingWriter() : null;
+    if (writer && dto.platforms === undefined && dto.windows === undefined && dto.enabled === undefined && dto.commit === undefined) {
+      const result = await writer.save(org.id, userId!, projectId, 'POST', dto.accounts!, undefined, dto.requestId, dto);
+      await this.captureOwner(org.id, projectId, 'POST', userId);
+      return { saved: true, scheduled: null, rescheduled: null, uncommitted: null, bindings: result.bindings };
+    }
+    if (dto.accounts === undefined && dto.platforms === undefined && dto.windows === undefined && dto.enabled === undefined && dto.commit === undefined) throw new BadRequestException('Nothing to update');
     // Read BEFORE the write so the OFF -> ON transition is visible below. A
     // switch-on is the one save that must commit whether or not the client
     // asked for it — see the `shouldCommit` note further down.
     const before = await this._projectPublishing.resolve(org.id, projectId);
     const wasActive = isPublishingActive(before);
-    const requested = new Set(dto.platforms.map((p) => p.toLowerCase()));
+    const requested = new Set((dto.platforms ?? before.enabledPlatforms ?? []).map((p) => p.toLowerCase()));
     const existing = readEngageConfigMetadata(
       await this._engageRepository.getConfigCore(org.id, projectId)
     ).replyPolicies as Record<string, Record<string, unknown>>;
@@ -299,14 +315,14 @@ export class AutomationService {
       ])
     );
     // Turned off here → its queued plan posts go back to DRAFT.
-    const dropped = [...decisionsBefore]
+    const dropped = dto.platforms === undefined ? [] : [...decisionsBefore]
       .filter(([platform, on]) => on === true && !requested.has(platform))
       .map(([platform]) => platform);
     // Turned back on here → commit again, so the drafts this switch parked come
     // back. EXPLICITLY-off only: a platform being configured for the first time
     // has no parked drafts to restore, and treating that as a commit
     // instruction would queue a batch off a settings save.
-    const reEnabled = [...requested].filter(
+    const reEnabled = dto.platforms === undefined ? [] : [...requested].filter(
       (platform) => decisionsBefore.get(platform) === false
     );
 
@@ -317,6 +333,7 @@ export class AutomationService {
     const universe = new Set<string>([
       ...EXTENSION_PUBLISHABLE_PLATFORMS,
       ...Object.keys(existing).map((p) => p.toLowerCase()),
+      ...Object.keys(dto.windows ?? {}),
       ...requested,
     ]);
 
@@ -324,7 +341,7 @@ export class AutomationService {
       const window = dto.windows?.[platform];
       policies[platform] = {
         ...(policies[platform] ?? {}),
-        publishingEnabled: requested.has(platform),
+        ...(dto.platforms !== undefined ? { publishingEnabled: requested.has(platform) } : {}),
         ...(window
           ? {
               publishingWindowStart: window.start,
@@ -335,7 +352,8 @@ export class AutomationService {
       };
     }
 
-    await this._engageRepository.saveConfig(
+    const bindingResult = writer ? await writer.save(org.id, userId!, projectId, 'POST', dto.accounts!, settings => publishingSettings(settings, dto), dto.requestId, dto) : null;
+    if (!writer) await this._engageRepository.saveConfig(
       org.id,
       {
         metadata: {
@@ -345,6 +363,7 @@ export class AutomationService {
       },
       projectId
     );
+    await this.captureOwner(org.id, projectId, 'POST', userId);
 
     // Realign BEFORE committing, not after: this is the pass that knows about
     // the minimum gap between posts, and schedulePlanPosts' own per-post pass
@@ -394,7 +413,7 @@ export class AutomationService {
     const platformReEnabled = dto.enabled !== false && reEnabled.length > 0;
     const shouldCommit = dto.commit || switchedOn || platformReEnabled;
     if (!shouldCommit) {
-      return { saved: true, scheduled: null, rescheduled, uncommitted };
+      return { saved: true, scheduled: null, rescheduled, uncommitted, ...(bindingResult ? { bindings: bindingResult.bindings } : {}) };
     }
 
     const scheduled = await this._commitPlanPosts(
@@ -403,7 +422,7 @@ export class AutomationService {
       dto.publishMethod,
       dto.platforms
     );
-    return { saved: true, scheduled, rescheduled, uncommitted };
+    return { saved: true, scheduled, rescheduled, uncommitted, ...(bindingResult ? { bindings: bindingResult.bindings } : {}) };
   }
 
   /**
@@ -419,7 +438,11 @@ export class AutomationService {
    * workflows and kicks a scan whenever it is handed `enabled`, and a master
    * switch has no business doing either.
    */
-  async saveEnabled(org: Organization, projectId: string, enabled: boolean) {
+  async saveEnabled(org: Organization, projectId: string, enabled: boolean, userId?: string) {
+    if (isAccountBoundSendingEnabled()) {
+      if (!this._automaticSends) throw new ServiceUnavailableException('AUTOMATIC_SEND_PRODUCER_REQUIRED');
+      await this._automaticSends.assertOwnerAvailable(org.id, userId!);
+    }
     // Read before writing so the OFF→ON transition is visible. Only that
     // direction realigns: turning Automation off is a suspension, and a
     // suspended project's schedule must survive untouched so turning it back on
@@ -433,6 +456,8 @@ export class AutomationService {
       { metadata: { automationEnabled: enabled } },
       projectId
     );
+    await this.captureOwner(org.id, projectId, 'POST', userId);
+    await this.captureOwner(org.id, projectId, 'REPLY', userId);
 
     // Switching the master OFF puts automation's queued posts back to DRAFT —
     // the suspension the switch has always claimed to be. Unconditional on
@@ -504,7 +529,8 @@ export class AutomationService {
       planId,
       projectId,
       publishMethod,
-      platforms
+      platforms,
+      ...(isAccountBoundSendingEnabled() ? [{ userId: await this._automaticSends!.owner(orgId, projectId, 'POST'), origin: 'AUTOMATION' as const }] : [])
     );
   }
 
@@ -585,20 +611,34 @@ export class AutomationService {
    * Save the managed-reply half: the config flags and the per-platform reply
    * policy.
    *
-   * Per-ACCOUNT authorization is not part of this. Automation sends through the
-   * extension's own browser session and never picks an account, so there is
-   * nothing to authorize here; choosing a specific account is a per-post edit on
-   * a different surface. Writing `IntegrationProject.engageEnabled` from here
-   * meant a managed-reply save silently reached into an Engage setting that no
-   * gate even reads.
+   * Account defaults use their own versioned writer; this endpoint does not
+   * change IntegrationProject participation or rebind existing queued tasks.
    */
   async saveReplies(
     org: Organization,
     projectId: string,
-    dto: SaveAutomationRepliesDto
+    dto: SaveAutomationRepliesDto,
+    userId?: string
   ) {
-    if (dto.autoReplyEnabled === undefined && dto.policies === undefined) {
+    if (isAccountBoundSendingEnabled()) {
+      if (!this._automaticSends) throw new ServiceUnavailableException('AUTOMATIC_SEND_PRODUCER_REQUIRED');
+      await this._automaticSends.assertOwnerAvailable(org.id, userId!);
+    }
+    if (dto.autoReplyEnabled === undefined && dto.policies === undefined && dto.accounts === undefined) {
       throw new BadRequestException('Nothing to update');
+    }
+
+    if (dto.accounts !== undefined) {
+      const writer = this.bindingWriter();
+      const transform = dto.autoReplyEnabled === undefined && dto.policies === undefined ? undefined : (settings: EngageConfigMetadata) => ({ ...settings,
+        ...(dto.autoReplyEnabled !== undefined ? { autoReplyEnabled: dto.autoReplyEnabled } : {}),
+        ...(dto.policies !== undefined ? { replyPolicies: replaceReplyPolicies(settings.replyPolicies as Record<string, Record<string, unknown>>, dto.policies) } : {}),
+        ...(dto.autoReplyEnabled === true ? { scanEnabled: true } : {}),
+      });
+      const result = await writer.save(org.id, userId!, projectId, 'REPLY', dto.accounts, transform, dto.requestId, dto);
+      await this.captureOwner(org.id, projectId, 'REPLY', userId);
+      if (dto.autoReplyEnabled === true) await this._engageService.activateScanning(org);
+      return { saved: true as const, bindings: result.bindings };
     }
 
     let replyPolicies: Record<string, Record<string, unknown>> | undefined;
@@ -642,9 +682,39 @@ export class AutomationService {
       ...(replyPolicies !== undefined && { replyPolicies }),
     } as any);
 
+    await this.captureOwner(org.id, projectId, 'REPLY', userId);
     return { saved: true as const };
   }
 
+  private async captureOwner(org: string, project: string, action: 'POST' | 'REPLY', user?: string) {
+    if (isAccountBoundSendingEnabled()) await this._automaticSends!.saveOwner(org, project, action, user!);
+  }
+
+  private bindingWriter() {
+    if (!this._bindings || !isAccountBoundSendingEnabled()) throw new ServiceUnavailableException('ACCOUNT_BINDINGS_NOT_ENABLED');
+    return this._bindings;
+  }
+
+}
+
+function publishingSettings(settings: EngageConfigMetadata, dto: SaveAutomationPublishingDto): EngageConfigMetadata {
+  const requested = dto.platforms === undefined ? null : new Set(dto.platforms.map(p => p.toLowerCase()));
+  const policies = { ...settings.replyPolicies };
+  const platforms = new Set([...EXTENSION_PUBLISHABLE_PLATFORMS, ...Object.keys(policies), ...Object.keys(dto.windows ?? {}), ...(requested ?? [])]);
+  for (const platform of platforms) {
+    const window = dto.windows?.[platform];
+    policies[platform] = { ...policies[platform], ...(requested ? { publishingEnabled: requested.has(platform) } : {}), ...(window ? { publishingWindowStart: window.start, publishingWindowEnd: window.end, ...(window.timezone ? { publishingTimezone: window.timezone } : {}) } : {}) };
+  }
+  return { ...settings, replyPolicies: policies, ...(dto.enabled !== undefined ? { publishingEnabled: dto.enabled } : {}) };
+}
+
+function withAccountBindings<T extends object>(platforms: Record<string, T>, bindings: Array<{ platform: string; action: string; integrationId: string | null; revision: number; accountDisabled: boolean }> | null, action: 'POST' | 'REPLY', views?: Map<string, { sendAvailability: string; terminals: unknown[] }>) {
+  if (!bindings) return platforms;
+  const byPlatform = new Map(bindings.filter(row => row.action === action).map(row => [row.platform, row]));
+  return Object.fromEntries([...new Set([...Object.keys(platforms), ...byPlatform.keys()])].map(platform => {
+    const row = byPlatform.get(platform);
+    return [platform, { ...platforms[platform], accountBinding: row?.integrationId ? { integrationId: row.integrationId, revision: row.revision } : null, bindingRevision: row?.revision ?? 0, ...(row?.integrationId ? (row.accountDisabled ? { sendAvailability: 'ACCOUNT_DISABLED', terminals: views?.get(row.integrationId)?.terminals ?? [] } : views?.get(row.integrationId) ?? { sendAvailability: 'WAITING_FOR_TERMINAL', terminals: [] }) : {}) }];
+  })) as Record<string, T & { accountBinding: { integrationId: string; revision: number } | null; bindingRevision: number }>;
 }
 
 /**

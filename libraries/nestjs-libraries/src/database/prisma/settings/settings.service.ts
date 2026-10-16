@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
+import { SEND_ACCOUNT_POLICY_KEY } from '../../../extension/send-policy.constants';
 import { SettingsRepository } from './settings.repository';
 
 @Injectable()
@@ -19,10 +20,12 @@ export class SettingsService {
       defaultValue?: unknown;
     }
   ) {
+    if (key === SEND_ACCOUNT_POLICY_KEY) throw new BadRequestException('SEND_POLICY_MANAGED_SEPARATELY');
     return this._settingsRepository.set(key, value, options);
   }
 
   async delete(key: string) {
+    if (key === SEND_ACCOUNT_POLICY_KEY) throw new BadRequestException('SEND_POLICY_MANAGED_SEPARATELY');
     return this._settingsRepository.delete(key);
   }
 

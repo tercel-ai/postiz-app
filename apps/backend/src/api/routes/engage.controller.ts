@@ -1,4 +1,9 @@
+import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { Headers } from '@nestjs/common';
+import { SendExecutionService } from '@gitroom/nestjs-libraries/extension/send-execution.service';
 import { AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
+import { ExtensionExecutionReadyGuard } from '@gitroom/nestjs-libraries/extension/extension-execution.guard';
+import { ExtensionNodeService } from '@gitroom/nestjs-libraries/extension/extension-node.service';
 import {
   Body,
   Controller,
@@ -9,6 +14,8 @@ import {
   NotFoundException,
   Param,
   ParseArrayPipe,
+  Optional,
+  UseGuards,
   Patch,
   Post,
   Query,
@@ -120,7 +127,9 @@ export class EngageController {
     private _engageAutoReplyService: EngageAutoReplyService,
     private _platformPacing: PlatformPacingConfigService,
     private _ingestQuota: EngageIngestQuotaService,
-    private _redditTargets: RedditTargetResolutionService
+    private _redditTargets: RedditTargetResolutionService,
+    @Optional() private _extensionNodes?: ExtensionNodeService,
+    @Optional() private _sendExecutions?: SendExecutionService
   ) {}
 
   // ─── Extension scan loop ──────────────────────────────────────────────────
@@ -550,11 +559,15 @@ export class EngageController {
     summary: "List this org's X integrations with Engage reply settings",
   })
   @Get('/reply-accounts')
-  listReplyAccounts(
+  async listReplyAccounts(
     @GetOrgFromRequest() org: Organization,
-    @Query('projectId') projectId?: string
+    @Query('projectId') projectId?: string,
+    @GetUserFromRequest() user?: User
   ) {
-    return this._engageService.listReplyAccounts(org, projectId);
+    const accounts = await this._engageService.listReplyAccounts(org, projectId);
+    if (!user || !isAccountBoundSendingEnabled() || !this._extensionNodes) return accounts;
+    const views = await this._extensionNodes.accountViews(org.id, user.id, accounts.map(account => ({ id: account.id as string, disabled: account.disabled === true || account.engageEnabled === false })), 'reply');
+    return accounts.map(account => ({ ...account, ...views.get(account.id as string) }));
   }
 
   @ApiOperation({
@@ -597,7 +610,18 @@ export class EngageController {
       'Drafts due for unattended reply (extension pull; org-scoped, paced)',
   })
   @Post('/reply-due')
-  async getDueReplies(@GetOrgFromRequest() org: Organization) {
+  @UseGuards(ExtensionExecutionReadyGuard)
+  async getDueReplies(@GetOrgFromRequest() org: Organization, @Body() body?: { requestId?: string }, @GetUserFromRequest() user?: User, @Headers() headers?: Record<string, string>) {
+    if (headers?.['x-extension-node-id']) {
+      if (!this._sendExecutions || !user) throw new Error('SEND_COORDINATOR_REQUIRED');
+      if (this._extensionNodes) await this._extensionNodes.authenticate(org.id, user.id, headers['x-extension-node-id'], headers['x-extension-node-token']);
+      if (isAccountBoundSendingEnabled()) await this._engageAutoReplyService.getDueReplies(org, new Date(), { coordinated: true });
+      const [claimed, pacing] = await Promise.all([
+        this._sendExecutions.claim({ org: org.id, user: user.id, nodeId: headers['x-extension-node-id'], token: headers['x-extension-node-token'] }, { requestId: body?.requestId!, action: 'REPLY' }),
+        this._platformPacing.getPlatformPacing(),
+      ]);
+      return { due: claimed.items, pacing, executionProtocol: 'ACCOUNT_BOUND_V1' };
+    }
     const [due, pacing] = await Promise.all([
       this._engageAutoReplyService.getDueReplies(org),
       this._platformPacing.getPlatformPacing(),

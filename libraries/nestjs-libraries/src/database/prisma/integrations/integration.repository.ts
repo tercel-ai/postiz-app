@@ -1,5 +1,9 @@
+import { isAccountBoundSendingEnabled } from '../../../extension/account-bound-sending.config';
+import { SocialAccountIdentityService, oauthSocialIdentity } from '../../../extension/social-account-identity.service';
+import { sendHash, sendTransaction } from '../../../extension/send-coordination.utils';
+import { PrismaService } from '../prisma.service';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import dayjs from 'dayjs';
 import { Integration, Prisma } from '@prisma/client';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
@@ -178,6 +182,41 @@ export class IntegrationRepository {
     });
   }
 
+  async verifyStableIdentity(org: string, user: string, id: string,
+    probe: (account: Integration) => Promise<{id:string;idNamespace:string}>) {
+    const db = this._integration.model as PrismaService;
+    const member = async (tx: Prisma.TransactionClient) => {
+      const row = await tx.userOrganization.findUnique({where:{userId_organizationId:{userId:user,organizationId:org}}});
+      if (!row || row.disabled || !['ADMIN','SUPERADMIN'].includes(row.role))
+        throw new ForbiddenException('ACCOUNT_IDENTITY_ADMIN_REQUIRED');
+    };
+    await member(db);
+    const original = await db.integration.findFirst({where:{id,organizationId:org,deletedAt:null}});
+    if (!original) throw new NotFoundException('ACCOUNT_NOT_FOUND');
+    if (!['x','reddit','linkedin-page'].includes(original.providerIdentifier) || !original.token)
+      throw new BadRequestException('ACCOUNT_IDENTITY_VERIFICATION_UNAVAILABLE');
+    let observed: {id:string;idNamespace:string};
+    try { observed = await probe(original); }
+    catch { throw new BadRequestException('ACCOUNT_IDENTITY_VERIFICATION_FAILED'); }
+    const identity = oauthSocialIdentity(original.providerIdentifier, observed.idNamespace, observed.id);
+    const stored = oauthSocialIdentity(original.providerIdentifier, original.identityNamespace, original.internalId);
+    if (!identity || !stored || identity.namespace !== stored.namespace || identity.id !== stored.id)
+      throw new BadRequestException('ACCOUNT_IDENTITY_MISMATCH');
+    const credentialHash = sendHash([original.token,original.refreshToken]);
+    return sendTransaction(db, async tx => {
+      await member(tx);
+      const current = await tx.integration.findFirst({where:{id,organizationId:org,deletedAt:null}});
+      if (!current || sendHash([current.token,current.refreshToken]) !== credentialHash ||
+          current.internalId !== original.internalId || current.identityNamespace !== original.identityNamespace)
+        throw new ConflictException('ACCOUNT_IDENTITY_CHANGED');
+      const result = await new SocialAccountIdentityService(db).resolveIn(tx,org,identity.platform,identity.namespace,identity.id,{
+        source:'OAUTH',canCreate:false,legacyProof:{integrationId:id,credentialHash,verifiedByUserId:user},
+      });
+      if (!result.account) throw new BadRequestException(result.blockCode ?? 'ACCOUNT_IDENTITY_UNRESOLVED');
+      return {integrationId:result.account.id,platform:identity.platform,identityNamespace:identity.namespace,internalId:identity.id};
+    });
+  }
+
   async createOrUpdateIntegration(
     additionalSettings:
       | {
@@ -202,14 +241,47 @@ export class IntegrationRepository {
     isBetweenSteps = false,
     refresh?: string,
     timezone?: number,
-    customInstanceDetails?: string
+    customInstanceDetails?: string,
+    identityNamespace = 'legacy',
+    creation?: { maxChannels: number | null }
   ) {
+    const stable = provider === 'linkedin-page' && isBetweenSteps
+      ? null : oauthSocialIdentity(provider, identityNamespace, internalId);
+    // Default-off deployments keep the legacy upsert. Previously normalized
+    // identities still use the shared resolver so disabling cannot create aliases.
+    const known = stable && !isAccountBoundSendingEnabled() && identityNamespace === 'legacy'
+      ? await this._integration.model.integration.findFirst({where:{organizationId:org,providerIdentifier:provider,identityNamespace:stable.namespace,internalId:stable.id}})
+      : null;
+    const coordinatedIdentity = isAccountBoundSendingEnabled() || identityNamespace !== 'legacy' || !!known;
+    if (coordinatedIdentity && ['x', 'reddit'].includes(provider) && !stable)
+      throw new BadRequestException('ACCOUNT_IDENTITY_UNRESOLVED');
+    if (stable && coordinatedIdentity) {
+      const db = this._integration.model as PrismaService;
+      return sendTransaction(db, async tx => {
+        const resolved = await new SocialAccountIdentityService(db).resolveIn(tx, org, provider, stable.namespace, stable.id, {
+          source: 'OAUTH', canCreate: creation !== undefined, maxChannels: creation?.maxChannels,
+          handle: username, name,
+        });
+        if (!resolved.account) throw new BadRequestException(resolved.blockCode ?? 'ACCOUNT_IDENTITY_UNRESOLVED');
+        const account = resolved.account;
+        const metadata = account.metadata && typeof account.metadata === 'object' && !Array.isArray(account.metadata) ? account.metadata : {};
+        return tx.integration.update({where:{id:account.id,organizationId:org},data:{
+          token, refreshToken, refreshNeeded:false,
+          ...(expiresIn ? {tokenExpiration:new Date(Date.now()+expiresIn*1000)} : {}),
+          ...(picture ? {picture} : {}),
+          ...(!refresh ? {inBetweenSteps:isBetweenSteps} : {}),
+          ...(additionalSettings ? {additionalSettings:mergeAdditionalSettings(account.additionalSettings,additionalSettings)} : {}),
+          ...(customInstanceDetails ? {customInstanceDetails} : {}),
+          metadata:{...metadata,credentialSource:'OAUTH'},
+        }});
+      });
+    }
     // Pre-compute merged additionalSettings to avoid await inside upsert args.
     // Only query existing settings when there's something to merge.
     let mergedAdditionalSettings: string | undefined;
     if (additionalSettings) {
       const existing = await this._integration.model.integration.findFirst({
-        where: { internalId, organizationId: org },
+        where: { internalId, organizationId: org, providerIdentifier: provider, identityNamespace },
         select: { additionalSettings: true },
       });
       mergedAdditionalSettings = mergeAdditionalSettings(
@@ -220,15 +292,18 @@ export class IntegrationRepository {
 
     const upsert = await this._integration.model.integration.upsert({
       where: {
-        organizationId_internalId: {
+        organizationId_providerIdentifier_identityNamespace_internalId: {
           internalId,
           organizationId: org,
+          providerIdentifier: provider,
+          identityNamespace,
         },
       },
       create: {
         type: type as any,
         name,
         providerIdentifier: provider,
+        identityNamespace,
         token,
         profile: username,
         ...(picture ? { picture } : {}),
@@ -277,6 +352,8 @@ export class IntegrationRepository {
             where: {
               organizationId: org,
               internalId: internalId,
+              providerIdentifier: provider,
+              identityNamespace,
             },
           })
         )?.rootInternalId || internalId.split('_').pop()!;
@@ -288,6 +365,12 @@ export class IntegrationRepository {
           },
           organizationId: org,
           rootInternalId: rootId,
+          // Legacy LinkedIn member/page rows share a verified OAuth grant root.
+          // Do not extend this compatibility family to unknown identity namespaces.
+          providerIdentifier: identityNamespace === 'legacy' && ['linkedin', 'linkedin-page'].includes(provider)
+            ? { in: ['linkedin', 'linkedin-page'] }
+            : provider,
+          identityNamespace,
         },
         data: {
           token,
@@ -795,11 +878,15 @@ export class IntegrationRepository {
     });
   }
 
-  async findIntegrationByInternalId(org: string, internalId: string) {
+  async findIntegrationByInternalId(
+    org: string, internalId: string, providerIdentifier: string, identityNamespace: string
+  ) {
     return this._integration.model.integration.findFirst({
       where: {
         organizationId: org,
         internalId,
+        providerIdentifier,
+        identityNamespace,
       },
     });
   }

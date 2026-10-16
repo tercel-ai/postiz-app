@@ -98,7 +98,7 @@ describe('EngageRepository.markSentReplyRemoved', () => {
     await repo.markSentReplyRemoved('org-1', 'r1', 'removed', null);
 
     expect(postUpdate).toHaveBeenCalledWith({
-      where: { id: 'p1' },
+      where: { id: 'p1', sendIntentId: null },
       data: { state: 'PUBLISHED' },
     });
   });
@@ -114,7 +114,7 @@ describe('EngageRepository.markSentReplyRemoved', () => {
     );
 
     expect(postUpdate).toHaveBeenCalledWith({
-      where: { id: 'p1' },
+      where: { id: 'p1', sendIntentId: null },
       data: {
         state: 'PUBLISHED',
         releaseURL: 'https://www.reddit.com/r/test/comments/a/b/c1/',
@@ -130,7 +130,7 @@ describe('EngageRepository.markSentReplyRemoved', () => {
     await repo.markSentReplyRemoved('org-1', 'r1', 'removed', '');
 
     expect(postUpdate).toHaveBeenCalledWith({
-      where: { id: 'p1' },
+      where: { id: 'p1', sendIntentId: null },
       data: { state: 'PUBLISHED' },
     });
   });

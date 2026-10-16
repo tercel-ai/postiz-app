@@ -1,7 +1,13 @@
+import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { v5 as sendUuid } from 'uuid';
+import { sendHash } from '../../../extension/send-coordination.utils';
+import { SendCoordinatorService, EnqueueSend } from '../../../extension/send-coordinator.service';
+import { isLegacyExecution } from '../../../extension/legacy-execution';
 import {
   BadRequestException,
   Injectable,
   Logger,
+  ServiceUnavailableException,
   ValidationPipe,
 } from '@nestjs/common';
 import { PostsRepository } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.repository';
@@ -220,7 +226,8 @@ export class PostsService {
     // Same optional-positional reason again. A missing client means no Aisee
     // notification, which is the correct degradation for a side channel — the
     // post is published or failed either way.
-    private _aiseeNotificationClient?: AiseeNotificationClient
+    private _aiseeNotificationClient?: AiseeNotificationClient,
+    private _sendCoordinator?: SendCoordinatorService
   ) {}
 
   searchForMissingThreeHoursPosts() {
@@ -464,6 +471,7 @@ export class PostsService {
   ): Promise<{ ok: boolean; alreadyPublished?: boolean; reason?: string }> {
     const post = await this._postRepository.getPostById(id, orgId);
     if (!post) return { ok: false, reason: 'not-found' };
+    if (!isLegacyExecution(post.executionProtocol)) return { ok: false, reason: 'account-bound-protocol-required' };
     if (post.state === 'PUBLISHED') return { ok: true, alreadyPublished: true };
     // WHEN this actually went out, resolved once and shared by every row the
     // callback settles. The extension publishes on its own clock — a browser
@@ -663,6 +671,7 @@ export class PostsService {
   ): Promise<{ ok: boolean; reason?: string; partial?: boolean; published?: number }> {
     const post = await this._postRepository.getPostById(id, orgId);
     if (!post) return { ok: false, reason: 'not-found' };
+    if (!isLegacyExecution(post.executionProtocol)) return { ok: false, reason: 'account-bound-protocol-required' };
     if (post.state === 'PUBLISHED')
       return { ok: false, reason: 'already-published' };
     if (post.intervalInDays && post.intervalInDays > 0 && !post.parentPostId) {
@@ -1286,7 +1295,7 @@ export class PostsService {
     return this._postRepository.getPostByIdForAdmin(id);
   }
 
-  async updateMedia(id: string, imagesList: any[], convertToJPEG = false) {
+  async updateMedia(id: string, imagesList: any[], convertToJPEG = false, persist = true) {
     try {
       let imageUpdateNeeded = false;
       const getImageList = await Promise.all(
@@ -1372,7 +1381,7 @@ export class PostsService {
           })
       );
 
-      if (imageUpdateNeeded) {
+      if (imageUpdateNeeded && persist) {
         await this._postRepository.updateImages(
           id,
           JSON.stringify(getImageList)
@@ -1749,8 +1758,16 @@ export class PostsService {
     // via /posts/:id/extension-published. No Temporal workflow is started, so no
     // recovery path re-triggers it. (postNow callers poll for a non-QUEUE state
     // and time out gracefully — the post is queued for the extension instead.)
+    const post = await this._postRepository.getPostById(postId, orgId);
+    if (!post) throw new BadRequestException('POST_NOT_FOUND');
+    if (!isLegacyExecution(post.executionProtocol)) {
+      if (!this._sendCoordinator) throw new ServiceUnavailableException('SEND_COORDINATION_NOT_ENABLED');
+      this._sendCoordinator.enabled();
+      if (!post.sendIntentId) throw new BadRequestException('SEND_INTENT_REQUIRED');
+      if (post.publishMethod === 'EXTENSION') return;
+      throw new BadRequestException('API_PUBLISHING_UNSUPPORTED_USE_EXTENSION');
+    }
     try {
-      const post = await this._postRepository.getPostById(postId);
       // No integration (operation-plan post for an unconnected platform) means
       // the platform is only knowable from Post.providerIdentifier. Falls back
       // to the bound integration for the rare row written before the
@@ -1794,15 +1811,15 @@ export class PostsService {
         return;
       }
     } catch (err) {
-      // A lookup hiccup must not block normal publishing — fall through to the
-      // regular Temporal path (the safe default for API-capable providers).
+      // A failed routing read must not guess a different executor.
       this.logger.warn(
-        `startWorkflow: extension-publish check failed for postId=${postId}, proceeding with Temporal: ${(err as Error)?.message || err}`
+        `startWorkflow: extension-publish check failed for postId=${postId}, refusing dispatch: ${(err as Error)?.message || err}`
       );
+      throw err;
     }
 
     let terminated = false;
-    try {
+    if (isLegacyExecution(post.executionProtocol)) try {
       const workflows = this._temporalService.client
         .getRawClient()
         ?.workflow.list({
@@ -1840,6 +1857,7 @@ export class PostsService {
 
     await rawClient.workflow.start('postWorkflowV101', {
       workflowId: `post_${postId}`,
+      ...(!isLegacyExecution(post.executionProtocol) ? { workflowIdConflictPolicy: 'USE_EXISTING' as const } : {}),
       taskQueue: 'main',
       args: [
         {
@@ -1879,7 +1897,7 @@ export class PostsService {
     }
   }
 
-  async createPost(orgId: string, body: CreatePostDto, userId?: string): Promise<any[]> {
+  async createPost(orgId: string, body: CreatePostDto, userId?: string, sendContext?: Pick<EnqueueSend, 'contentUnitId' | 'context' | 'origin'>): Promise<any[]> {
     this.logger.log(
       `createPost: orgId=${orgId} userId=${userId ?? 'N/A'} type=${body.type} postsCount=${body.posts?.length ?? 0}`
     );
@@ -1901,10 +1919,31 @@ export class PostsService {
       );
     }
 
+    const coordinated = isAccountBoundSendingEnabled() && body.type !== 'draft';
+    if (coordinated && (!this._sendCoordinator || !userId)) throw new BadRequestException('SEND_POLICY_OWNER_REQUIRED');
+    if (coordinated && new Set(body.posts.map((p, i) => p.itemKey ?? String(i))).size !== body.posts.length) throw new BadRequestException('DUPLICATE_SEND_ITEM_KEY');
+    const suppliedRoots = body.posts.map(p => p.value?.[0]?.id).filter(Boolean);
+    if (coordinated && new Set(suppliedRoots).size !== suppliedRoots.length) throw new BadRequestException('DUPLICATE_CONTENT_ROOT');
+    if (coordinated && !body.requestId && !sendContext?.contentUnitId && body.posts.some(p => !p.value?.[0]?.id)) throw new BadRequestException('SEND_REQUEST_ID_REQUIRED');
     const postList = [];
     const postNowErrors: string[] = [];
     const allCreatedPostIds: string[] = [];
-    for (const post of body.posts) {
+    for (const [itemIndex, post] of body.posts.entries()) {
+      if (coordinated) {
+        const originalId = post.value[0]?.id;
+        const rootId = body.requestId
+          ? await this._sendCoordinator!.prepareCreation(orgId, userId!, body.requestId, post.itemKey ?? String(itemIndex), sendHash({ post, type: body.type, date: body.date, projectId: body.projectId, source: body.source, inter: body.inter, tags: body.tags, shortLink: body.shortLink }), originalId)
+          : originalId || sendUuid(sendContext!.contentUnitId!, sendUuid.URL);
+        const original = await this._postRepository.getPostById(rootId, orgId);
+        if (original?.sendIntentId) {
+          if (!body.requestId && !sendContext?.contentUnitId) throw new BadRequestException('SEND_INTENT_IMMUTABLE');
+          if (original.state === 'QUEUE' && original.publishMethod === 'API') await this.startWorkflow(getSocialTaskQueue(original.providerIdentifier!), rootId, orgId);
+          allCreatedPostIds.push(rootId);
+          postList.push({ postId: rootId, integration: original.integrationId, ...(body.type === 'now' ? { state: original.state, releaseURL: original.releaseURL, publishMethod: original.publishMethod } : {}) });
+          continue;
+        }
+        post.value = post.value.map((value, index) => ({ ...value, id: index === 0 ? rootId : value.id || sendUuid(`${rootId}:${index}`, sendUuid.URL) }));
+      }
       const messages = (post.value || []).map((p) => p.content);
       const updateContent = !body.shortLink
         ? messages
@@ -1920,8 +1959,8 @@ export class PostsService {
       // an extension-only platform, or on a post with no connected account) is
       // rejected up-front rather than stranding the post in QUEUE. Omitted →
       // undefined → routing falls back to the capability check at publish time.
-      let resolvedMethod: PublishMethod | undefined;
-      if (post.publishMethod) {
+      let resolvedMethod: PublishMethod | undefined = coordinated ? 'extension' : undefined;
+      if (post.publishMethod && !coordinated) {
         try {
           resolvedMethod = resolvePublishMethod({
             platform: post.providerIdentifier || post.settings.__type,
@@ -1937,7 +1976,7 @@ export class PostsService {
       }
 
       const { posts } = await this._postRepository.createOrUpdatePost(
-        body.type,
+        coordinated ? 'draft' : body.type,
         orgId,
         body.type === 'now' ? dayjs().format('YYYY-MM-DDTHH:mm:00') : body.date,
         post,
@@ -1950,6 +1989,13 @@ export class PostsService {
 
       if (!posts?.length) {
         return [] as any[];
+      }
+
+      if (coordinated) {
+        await this._sendCoordinator!.enqueue(orgId, posts[0].id, {
+          userId: userId!, origin: sendContext?.origin ?? 'MANUAL',
+          explicitIntegrationId: post.integration?.id, ...sendContext,
+        });
       }
 
       // Accumulate IDs so subsequent iterations won't soft-delete these posts
@@ -1965,6 +2011,7 @@ export class PostsService {
           );
         } catch (err) {
           // Workflow failed or was rejected — check if post ended up as ERROR
+          if (coordinated) throw err;
           const failedPost = await this._postRepository.getPostById(posts[0].id);
           if (failedPost?.state === 'ERROR') {
             // Post already marked ERROR by the workflow — return it with error info
@@ -2091,10 +2138,30 @@ export class PostsService {
     return this._postRepository.changeState(id, state, err, body);
   }
 
+  async hasContentSendIntent(orgId: string, contentUnitId: string) {
+    if (!this._sendCoordinator) throw new ServiceUnavailableException('SEND_COORDINATION_NOT_ENABLED');
+    return this._sendCoordinator.hasContentIntent(orgId, contentUnitId);
+  }
+
+  async queueStoredSend(orgId: string, rootId: string, userId: string, publishMethod?: 'API' | 'EXTENSION') {
+    if (!this._sendCoordinator) throw new ServiceUnavailableException('SEND_COORDINATION_NOT_ENABLED');
+    const existing = await this._postRepository.getPostById(rootId, orgId);
+    const post = existing?.sendIntentId ? existing : await this._sendCoordinator.enqueue(orgId, rootId, { userId, origin: 'MANUAL', ...(publishMethod ? { publishMethod } : {}) });
+    if (post.state === 'QUEUE' && post.publishMethod === 'API') await this.startWorkflow(getSocialTaskQueue(post.providerIdentifier!), post.id, orgId);
+    this._postOverageService.deductIfOverage(orgId, userId, post.id, post.source).catch(err => this.logger.error('Controlled post overage settlement failed', err));
+    return { postId: post.id, sendIntentId: post.sendIntentId, state: post.state, publishMethod: post.publishMethod };
+  }
+
   async retryPost(orgId: string, postId: string) {
     const post = await this._postRepository.getPostById(postId, orgId);
     if (!post) {
       throw new BadRequestException('Post not found');
+    }
+    if (post.sendIntentId) {
+      if (!this._sendCoordinator) throw new ServiceUnavailableException('SEND_COORDINATION_NOT_ENABLED');
+      await this._sendCoordinator.retry(orgId, postId, '');
+      await this.startWorkflow(getSocialTaskQueue(post.providerIdentifier!), postId, orgId, true);
+      return { postId, state: 'QUEUE' };
     }
     if (!post.integration) {
       throw new BadRequestException('Integration not found or has been removed');
@@ -2505,7 +2572,8 @@ export class PostsService {
       now.toDate(),
       Math.max(1, Math.min(limit, 50)),
       leaseToken,
-      leaseCutoff
+      leaseCutoff,
+      ...(this._sendCoordinator ? [await this._sendCoordinator.legacyBlockedPlatforms(orgId)] : [])
     );
     // Per-platform thread segment-gap ranges (admin-editable setting), resolved
     // once per poll and stamped on each item so the extension paces threads the
@@ -2760,7 +2828,8 @@ export class PostsService {
    */
   async schedulePosts(
     orgId: string,
-    items: Array<{ id: string; publishMethod?: PublishMethod; date?: string }>
+    items: Array<{ id: string; publishMethod?: PublishMethod; date?: string }>,
+    sendContext?: { userId: string; origin: 'MANUAL' | 'AUTOMATION' }
   ) {
     const ids = [...new Set(items.map((i) => i.id))];
     const itemById = new Map(items.map((i) => [i.id, i]));
@@ -2774,6 +2843,23 @@ export class PostsService {
       const post = postById.get(id);
       if (!post) {
         failed.push({ id, code: 'NOT_FOUND', message: 'Post not found' });
+        continue;
+      }
+      if (isAccountBoundSendingEnabled()) {
+        try {
+          if (!this._sendCoordinator || !sendContext) throw new BadRequestException('SEND_POLICY_OWNER_REQUIRED');
+          const item = itemById.get(id)!;
+          const choice = item.publishMethod ?? (post.publishMethod === 'API' ? 'api' : 'extension');
+          const queued = await this._sendCoordinator.enqueue(orgId, id, { ...sendContext, publishMethod: choice === 'api' ? 'API' : 'EXTENSION', ...(item.date ? { publishDate: new Date(item.date) } : {}) });
+          if (queued.publishMethod === 'API') await this.startWorkflow(getSocialTaskQueue(queued.providerIdentifier!), id, orgId);
+          scheduled.push({ id, publishMethod: queued.publishMethod === 'API' ? 'api' : 'extension' });
+        } catch (error) {
+          failed.push({ id, code: 'CONTROLLED_SCHEDULE_BLOCKED', message: (error as Error).message });
+        }
+        continue;
+      }
+      if (!isLegacyExecution(post.executionProtocol)) {
+        failed.push({ id, code: 'ACCOUNT_BOUND_SEND_NOT_ENABLED', message: 'Account-bound sending is not enabled' });
         continue;
       }
       // Idempotent: a post already scheduled/published is a no-op success.
@@ -2841,13 +2927,17 @@ export class PostsService {
       }
 
       const newDate = itemById.get(id)?.date;
-      await this._postRepository.schedulePostGroupToQueue(
+      const queued = await this._postRepository.schedulePostGroupToQueue(
         orgId,
         post.group,
         method === 'api' ? 'API' : 'EXTENSION',
         newDate ? dayjs(newDate).toDate() : undefined
       );
 
+      if (!queued.count) {
+        failed.push({ id, code: 'SCHEDULE_CONFLICT', message: 'Post changed before scheduling; reload and retry' });
+        continue;
+      }
       // API posts publish through Temporal; EXTENSION posts stay QUEUE for the
       // extension pull loop. startWorkflow re-reads publishMethod and no-ops for
       // extension, so this call is the API-only trigger.
@@ -3087,6 +3177,7 @@ export class PostsService {
     // Why a post may not be moved by THIS pass. Null = it may.
     const pinReason = (root: (typeof roots)[number]): 'claimed' | 'imminent' | null => {
       if (root.state !== moving) return null; // owned by the other pass
+      if (root.sendIntentId) return 'claimed';
       if (moving === 'DRAFT') return null; // a draft has no timer to race
       if (root.releaseId?.startsWith('claim_')) return 'claimed';
       if (dayjs(root.publishDate).diff(now, 'millisecond') < RESCHEDULE_LOCKOUT_MS) {
@@ -3273,7 +3364,8 @@ export class PostsService {
     operationPlanId: string | null,
     projectId: string,
     publishMethod?: PublishMethod,
-    platforms?: string[]
+    platforms?: string[],
+    sendContext?: { userId: string; origin: 'MANUAL' | 'AUTOMATION' }
   ) {
     if (!this._projectPublishingService) {
       // Only reachable if someone constructs this service positionally without
@@ -3492,7 +3584,8 @@ export class PostsService {
           ...(publishMethod ? { publishMethod } : {}),
           ...(dateOverride ? { date: dateOverride } : {}),
         };
-      })
+      }),
+      sendContext
     );
     return {
       ...result,

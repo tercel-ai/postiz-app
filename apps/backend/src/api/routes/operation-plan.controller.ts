@@ -1,7 +1,11 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { Body, Controller, Get, Param, Post, Query, ServiceUnavailableException } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { Organization } from '@prisma/client';
+import { Organization, User } from '@prisma/client';
 import { OperationPlanService } from '@gitroom/nestjs-libraries/database/prisma/operation-plan/operation-plan.service';
+import { PlanExecutionService } from '@gitroom/nestjs-libraries/extension/plan-execution.service';
+import { IsPlanRouteMap, PlanRouteMap, SavePlanExecutionDto } from '@gitroom/nestjs-libraries/extension/plan-execution.dto';
+import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { ArrayNotEmpty, IsArray, IsISO8601, IsOptional, IsString } from 'class-validator';
 
@@ -27,19 +31,18 @@ export class CreateOperationPlanDto {
   @IsArray()
   @IsString({ each: true })
   keywords?: string[];
+
+  @IsOptional()
+  @IsPlanRouteMap()
+  executionRoutes?: PlanRouteMap;
 }
 
 @ApiTags('Operation Plans')
 @Controller()
 export class OperationPlanController {
-  constructor(private _operationPlanService: OperationPlanService) {}
+  constructor(private _operationPlanService: OperationPlanService, private _planExecution?: PlanExecutionService) {}
 
-  // Everything a plan overview page needs in one call: the plan itself, every
-  // Post generated under it, and a per-day/per-keyword engage reply-pacing
-  // breakdown ("actual/target" strings, project-scoped-post-engage-
-  // design.md §6). Org-scoped only (no @UseGuards) — the plan row itself
-  // carries organizationId, and ProjectAuthGuard only activates when a
-  // request explicitly carries projectId, which this route does not.
+  // Resolve project access from the persisted plan; omitting projectId cannot bypass it.
   @Get('/operation-plans/:id')
   getOverview(
     @GetOrgFromRequest() org: Organization,
@@ -67,6 +70,18 @@ export class OperationPlanController {
   // quality before committing credits + DB rows. Any other value runs the real
   // flow. The LLM generation call still runs (real token cost), but no user
   // credit is deducted and nothing is written.
+  @Post('/projects/:projectId/operation-plans/:id/execution-routes')
+  saveExecutionRoutes(
+    @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
+    @Param('projectId') projectId: string,
+    @Param('id') id: string,
+    @Body() body: SavePlanExecutionDto
+  ) {
+    if (!isAccountBoundSendingEnabled() || !this._planExecution) throw new ServiceUnavailableException('PROJECT_ACCOUNT_BINDINGS_DISABLED');
+    return this._planExecution.save(org.id, user.id, projectId, id, body);
+  }
+
   @Post('/projects/:projectId/operation-plans')
   create(
     @GetOrgFromRequest() org: Organization,

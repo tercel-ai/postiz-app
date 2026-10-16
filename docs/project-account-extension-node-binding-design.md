@@ -1,440 +1,403 @@
-# Project 社交账号绑定与插件终端自动匹配方案
+# Social Account Selection, Unique Content Sending, and Extension Node Coordination Design
 
-状态：设计草案，待审阅；尚未实现。  
-创建日期：2026-10-13；更新日期：2026-10-14。  
-范围：`postiz-app` 的 operation plan、post、Engage reply、automation，以及独立仓库 `../aisee-browser-extension` 的发送协议。
+Status: Code and tests exist for configuration, send coordination, controlled submission through the standalone extension on seven platforms, automatic producers, OPTIONAL first-claim binding, platform identity resolution, and initial native-host/profile pairing. Database migrations and live-platform acceptance have not been performed; the complete flow is not live.
 
-本次修订：重新对照后端及独立插件源码，补齐普通post请求防重、API/Temporal与插件共享发送保护、回复路由互斥、硬额度与生成目标的区别、插件提交日志与恢复、延迟/移除结果结算及灰度范围。以下机制均为拟议改造，不代表当前代码已有保障。
+Created: 2026-10-13. Updated: 2026-10-16.
 
-API修订原则：先核对现有controller、DTO及独立插件调用，再决定复用/扩展/新增。新增写操作优先POST，创建与修改按已有保存接口语义实现；已有PATCH/PUT/DELETE不因风格调整被删除或改义，兼容入口与新版请求共用服务层。
+Scope: Operation Plan, Post, Engage Reply, and Automation in postiz-app, plus the standalone repository `../aisee-browser-extension`. The frozen directory `apps/extension/` is excluded and has not been read or modified.
 
-## 1. 建议采用的方案
+The sole deployment master switch is `ACCOUNT_BOUND_SENDING_ENABLED`, defaulting to false. When disabled, unmanaged workloads retain the legacy Post/Reply and extension sending mechanisms. When enabled, it activates account configuration, node authentication, claims across multiple nodes, account binding, duplicate-send prevention, and quota reservations together. It controls the new mechanism; it does not disable all publishing. The three earlier phase flags have been retired, and database identity-index status is detected automatically; see §14.8.
 
-每个 project 按「平台 × 操作类型」提前选择发送社交账号。operation plan、post、reply、automation 的业务配置只保存账号，不要求用户选择插件终端。生成、保存、排队时将账号固化到具体任务；服务端依据各终端上报的已核验登录会话，在领取时自动匹配执行终端，并在实际提交前再次验证平台身份。
+Sending scope for this release: **New controlled Post/Reply tasks execute only through the standalone extension; OAuth API publishing is unsupported.** OAuth connection/refresh retains identity and credential compatibility and may support read-only identity verification; it grants no sending capability. API execution fields, ledgers, and cross-channel constraints retained below protect historical facts and must not enable new OAuth platform writes. New enqueue requests accept the legacy publishMethod parameter and return the actual EXTENSION route; existing API Intents do not automatically change execution channels.
 
-账号复用现有 `Integration`，project 使用权限复用 `IntegrationProject`。新增终端、终端当前会话、project 默认账号绑定和发送尝试记录。operation plan 保存账号执行快照；post 和 reply 的账号绑定统一落到 `Post`。具体执行终端只保存到领取后的 `ExtensionSendAttempt`，不提前固定在计划或任务。`EngageSentReply.postId` 已关联 Post，无需再保存第二份账号字段。
+This document distinguishes three kinds of information: the **target contract** defines required behavior; **current code** describes existing capabilities; **implementation gaps** are collected in §14. Configuration and planning changes based on this version began on 2026-10-15. See §14 for their scope and verification records; historical test results do not imply that the full target has been implemented.
 
-社交账号列表 API 平铺返回每个账号及其关联终端 `terminals[]`、服务端计算的 `sendAvailability`；前端自行按平台分组、排序、折叠。终端页面用于展示、命名、状态诊断和撤销，不作为每次发送必选的业务配置。接口契约见 §7.2。
+## 1. Core Decisions and Reading Guide
 
-目标示例：
-
-| AIsee 登录身份 | Project | 平台 | 操作 | 提前选择的账号 | 系统发现的可执行终端 |
-| --- | --- | --- | --- | --- | --- |
-| 同一用户 | A | X | post / reply | x1 | 浏览器 Profile 1 的插件 N1 |
-| 同一用户 | B | X | post / reply | x2 | 浏览器 Profile 2 的插件 N2 |
-
-当 N1 登录 x1、N2 登录 x2 时，N1 只可领取 x1 的授权任务，N2 只可领取 x2 的授权任务。N1 若切换成 x2，不再可执行 A/x1；若有另一个有效终端登录 x1，它可领取 A 尚未被领取的任务，否则 A 等待账号恢复。切换后的 N1 是否可领取 B/x2，还必须检查其登记者对 B 的权限。终端离线不阻止保存草稿和预约任务。
-
-对用户称“插件终端”，内部模型仍命名为 ExtensionNode。首版终端是一个浏览器 profile 内的一次插件安装，ID 不能只用 chrome/arc/firefox 等浏览器名字。一台电脑上的不同浏览器、同浏览器的不同 profile 都可形成不同终端。Chrome、Firefox 可使用独立 profile；Arc 的 Space 必须关联不同 Profile 才隔离登录，共用 Profile 的多个 Space 不算不同会话环境。参考 [Chrome Profiles](https://support.google.com/chrome/answer/2364824/)、[Firefox Profiles](https://support.mozilla.org/en-US/kb/profile-management)、[Arc Profiles](https://resources.arc.net/hc/en-us/articles/19227964556183-Profiles-Separate-Work-Personal-Browsing)。
-
-一个终端可以登录多个平台、运营多个 project；首版每个终端、每个平台只识别一个当前发送身份，不实现自动切号或 Firefox container 内多账号执行。平台即使保存多个登录账号，也必须核验本次发送的当前 actor。要并行运营同平台 x1/x2，使用隔离的浏览器/profile环境，不依赖插件本身保存多套 cookie。
-
-账号与终端是动态关系：一个账号可以同时登录多个终端，一个终端可以承载多个平台账号。业务请求只选 integrationId；插件执行请求仍须认证终端身份，领取成功后锁定本次 attempt 的终端。终端不是仅用于显示的标签，但用户无需管理每个任务的终端路由。
-
-同一个平台账号允许同时登录Chrome/Arc/Firefox等多个终端，它们复用一个Integration、分别记录NodeSession，不强制互相登出、不重复占用账号额度。发送协调以服务端持久状态为权威，同时防止同一业务发送重复执行和发送额度被并发重复使用；具体规则见§8.1。
-
-## 2. 当前代码的事实与缺口
-
-以下结论来自源码读取。链接是当前实现的定位点，不能将本方案描述的新能力理解为已有功能。
-
-| 环节 | 当前实现 | 对本需求的影响 |
-| --- | --- | --- |
-| Project 账号关系 | [schema.prisma](../libraries/nestjs-libraries/src/database/prisma/schema.prisma) 的 `IntegrationProject` 已定义账号与 project 多对多关系、`disabled` 和 `engageEnabled` | 可以复用账号分配；不能把 organization 内所有账号当成当前 project 可用账号 |
-| Plan 生成 | [operation-plan.service.ts](../libraries/nestjs-libraries/src/database/prisma/operation-plan/operation-plan.service.ts) 的 `_validateInput` 校验平台，`create` 根据 project、时间区间、平台匹配已有计划 | 没有账号选择；新增账号绑定时必须明确计划重试语义，不需增加业务终端选择 |
-| Plan 落地 | [operation-plan.repository.ts](../libraries/nestjs-libraries/src/database/prisma/operation-plan/operation-plan.repository.ts) 的 `materializePlanPosts` 创建 `integrationId: null` 的 DRAFT；LinkedIn 类型依据 organization 已有 integration 决定 | 计划只有平台，没有发送身份；organization 级账号探测不能决定 project 的个人账号/公司页面目标 |
-| Automation | [automation.dto.ts](../libraries/nestjs-libraries/src/automation/automation.dto.ts)、[automation.service.ts](../libraries/nestjs-libraries/src/automation/automation.service.ts) 的 `saveReplies` 和 overview 明确采用插件当前会话，不选账号；publishing DTO 有平台、窗口和 `publishMethod` | 配置可以决定何时发送，却不能确定目标账号，也没有基于账号会话自动匹配终端 |
-| Post 领取 | [posts.controller.ts](../apps/backend/src/api/routes/posts.controller.ts) 的 `POST /posts/publish-due` 只有 `limit`；[posts.repository.ts](../libraries/nestjs-libraries/src/database/prisma/posts/posts.repository.ts) 的 `claimDueExtensionPublishPosts` 按 organization 领取并写 `releaseId`/`claimedAt` | 同 organization 的插件竞争同一发送池，没有节点路由 |
-| Post 账号校验 | [posts.service.ts](../libraries/nestjs-libraries/src/database/prisma/posts/posts.service.ts) 的 `getDuePublishPosts` 仅在已绑定 integration 时返回 `targetAccount` | 已有可复用的目标账号概念；无 integration 的 plan post 不携带目标账号 |
-| Reply 领取 | [engage.controller.ts](../apps/backend/src/api/routes/engage.controller.ts) 的 `POST /engage/reply-due` 不接收节点；[engage-auto-reply.service.ts](../libraries/nestjs-libraries/src/engage/engage-auto-reply.service.ts) 的 `getDueReplies` 返回 project/platform/url/text 等字段 | 自动 reply 没有目标账号和节点；新生成回复的 `_draftOne` 返回分支还未写发送领取租约，必须统一经过领取流程 |
-| Reply 保存 | [engage.service.ts](../libraries/nestjs-libraries/src/engage/engage.service.ts) 的 `saveDraft`、[engage.repository.ts](../libraries/nestjs-libraries/src/engage/engage.repository.ts) 的 `upsertDraft` 保存 Post 与 EngageSentReply；[engage.dto.ts](../libraries/nestjs-libraries/src/engage/dtos/engage.dto.ts) 的 `SaveDraftDto` 没有发送绑定 | 草稿保存时不能固化将来发送的账号 |
-| Reply 账号列表 | `engage.repository.ts` 的 `listReplyAccountIntegrations` 查 organization 内账号，缺少 project 关系时将 `engageEnabled` 视为 true | 该列表不能直接作为严格 project 账号授权依据；应要求实际 IntegrationProject 关系 |
-| 平台会话 | [integration.repository.ts](../libraries/nestjs-libraries/src/database/prisma/integrations/integration.repository.ts) 的 `recordExtensionSession` 将匹配账号标为 EXTENSION，同平台其他账号标为 API；[extension-session-report.dto.ts](../libraries/nestjs-libraries/src/dtos/integrations/extension-session-report.dto.ts) 没有节点字段 | N1 上报 x1 后，N2 上报 x2 会覆盖同平台账号的全局状态；无法表示两个同时在线的节点 |
-| 发送归属 | `posts.service.ts` 的 `_attributeExtensionPublisher`、`engage.repository.ts` 的 `updateReplyUrl` 可在成功后补账号；[extension-session.utils.ts](../libraries/nestjs-libraries/src/database/prisma/integrations/extension-session.utils.ts) 可以使用最近的全局活跃会话归属 | 成功后推断无法保证事先选定身份；多节点时不能用最近上报账号代表任务执行账号 |
-| 成功回传 | [mark-extension-published.dto.ts](../libraries/nestjs-libraries/src/dtos/posts/mark-extension-published.dto.ts)、`PublishExtensionReplyDto` 没有节点、attempt、lease 校验字段 | 当前回传不能证明是被指派且持有有效发送授权的节点完成 |
-| 版本门槛 | [extension-version.guard.ts](../apps/backend/src/services/extension/extension-version.guard.ts) 无版本头时放行，读取门槛失败也放行 | 现有版本门槛适合升级提醒，不能充当严格节点授权守卫 |
-| 账号列表 API | [integrations.controller.ts](../apps/backend/src/api/routes/integrations.controller.ts) 的 `GET /integrations/list` 平铺返回 integrations，外部字段为 id/identifier/display | 已有正确的平铺结构；新增终端与发送可用性字段即可，不增加后端平台分组或同义平台字段 |
-| 插件账号登记 | `integration.service.ts` 的 `reportExtensionSession` 已能创建 Integration，但只在该平台 rows.length===0 时调用创建 | 已有保存 API；需要改为按本次实际账号是否存在判断，才能自动登记同平台第二个账号 |
-| 账号唯一性 | `schema.prisma` 的 Integration 唯一键为 organizationId/internalId；`integration.repository.ts` 按该键 upsert并可更新providerIdentifier | 不同平台的相同handle/ID可能命中同一行；账号身份规则必须在多终端上线前修正 |
-| 回复业务防重 | `engage.repository.ts` 的 upsertDraft按project/opportunity/state查已有行，注释明确没有防止并发重复创建的数据库唯一约束 | 每个Post一个attempt不等于同一业务回复只发一次；还需逻辑发送意图约束 |
-| Project权限 | `project-validation.service.ts` 按organization对应owner检查project归属/有效性，不接收当前userId | 可复用归属验证，但不能当成已经存在用户级project ACL |
-| 账号节奏 | `engage-auto-reply.service.ts` 使用org/platform的getLastPlatformWriteAt；warmup和社区计数也有org/platform查询 | 需要明确迁移原闸门，不能只增加新账号锁后继续让x1限制x2 |
-| 回复API路由 | `SendReplyDto`没有publishMethod；sendReply/scheduleReply及批量方法显式传api；startWorkflow又用source!='engage'限定插件分支 | 增加DTO字段还不够，必须同步修改producer与工作流分流，否则extension回复仍可能进入Temporal |
-| API重试 | [post.workflow.v1.0.1.ts](../apps/orchestrator/src/workflows/post-workflows/post.workflow.v1.0.1.ts) 的平台activity默认最多3次重试，外层发送循环最多5次 | 现有Post领取挡不住同activity在平台成功但响应丢失后的重试；严格账号不能沿用无结果分类的发送重试 |
-| 配额闸门 | `engage.service.ts`的_assertReplyPacing先按预约日期查数量；auto-reply另检查项目本地日dailyReplyLimit，plan budget默认只在启用ENGAGE_REPLY_BUDGET_GATE_ENABLED时用于新增生成 | 预约检查不是执行额度预占；生成目标、执行硬上限和计费不能合并成一个计数器 |
-| 机会状态领取 | `engage.repository.ts`的claimOpportunityForReply按项目机会state的NEW/AUTO_QUEUED竞争，不含账号；cancelAndSendNow删除旧Post并重置机会 | 新账号级意图不能再由旧项目机会状态充当唯一发送锁；取消重发也不能删除已授权/未知结果记录 |
-
-独立插件仓库的对应事实：
-
-| 源文件（位于 `../aisee-browser-extension`） | 当前行为 |
+| Decision | Rule adopted in this version |
 | --- | --- |
-| `src/utils/executor/api.ts` | 用 AIsee access token 调用后端；所读发送流程没有节点凭证 |
-| `src/utils/executor/publish.runner.ts` | 用 `{ limit }` 领取 post，支持传递已有的 `targetAccount` |
-| `src/utils/post-publish/account-guard.ts`、`queue.ts` | 有 post 账号守卫；没有目标账号、探测异常、不支持探测或部分未知身份时可放行；Dev.to、Quora 另有页面内身份校验 |
-| `src/utils/executor/reply.runner.ts` | 用 `{}` 领取 reply；`DueReply` 没有目标账号或节点，将文本交给 `handlePostReply` |
-| `src/pages/background/post-reply.ts` | 发送前检查是否已发、人工失败状态及 URL；可探测实际作者用于回填，缺少与指定发送账号对照的通用校验 |
-| `src/utils/extension-session-report.ts` | 向 `/integrations/extension-session` 上报平台身份，没有节点维度 |
-| `src/utils/account-scope.ts`、`account-owner.ts` | 已有 AIsee 用户切换后的本地数据隔离；这不是平台发送账号或节点路由 |
-| `src/utils/post-publish/queue.ts` 的 persist/restoreFromStorage/retryPublishTask | persist不等待chrome.storage.local.set完成；中断publishing恢复为error；本地Retry按error及已发段数重排 | 严格模式必须等待日志持久化，并把提交未知与确定未提交分开，不能从旧error状态直接重放 |
-| `src/pages/background/post-reply.ts`、`src/utils/reply.unconfirmed.ts` | 部分结果直接fetch旧回调；未确认回复另经扫描恢复；人工发送可绕过本地unattended间隔 | 只改executor/api.ts不能覆盖这些路径；严格任务统一认证、授权、结果日志及账号间隔 |
-| `src/utils/executor/api.ts`、`src/utils/request.util.ts` | request.util未透传自定义headers；backendCall遇426设置全局停止，之后所有调用短路 | 节点头需落到实际HTTP请求；停新发送与继续核对/回报已发生结果必须分开 |
+| Account selection priority | Explicit account on a Post/Reply → Project default → Organization default. Inherit only when unconfigured; invalid configuration must not silently switch accounts. |
+| Plan generation | Generate content, platforms, objectives, and cadence only. New plans neither store sending accounts nor change defaults. |
+| Binding time | Explicit accounts may be saved in drafts. Inherited accounts resolve and freeze at enqueue. OPTIONAL allows extension tasks without a preset account to atomically bind the actual actor on first claim. |
+| Default configuration ownership | Two independent levels, Organization and Project, each keyed by platform/action=POST or REPLY. Automation manages only switches, windows, and policies. |
+| Product policy | System policy REQUIRED/OPTIONAL determines whether an account must be selected in advance. Users may strengthen the requirement, but cannot disable bound-account verification or duplicate-send protection. |
+| Unique sending per content unit | The same business content belongs to one SendIntent. Changing accounts, nodes, Post records, or execution channels cannot grant another sending opportunity. |
+| Account identity | Integration represents a specific platform actor. Primary identity uses tenant, provider, namespace, and normalized platform ID; profile supports display and auxiliary verification. |
+| OAuth and extension | Reuse Integration for the same trusted platform ID. OAuth retains connections/credentials and read-only verification; new controlled sends use the extension. Historical executions still share duplicate and quota protection. |
+| Node identity | nodeId is the SHA-256 of a stable local machine identifier and the canonical path of an explicitly paired browser profile. It is reused across AIsee accounts; credentials, sessions, and executions remain isolated by user/organization. |
+| Node routing | Users do not select a node for every task. The backend fixes the execution node at claim; NodeSession stores dynamic account associations. |
+| Uncertain outcomes | Stop resending and reconcile. Lease expiry, node reinstallation, or a temporary absence of platform records does not prove that nothing was submitted. |
+| API compatibility | Prefer POST for new writes. Preserve legacy methods and response wrappers; all controlled execution entry points share duplicate prevention and settlement services. |
 
-分析未读取或修改冻结目录 `apps/extension/`。本方案中的插件改动全部指向独立仓库。
+Example: Within one Organization, Project A defaults to X account x1 and Project B to x2. A post in A explicitly selecting x3 uses x3. An unselected draft generated by A's plan uses A's current default x1 when enqueued. If x1 is logged into Chrome, Arc, and Firefox, all three nodes may be online, but only one authorized executor sends the same content.
 
-### 2.1 已有账号保存调用链，继续复用
+An account is the publishing identity; a node is the execution location. The publish-method field retains the API/EXTENSION enum, but new controlled tasks in this phase always use EXTENSION. These concepts remain separate: tasks can wait for an available node without switching accounts. Initially, one node corresponds to an extension installation in one browser profile, recognizing one current sending actor per platform. Automatic account switching and scheduling multiple accounts within containers are excluded. Different profiles in the same browser must register as different nodes.
+
+## 2. Code Baseline and Reuse Boundaries
+
+The following baseline describes the code before the redesign and during the initial configuration phase. It remains useful for identifying reuse points and risks. §14 governs the latest implementation status; this table is not a current implementation checklist.
+
+| Area | Baseline code facts | Follow-up |
+| --- | --- | --- |
+| Platform identity | Prisma and repositories prepare a provider/namespace-scoped Integration unique key. Unknown values remain legacy; migration is unapplied. | Audit real identities, unify OAuth/extension resolution, and associate aliases without guessing from handles. |
+| Project/account relationship | IntegrationProject already has disabled/engageEnabled. | Retain it as authorization, separate from account defaults. |
+| Account defaults | OrganizationSendBinding, independent two-level GET/POST endpoints, and configuration read/write/resolution services are prepared. Legacy Automation accounts write to the same ProjectSendBinding. | Integrate enqueue freezing, policies, UI, and sending protocol. Prepared migrations remain unapplied. |
+| Plans | New create rejects executionRoutes. Materialization preserves INHERIT and canonical platforms; legacy snapshots do not affect new drafts. Legacy route writes edit selected drafts only. | Retain historical reads and draft version protection; integrate unified enqueue freezing and content intents. |
+| Post/Reply | Integration associations, draft/scheduled/batch flows, and publishMethod exist. Some reply paths still hardcode API. | Preserve business APIs while unifying account resolution, content intents, producers, and execution routing. |
+| Node foundations | ExtensionNode, NodeSession, registration/management, and POST session endpoints exist behind flags disabled by default. | The standalone extension still needs the complete node and submission-permit protocol. |
+| Legacy reporting | A second new account on a platform is not registered if any account already exists there. Global legacy session markers overwrite one another. | Register individual actors through the same reporting API, use node sessions, and unify account-creation quotas. |
+| Reply account list | The legacy list may expose engageEnabled=true without a project relationship. The new binding service requires a real relationship and reply permission. | Align list and execution authorization; appearing in a list is not authorization. |
+| Legacy claim/callback | releaseId/claimedAt leases and old callbacks remain. A temporary gate rejects strict execution. | A legacy lease alone cannot ensure duplicate-free submission; upgrade under §7. |
+| API/Temporal | Platform activities and outer sending loops retry. | Integrate shared SendIntent/account state; do not automatically replay uncertain side effects. |
+| Extension behavior | Post guards may allow execution without targetAccount or after probe failure; replies lack unified target verification. | Use the controlled submission protocol under both product policies; do not implement OPTIONAL through fail-open behavior. |
+| Extension logs/transport | Some log writes are not awaited; direct fetch and global 426 short-circuiting do not fully support outcome recovery. | Persist submission journals; stopping new submissions must not discard existing outcomes. |
+
+Locations: [schema.prisma](../libraries/nestjs-libraries/src/database/prisma/schema.prisma), [SendBindingService](../libraries/nestjs-libraries/src/extension/send-binding.service.ts), [PlanExecutionService](../libraries/nestjs-libraries/src/extension/plan-execution.service.ts), [IntegrationService](../libraries/nestjs-libraries/src/database/prisma/integrations/integration.service.ts), [EngageRepository](../libraries/nestjs-libraries/src/engage/engage.repository.ts), [PostsService](../libraries/nestjs-libraries/src/database/prisma/posts/posts.service.ts), and [Temporal workflow](../apps/orchestrator/src/workflows/post-workflows/post.workflow.v1.0.1.ts). Extension locations: [session report](../../aisee-browser-extension/src/utils/extension-session-report.ts), [account guard](../../aisee-browser-extension/src/utils/post-publish/account-guard.ts), [publish queue](../../aisee-browser-extension/src/utils/post-publish/queue.ts), and [reply runner](../../aisee-browser-extension/src/utils/executor/reply.runner.ts).
+
+Reuse the existing account-persistence chain: platform identity probing → persistLoginSnapshot → reportSessionSnapshot → `/integrations/extension-session` → match/register Integration → save this node's NodeSession. register registers only a node, not a social account. Do not introduce a separate extension-account persistence API.
+
+## 3. Product Policy, Account Priority, and Mandatory Constraints
+
+### 3.1 System Policy and User Preferences
+
+Global Settings stores the account-preselection policy `REQUIRED | OPTIONAL` as a product requirement, not an extension-local check that users can disable. The initial default is REQUIRED. Actual rollout remains subject to the implementation/deployment gates in §14; changing Settings does not grant execution capability.
+
+- REQUIRED: Every new task must resolve to an authorized account before enqueue. Users cannot weaken the system requirement.
+- OPTIONAL: Extension tasks without a preset account may use CURRENT_SESSION. Users may strengthen the requirement through `requirePreselectedAccount`; unset preferences inherit system policy.
+- Under either policy, any valid per-item/project/organization account found during enqueue resolution must be used. Defaults cannot be deliberately ignored to enter CURRENT_SESSION. Already-enqueued CURRENT_SESSION tasks do not reread defaults added later at claim.
+- Release capability flags, product account policy, and Automation switches are distinct. If a system-wide stop on new submissions is needed, use separate operational controls rather than account-preselection policy.
+
+Here, the controlled protocol means ACCOUNT_BOUND_V1, not the REQUIRED product policy; OPTIONAL tasks use the same protocol. The backend resolves effective policy and stores policyRevision/effective task requirements. Manual tasks use the authenticated creator/scheduler's preferences. Automatic tasks use the owner specified by the organization's operations configuration, or system policy if unspecified, rather than the preferences of the user who later registers the polling extension. The server resolves identity; requests cannot nominate arbitrary owners to weaken requirements.
+
+User preferences are read and snapshotted at new enqueue. Later preference changes do not reinterpret the queue. If system policy later tightens to REQUIRED, unbound CURRENT_SESSION tasks pause for account selection; bound tasks retain their accounts. Relaxing system/user requirements cannot weaken queued constraints, clear targets, or move tasks into the legacy pool. If policy cannot be read/verified, pause new enqueue and claim/start rather than assuming OPTIONAL; authenticated settlement of existing results remains available. Browsers execute server-resolved rules and cannot bypass them through hidden UI switches or missing headers.
+
+Policy tightening and initial CURRENT_SESSION binding must serialize against policy versions. Tasks atomically bound before tightening retain their targets; unbound tasks cannot race ahead using old policy snapshots afterward. Persisted effective requirements can only increase. Policy updates must persist that requirement or an equivalent version barrier, rather than relying solely on asynchronous scans that could miss tasks if policy is subsequently relaxed.
+
+The Settings key `sending.account_selection_policy` contains mode, revision, and lastRequiredRevision. Every save increments revision; saving REQUIRED advances lastRequiredRevision to that revision, and later relaxation does not clear it. Unbound tasks whose policyRevision predates the barrier still require account preselection. Missing configuration means REQUIRED/revision=0; persisted values start at revision=1. Corrupt/unverifiable configuration never falls back to OPTIONAL. Initial CURRENT_SESSION binding acquires the policy coordination lock before intent CAS in the same transaction, ordering it against policy writes. Bound tasks need not contend for that global lock, avoiding serialization of all account sending. This coordination is integrated into first claim; see §14.7 for states and tests.
+
+### 3.2 Unified Priority and Freeze Time
 
 ```text
-Platform identity probe
-  -> persistLoginSnapshot
-  -> reportSessionSnapshot / buildSessionReport
-  -> authenticated PATCH /integrations/extension-session
-  -> IntegrationsController.reportExtensionSession
-  -> IntegrationService.reportExtensionSession
-  -> match existing Integration / createChannelFromExtensionSession
-  -> createOrUpdateIntegration / recordExtensionSession
+Account explicitly selected on content with accountSelectionMode=EXPLICIT
+    → If INHERIT, read the Project(platform, action) default
+    → If that level is unconfigured, read the Organization(platform, action) default
+    → If still unconfigured: REQUIRED blocks enqueue;
+      OPTIONAL extension tasks may await initial current-actor binding
 ```
 
-插件 [persistLoginSnapshot](../../aisee-browser-extension/src/utils/session-maintenance.ts) 保存本地快照后立即上报；[extension-session-report.ts](../../aisee-browser-extension/src/utils/extension-session-report.ts) 上报checkedAt及每个平台的platform/loggedIn/id/handle/name/picture。refresh、维护和部分重检均复用这条链路。服务端已做账号创建权限/额度检查、头像存储和账号展示信息修正，不应另建重复的“插件账号保存 API”。
+Each level inherits only when unconfigured. An explicit account that is disabled, unresolved, on the wrong platform, unassigned to the project, or blocked from replies by engageEnabled immediately produces an error; it does not fall back. Global defaults do not grant project permissions.
 
-现有IntegrationService原样将internalId传给repository，没有在中间加平台前缀；[buildExtensionSessionSeed](../libraries/nestjs-libraries/src/database/prisma/integrations/extension-session.utils.ts) 使用平台ID或handle作为internalId。因此“已存在账号保存调用”与“创建条件、唯一键仍有缺口”同时成立。本方案是在该现有API内增加终端维度与可靠身份契约，修正后端匹配/登记语义。
+INHERIT drafts may preview the effective account and source, but that preview is not a frozen identity. The enqueue transaction rereads required defaults and versions, verifies permissions, and writes integrationId, sendTarget, bindingSource=EXPLICIT/PROJECT/ORGANIZATION, source revision, and routeRevision to Post and SendIntent consistently across every thread node. Reading outside the transaction and writing QUEUE without version protection is forbidden.
 
-### 2.2 已有相关API盘点与复用决策
+For example, a task scheduled at 09:00 with A's default x1 still uses x1 after A changes its default to x2 at 10:00. An INHERIT draft not yet enqueued adopts x2 on its next enqueue. Bound tasks may wait in the queue when no node is online.
 
-下表方法/路径和当前语义已经对照controller与DTO；“调整”栏均是拟实施设计。本表不要求改造所有历史API的HTTP方法。
+### 3.3 Exact Meaning of CURRENT_SESSION
 
-| 当前API | 当前语义/关键字段 | 本方案调整 |
+OPTIONAL permits only extension tasks with **no preset account at any level** to await the actual actor on the first eligible node, with accountResolution=AWAITING_CURRENT_ACTOR. It neither skips identity probing nor allows any extension holding the text to send it.
+
+The node must first prove its current account, which must be registered and project-authorized. First claim atomically fixes it as the target under the content-intent lock, then uses the same start/quota/journal protocol. Binding does not drift with account switching, retries, or default changes. The UI should say “Sent by the verified account on the first authorized node”; it cannot promise the browser where the user opened the page. Users needing a particular account must select it explicitly.
+
+OAuth API publishing is currently unsupported. New controlled enqueue accepts legacy API route parameters for compatibility, stores EXTENSION, and returns the actual route. Existing API Intents retain their original routes, accounts, and execution facts; automatic rerouting and resending are forbidden. Unknown identity, probe failure, or unsupported capability cannot obtain extension submission permission.
+
+### 3.4 Invariants That Always Apply
+
+1. One business content unit has one sendable SendIntent. All accounts, project producers, nodes, and execution channels compete for it; switching accounts cannot create another sending opportunity.
+2. The bound target must match the actual actor, with the same account across all thread segments. Current-account identification, bound-account verification, duplicate prevention, execution authorization, quota, and outcome auditing cannot be disabled by users.
+3. Claim is not permission to send. Every segment requires backend authorization before submission; an uncertain send must not be retried merely because a lease expires.
+4. Account and task must belong to the same organization and be project-authorized. Default inheritance, node presence, or logging into the same account grants no additional permissions.
+5. Changing defaults or account policy does not rewrite queued identities. Revoking a node or terminating a workflow does not prove that an external request has stopped.
+6. Successful, uncertain, and partially successful history cannot be erased by deleting Posts, cloning records, switching channels/accounts, or reinstalling the extension.
+
+## 4. Identity, Default Configuration, and Content Intent Models
+
+Fields in this section describe the target contract; they do not imply that Prisma or the database already implements all of them. See §14 for existing fields and prepared migration status.
+
+### 4.1 Integration: A Specific Platform Publishing Actor
+
+Integration remains the sole social-account entity. Platforms without OAuth may register as SESSION_ONLY; there is no separate extension-account entity. OAuth credentials and multiple NodeSessions for the same actor reference the same Integration and may coexist.
+
+Primary account identity is `(organizationId, providerIdentifier, identityNamespace, normalized internalId)`. Preserve the original Integration.id and all Post/IntegrationProject references. Namespace rules include instance domains for federated platforms; platform IDs follow platform-specific normalization rather than universal lowercasing. Unresolved historical identities remain isolated as legacy; do not merge/delete history based on handles.
+
+**Do not use providerIdentifier+profile as the primary unique key**: it lacks tenant scope; profile may be empty and has provider-specific semantics; handles may change and be reused. profile supports display, search, and limited auxiliary verification. With a stable platform ID, a handle change updates display without creating a new actor. Use a dedicated handle namespace only when the platform truly exposes only a handle. Changes or reuse require verification rather than silently inheriting history. [X's official guidance](https://help.x.com/en/managing-your-account/change-x-handle) states that other users may take a previous username after it changes.
+
+OAuth and the extension use one identity-resolution service. Shared resolution covers fresh extension reports on seven platforms and OAuth connect/refresh for X/Reddit. The same provider, namespace, and verified platform ID reuse Integration; matching handles cannot override clearly different stable IDs. Cross-namespace association requires reliable evidence of the same actor, a protected linking process, or versioned identityAliases. For example, LinkedIn OAuth sub and browser member ID cannot be compared as bare strings. Unresolved cases return ACCOUNT_IDENTITY_UNRESOLVED and retain observations without execution eligibility.
+
+Legacy identity cannot be upgraded based on ID appearance alone. Administrators may call `POST /integrations/:id/identity/verify`; the backend reads the current actor using original OAuth credentials, checks the original ID and credential digest, rechecks permissions within the transaction, upgrades the original row, and saves identityAudit. Missing trusted evidence, identity conflicts, or existing coordination references preserve legacy status and return an explicit reason without automatic deletion/merging. Verification makes only read-only platform requests and does not publish.
+
+credentialSource/OAuth capability is separate from account identity. Extension reports update only permitted display/session information, not token, refreshToken, user customization, or disabled state. SESSION_ONLY is not API-capable. OAuth connect, manual connection, extension registration, refresh, and all upserts/lookups by ID use unified resolution; changing one unique index is insufficient.
+
+canonicalAccountKey identifies a unique actor within a tenant; trusted aliases map to the same key. Until duplicate-identity auditing is complete, different Integration.id values cannot be assumed to represent different real accounts. API and extension share account state, quota, and sending intents for that key; see §8.
+
+Register a new account by checking the specific identity, not platform rows.length. Unique constraints/CAS converge concurrent discoveries of the same actor. Creation permissions and account-count quotas are atomically checked through the shared creation flow; concurrent callers cannot each consume the same remaining slot. Matching an existing account does not consume another account slot. Failed creation still retains the node's observation and returns a per-platform reason without losing other platform reports. Registration does not automatically assign the account to a project.
+
+### 4.2 Deterministic nodeId, Local Profile Pairing, and Account Isolation
+
+**Decision for this version**: the user has accepted installing a local identity program and pairing the browser profile once. nodeId represents "the extension execution environment in this browser profile on this machine". It contains no AIsee user, organization, or social account. The local program computes the value below; the extension no longer generates a random UUID for nodeId:
+
+```text
+machine = [machineSource, normalizedMachineId]
+profile = [browserFamily, canonicalProfileDirectory]
+nodeId = lowercaseHex(SHA256(UTF8(compactJSON([
+  "aisee-node-id-v1", machineSource, normalizedMachineId,
+  browserFamily, canonicalProfileDirectory
+]))))
+```
+
+compactJSON uses UTF-8, does not escape non-ASCII characters, and has ordered arrays with no extra whitespace. The machine identifier is normalized to 32 lowercase hex characters; empty, all-zero, and all-f values are rejected. CPU model, IP, browser version, and user ID are not used. macOS reads IOPlatformUUID; Windows reads Win32_ComputerSystemProduct.UUID (SMBIOS); Linux reads /etc/machine-id, which is a **system installation identifier and is not guaranteed to survive an OS reinstall**. With no usable identifier, new controlled sending stops rather than degrading to a random number. The raw machine identifier is never stored in the backend or the send logs.
+
+browserFamily supports chrome, arc, edge, firefox, chromium. The profile path is taken by the user from chrome://version's Profile Path in Chromium, or about:profiles' Root Directory in Firefox. The local program verifies that the directory and Preferences/prefs.js exist and resolves the real path, symlinks, OS case rules, and Unicode NFC. It does not read cookies, history, or social passwords. The path is the profile identity explicitly chosen for this version: a restart, an IP change, an in-place extension update, or a reinstall after uninstall on the **same machine, same browser, same path** all compute the same nodeId. Changing profile/browser, moving the directory, an OS username change altering the path, or a changed machine identifier all change nodeId. A cloned VM with duplicate hardware UUID and the same profile path may collide; no absolute hardware uniqueness or unclonability is claimed.
+
+An ordinary extension cannot read these machine and profile identifiers directly, and standard Native Messaging does not guarantee the caller's actual profile path. First pairing is therefore **a local configuration binding the user verifies, not automatic hardware authentication of the browser profile**: running the local pair command generates a one-time pairing code valid for 5 minutes → the extension's options page requests the optional nativeMessaging permission → it previews the browser, full path, and nodeId → the user confirms. The UI does not accept restoring by "just picking a backend node name". A pairing still active within a short window is refused replacement; only an explicit local --replace allows replacement and invalidates the old local binding token. The same pairing requestId can be confirmed idempotently on retry; other requestIds must not redeem twice. This mechanism reduces mis-pairing; it does not claim to detect a valid but wrong profile directory the user selected.
+
+**The node protocol is not yet published, so it adopts a single public nodeId directly and builds no compatibility layer for development drafts.** The register body/response, node list, account view terminals, management requests, X-Extension-Node-Id, and claim responses all use the 64-character lowercase SHA-256 hex. The clientNodeId, installationId, registrationId, and terminalId aliases are removed; UUIDs remain for internal primary keys and idempotent requestIds, not for the public nodeId. The compatibility promise covers published business APIs; the unpublished node protocol requires a matching backend and extension version.
+
+| Field / identifier | Meaning and boundary |
+| --- | --- |
+| nodeId | Deterministic hash of local machine/profile; reused across AIsee users, organizations, and backends; a public identifier, not an authentication or recovery credential |
+| local bindingToken | Obtained after local first pairing, used only by the extension background and the local program; not the backend nodeToken, and not a second nodeId |
+| ExtensionNode.id | Database internal primary key, linking credentials, sessions, and executions under this user/organization; never returned as nodeId |
+| organizationId, registeredByUserId | Isolation scope determined by the JWT authentication context; the same nodeId may have different user/organization state |
+| registrationRequestId | Idempotent request ID for atomic registration, persisted per user/organization; the full registration body is persisted first, and an identical retry cannot swap keys |
+| credentialHash, credentialVersion | This user/organization's nodeToken digest and generation; credentials are not shared under the same nodeId |
+| name, browser, status, revision | Display information, ACTIVE/REVOKED state, and management revision for this scope; A revoking its own record does not revoke B |
+| lastSeenAt, extensionVersion, protocolVersion, capabilities | This scope's latest report and capabilities; online/verification state is not copied across the same nodeId |
+
+The database unique key is `(organizationId, registeredByUserId, nodeId)`. Authentication constrains all three fields and verifies the nodeToken; looking up the first row by public nodeId alone is forbidden. NodeSession, report receipts, and SendExecution.extensionNodeId reference the internal primary key. Execution authorization requires the JWT user/organization, original credential generation, lease, and fencing to all match; even if B knows the same nodeId, A's executionId, and the lease, B cannot read, preflight, start, or late-report A's execution. A shared nodeId grants no cross-account permission.
+
+Local state lives in an OS-user-private directory; POSIX directories are 0700 and files 0600, and Windows relies on the current OS user's directory ACL. File locks, atomic replacement, and file fsync are used; POSIX additionally fsyncs the parent directory. Machine/profile changes, corrupt state, permission errors, and persistence failures all refuse new controlled sending. The binding token only accesses local state; the backend nodeToken is backed up per backend/local-AIsee-user/backend-user/organization scope, never the JWT, social cookies, or submission journals. The raw profile path appears only in the local pairing UI and local state; the backend receives only nodeId, browser, display name, protocol version, and capabilities. This trusts the local OS user and the installed extension and does not treat the local directory as a security boundary against a malicious same-OS-user process.
+
+The extension stores `aisee:terminal:v1:identity` and the local bindingToken locally; `aisee:send:v1:node:<backend/local-AIsee-user/organization/backend-user>` stores that scope's nodeId, requestId, full registrationRequest, nodeToken, and report sequence. Identity initialization is serialized and read back for verification. Each account node-state update writes the local program first, confirms by sequence, then writes extension local storage and reads back; the report sequence only increases, and an existing requestId/nodeToken can never be replaced by another value. Worker restarts and account switches reuse the original state; switching A/B shares the nodeId but not tokens, reports, claim receipts, or logs. The registration response carries organizationId/registeredByUserId so the client can verify the protocol scope and detect an account switch during the request, avoiding backing up another JWT user's token under the original account. Older business API wrappers are unchanged.
+
+After uninstall and reinstall, reinstalling or keeping the local program and pairing the same profile computes the same hash, then reads the **currently authenticated scope's** original requestId, nodeToken, and sequence from the local backup; the backend credential cannot be re-obtained from the hash alone. Backend register still allows only a short-window replay of the same requestId/digest; when no credential was received and the replay window has passed, it must stop and go to manual review rather than forcing registration under a new requestId. If all local copies are lost, the original token cannot be claimed as recovered even if the same nodeId is computed. Node management save preserves nodeId/expectedRevision; only an administrator may explicitly specify another registeredByUserId.
+
+nodeId and credentials are not synced through storage.sync. A ZIP upgrade should still overwrite the original load directory and reload, preserving the build channel/public key and extension storage; uninstalling deletes the send journal, so recovering nodeId/credentials is not the same as recovering an already-clicked result. A missing journal or an unclear platform result must not be resent; SendIntent, UNKNOWN, the account write lock, and quota reservations continue to protect through the backend, and the content dedup key does not include nodeId. When the protocol is disabled, late reporting of existing results continues with the original credentials and does not additionally depend on the local program or shared identity initialization. Unmanaged LEGACY flows under a disabled master switch request no native permission, register no node, and require no local program installation.
+
+Installation and profile pairing steps are in the [standalone extension's native program README](../../aisee-browser-extension/native/README.md). Chrome/Chromium/Edge/Firefox provide user-level default install locations; Arc has no verified general rule yet, so a verified manifest directory or Windows HKCU key must be supplied rather than guessing and claiming support. Standard Native Messaging references: [Chrome docs](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging), [Firefox docs](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Native_messaging); Windows machine identifiers reference [Microsoft docs](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-computersystemproduct). Real browser/OS installation acceptance still has to be completed in the deployment environment.
+
+### 4.3 ExtensionNodeSession: Dynamic Login Association
+
+The unique key is (extensionNodeId, platform, actorKey). For ordinary platforms and LinkedIn personal, actorKey is the empty string; for LinkedIn company it is `linkedin.organization_id:<numeric company ID>`, derived server-side from the live identity, and clients cannot define it. The LinkedIn company session's platform is still linkedin, and the Integration.providerIdentifier is linkedin-page. It stores organizationId, integrationId?, current accountIdentity, lastVerifiedIdentity, verificationStatus, sessionRevision, probeId, evidenceKind, identityObservedAt, receivedAt, verifiedAt, and verificationExpiresAt.
+
+Node stores terminal state; NodeSession stores that terminal's current platform actor; Integration stores the social identity. **Periodic sync is not implemented as repeatedly rewriting a single "current extension" field on Integration.** The same account may appear in multiple NodeSessions, one node may have sessions on multiple platforms, and it may hold a LinkedIn personal session together with multiple company delegate sessions. A company session records the member controllerId controlling that browser and the COMPANY_ADMIN/COMPOSER evidence context; a personal account switch or logout report invalidates this node's company sessions. The account API's terminals[] is a read-only projection, not a manual permanent binding.
+
+- Heartbeats only update lastSeenAt; for example a 60-second lightweight report and 3-minute offline threshold, both configurable, with no guarantee of on-time execution while the browser sleeps.
+- Account switch/logout should be reported promptly and clear the old association; reports from different nodes do not overwrite each other. UNKNOWN is immediately non-executable, and the most recent verified identity may be kept for diagnostics.
+- reportSequence is monotonic; the same sequence with the same digest is idempotent, while a different digest or out-of-order sequence is rejected. Reinstall pairing restores the original credentials and persisted sequence without resetting to zero; a lost backup cannot re-register or lower the sequence via the public nodeId.
+- Only a fresh, acceptable live identity updates verification; CACHED/UNKNOWN, a duplicate probeId, an ordinary heartbeat, or a re-wrapped snapshot does not extend validity. Overly old or future observations are rejected, and an anomalous clock requires re-probing.
+- evidenceKind distinguishes LIVE_COOKIE_ID/LIVE_PAGE_ACTOR/CACHED/UNKNOWN; identity verification must not reuse blue-check/paid verified fields. start uses this attempt/segment's fresh live evidence; a cached valid session is used only for display and candidate matching.
+- A continuously VERIFIED identity may refresh only the verification time; an account switch, logout, or verification-state change increments sessionRevision. start validates the current revision.
+
+| Platform / actor | Namespace and normalization | Requirement before submission |
 | --- | --- | --- |
-| GET /integrations/list | organization账号列表，返回integrations数组，id/identifier/display | 原路径和organization范围保留，追加terminals/sendAvailability；不另建社交账号列表 |
-| GET /integrations/integration-project/list?projectId=... | 已有project账号列表，含projectDisabled及项目postingTimes | 复用为project账号选择来源，追加同样的终端/可用性字段，不再给organization列表重复增加project过滤职责 |
-| POST /integrations/integration-project | 按integrationId/projectId创建或更新关系；postingTimes、disabled | 保留upsert及既有字段；这是项目账号分配，不是默认账号选择，不能合并二者 |
-| DELETE /integrations/integration-project | 解除项目账号分配 | 保留旧方法/语义；本轮不为所有历史DELETE新增POST别名 |
-| POST /integrations/social/:integration/connect | 手工/OAuth连接并保存账号 | 保留，内部改用统一身份解析/唯一键；不另建账号创建API |
-| PATCH /integrations/extension-session | 插件当前保存登录身份/匹配创建账号 | 保留，增加同路径POST兼容入口供新版使用，共用服务；节点与身份字段按协议模式验证 |
-| GET /engage/reply-accounts?projectId=... | 现有回复账号数组；当前主要连接账号平台 | 保留数组及非敏感账号字段，追加terminals/sendAvailability；严格模式按实际项目关系筛选、扩展已验收的平台；输出改为明确DTO白名单 |
-| POST /engage/reply-accounts/:integrationId | 写projectId/engageEnabled，创建或更新项目参与设置 | 保留，控制账号是否允许reply；不承担project默认账号选择 |
-| GET /projects/:projectId/automation | overview、现有平台策略/队列状态 | 在现有overview追加默认账号及bindingRevision，不新增GET send-bindings |
-| POST /projects/:projectId/automation/enabled | 保存master enabled；关闭时撤回尚未开始的计划QUEUE，手工post/reply不撤回 | 保留开关及uncommit语义，不顺带修改默认账号 |
-| POST /projects/:projectId/automation/publishing | platforms/windows/enabled/commit/publishMethod | 可选accounts增量保存POST默认账号；已有平台/窗口/commit语义保留 |
-| POST /projects/:projectId/automation/replies | autoReplyEnabled及完整policies映射 | 可选accounts增量保存REPLY默认账号；省略accounts不改变绑定，policies替换不隐式清账号 |
-| POST /projects/:projectId/operation-plans | 生成计划；taskId/日期/platforms/keywords，dryRun query | 可选executionRoutes输入保存账号快照；继续生成接口，不借重试创建调用修改已有计划或收新费用 |
-| GET /operation-plans/:id、GET /projects/:projectId/operation-plans/active | 现有详情/active查询 | 保留原响应字段，追加executionRoutes/executionRevision；详情按持久化project归属校验，不靠客户端省略project绕过 |
-| POST /posts | 已有创建/编辑；type=draft/schedule/now，posts[].integration.id、value[].id、group等 | 直接复用账号字段和保存流程；新增可选revision/project绑定校验，不新增POST posts/save或同义integrationId字段 |
-| POST /posts/schedule | posts:[{id,publishMethod?,date?}]，按ID批量DRAFT入队 | 增加item可选integrationId/expectedRevision以选账号并排队；已有账号省略时保留；不恢复已经移除的planId模式 |
-| GET /posts/:id、GET /posts/publish-methods | 详情/现有发送能力查询 | 保留结构，追加只读执行信息；能力接口与严格账号能力映射，不再新建重复平台能力列表 |
-| POST /engage/opportunities/:id/save-draft | projectId/draftContent/策略，当前无账号输入 | 增加可选integrationId/revision，复用草稿保存和ReplySendIntent；不新增reply/save |
-| POST /engage/opportunities/:id/send-now、/schedule、/batch-send、/batch-schedule | 已有发送/预约操作，已有integrationId；schedule有scheduledAt | 增加可选publishMethod和已有草稿引用，extension分支进入统一队列；省略时保留原分支解析，不偷偷改成不同send path |
-| PATCH /engage/sent/:id | 编辑已预约回复内容/时间 | 保留兼容入口；如新版UI需要POST，增加同路径POST别名，共用同一编辑服务及版本约束 |
-| PUT /posts/:id/date | 修改日期 | 保留；新版需要时同路径增加POST别名，不新建一套日期修改逻辑 |
-| POST /posts/publish-due、POST /engage/reply-due | 现有领取；post body为limit，reply当前无body | 保留路径、due/pacing结构；严格模式节点认证及账号匹配，追加attempt字段，不新增另一套任务池API |
-| GET /posts/publish-due/count、GET /engage/reply-queue-status | 现有不领取的队列显示 | 追加节点/账号可执行计数与阻塞说明，仍GET且不产生claim |
-| PATCH /posts/:id/extension-published、/extension-publish-failed、/extension-removed | 现有post成功/失败/移除回传 | 保留旧字段和响应，为旧任务/本地待报告记录提供受限兼容；严格记录须经统一attempt验证 |
-| GET /engage/sent/:id/status | 现有轻量state/replyUrl及人工失败状态 | 保留，追加只读currentAttempt/sendBlockCode；不替代历史attempt核对查询 |
-| PATCH /engage/sent/:id/publish-reply、/removed；POST /engage/sent/:id/failed、/unconfirmed | 现有回复成功/移除/失败/未知回传 | 保留方法与字段，统一适配结果服务；不同方法不能成为绕过严格attempt的入口 |
-| PATCH /engage/sent/:id/reply-url、POST /engage/opportunities/:id/manual-reply | 人工已发送事实补录、后续URL补录 | 保留事实登记，不当成新发送授权；新protocol不能通过人工补录接口重新派发 |
+| X user | x.rest_id; handle is auxiliary | Verify the current sending actor; the old cache is invalid after an account switch |
+| Reddit user | reddit.user_id, unifying t2_ and bare IDs per rule | Both posting and commenting verify the current user ID |
+| LinkedIn personal | browser linkedin.fs_miniProfile, preserving opaque ID case; OAuth sub remains a separate namespace | Read the person's identity live and confirm the editor has that person selected; block if the page/identity selector is unreadable; do not compare bare IDs across namespaces |
+| LinkedIn company page | linkedin.organization_id, positive integer company ID; Integration provider is linkedin-page | Discover delegatable accounts on the native company admin page, select the company actor on the submit page and re-verify; an admin's personal identity cannot substitute, and COMPANY_ADMIN evidence does not grant final permission |
+| Dev.to | devto.user_id, positive integer string | The actual submit page's logged-in/data-user must match the live/dashboard read-only response; cookies/cache cannot substitute |
+| Hacker News | hackernews.handle, preserving username case | Verify the auth cookie live; when a page header username exists it must match, and /submit without a header must not guess someone else's profile |
+| Medium | This round uses medium.handle, the handle returned live by /me; it does not claim medium.user_id | Re-verify the person before submission; the original draft and preview draft IDs must match, and a handle change requires reconfirmation |
+| Quora | This round uses quora.user_id, a positive integer string; the profile slug is display-only | The authenticated user cookie and the live /settings unique own profile must hold simultaneously; device cookies or cache do not prove login |
 
-依据：[IntegrationsController](../apps/backend/src/api/routes/integrations.controller.ts)、[PostsController](../apps/backend/src/api/routes/posts.controller.ts)、[EngageController](../apps/backend/src/api/routes/engage.controller.ts)、[AutomationController](../apps/backend/src/api/routes/automation.controller.ts)、[OperationPlanController](../apps/backend/src/api/routes/operation-plan.controller.ts)及各DTO。POST /posts通过现有内容ID/group编辑，不能随意改变这些字段的含义。
+For all seven platforms in the table, POST/REPLY connect to the controlled submission adapter and automated tests; this does not mean real-platform acceptance is complete. The LinkedIn page actor is an independent capability and cannot send through the personal account API. Terminals declare post/reply/strictAccountVerification per platform; when the live identity or the editor cannot be verified, execution is blocked, and OPTIONAL cannot bypass it.
 
-新接口只补现有能力缺口：终端登记/管理、已有计划执行快照的独立编辑、发送前授权/租约/逐段核验/统一attempt结果和恢复查询。project默认账号保存复用automation，删除上一稿拟新增的GET/PUT send-bindings；节点心跳复用账号上报的轻量模式，不必新增独立heartbeat endpoint。
+### 4.4 OrganizationSendBinding / ProjectSendBinding: Independent Default Configuration
 
-## 3. 必须满足的业务约束
+What the product calls an "account global default" is defined in the backend as the current Organization default; no cross-tenant bare User default account is added. A user's personal preference only controls the preselection requirement and does not change the tenant owning the default account. Both resources store integrationId?, revision, updatedByUserId, and updatedAt keyed by platform/action=POST or REPLY. The Organization key is (organizationId, platform, action); the Project key is (organizationId, projectId, platform, action). The existing ProjectSendBinding continues to be reused, an organization-level resource is added, and organization-level uniqueness must not rely on an ordinary unique key containing a nullable projectId.
 
-1. AIsee 用户身份负责登录与权限；organization 负责租户隔离；project 负责运营归属；Integration 负责平台身份；ExtensionNode 负责执行位置。这些标识不能互相替代。
-2. 插件任务排队时必须有确定的 `organizationId + projectId + integrationId + targetAccount`；extensionNodeId 在领取时确定。草稿可未绑定账号，无账号任务不能进入执行队列；有账号但无在线终端的任务可以排队等待。
-3. 账号必须分配给当前 project，并且 Integration 与 IntegrationProject 均未禁用；reply 还要求该关系的 `engageEnabled=true`。节点与账号同属该 organization，project 必须有效且调用者有权限。
-4. 相同账号可分配给多个 project；post 与 reply 可选不同账号。首版每个「project/platform/action」只有一个默认账号，单条任务可覆盖为其他已授权账号，不随机选择或轮换账号。终端不在此默认绑定内。
-5. 修改默认路由仅影响随后创建或显式重新绑定的任务。已排队任务不可在领取时重新读取默认路由并替换账号。
-6. 保存与排队验证账号、project授权及目标平台身份；领取与发送开始再验证执行终端、会话和操作能力。没有可用终端是运行状态，不是缺少业务账号绑定。
-7. 日志、历史记录保留选定账号、实际核验账号、执行节点与 attempt；成功后不能将选定账号覆盖成“最近活跃账号”。
-8. 自动回复及默认人工回复共享业务发送意图，同project、同目标账号、同opportunity的默认回复最多一次；不同project/账号仍可各自回复。明确追加回复与默认回复使用不同意图。
-9. 生成或保存计划不得隐式修改当前project自动回复账号。用户明确变更默认账号与已有任务改绑是两个分别授权的操作。
+A configuration that was never created, or integrationId=null, means that level is INHERIT and does not forbid sending. Clearing keeps the record and increments revision, avoiding delete-and-recreate ABA. expectedRevision=0 means only that no record was ever created; the revision after clearing is still used for the next save. Platforms/actions not submitted keep their existing values.
 
-## 4. 数据模型
+A Project binding must verify IntegrationProject; an Organization binding allows only valid accounts of this organization and cannot grant project permissions. An invalid configuration shows the reason and does not auto-delete and fall back to another account. Disabled-account permissions are expressed through IntegrationProject.disabled/engageEnabled, not by a null default configuration.
 
-字段名是建议的实现契约，后续实现需补 Prisma relations、索引和迁移 SQL。本次仅产出设计，不执行迁移。
+Within one save request, permission/version validation of all submitted items, configuration persistence, and the requestId receipt complete atomically; if any item fails, nothing in the request is changed and a success must not be returned after saving only half. The idempotency scope includes organization, authenticated user, action, and resource ID (projectId for the Project level); the same key with the same digest replays the original result, replay is checked before the old expectedRevision, and the same key with a different digest returns 409. Account configuration is not stored in replyPolicies or the LLM planPayload.
 
-### 4.1 复用账号与 project 授权
+Reads distinguish the configured layer from the effective layer, returning bindingRevision, effectiveIntegrationId, source=EXPLICIT/PROJECT/ORGANIZATION/CURRENT_SESSION/UNBOUND, and the source revision/inexecutability reason. A draft's effective-account preview is not an execution snapshot; terminals[] is still computed by the unified session projection.
 
-`Integration` 仍是唯一平台账号实体，不另建一套“插件账号”。没有 OAuth 凭证的平台账号也可使用现有 extension-session 创建 channel 的能力登记；身份来源标记为 extension，不将空 OAuth 凭证伪装成 API 可用账号。
+### 4.5 OperationPlan: Content and Operational Objectives Only
 
-平台报告发现账号后可以登记 Integration，但不得自动授予任何 project 使用权限。project 分配仍由已授权用户完成。发送端只拿可展示身份字段，不返回 token、refreshToken 或平台 cookie。
+New plans continue to generate content and objectives from task/project/time range/platform; they do not require account selection, do not store a new sending route snapshot, and do not change default accounts. The LLM does not generate integration/node/permission information. materialize creates only DRAFTs with deterministic IDs, accountSelectionMode=INHERIT, and an empty integrationId; repeated materialization does not reset existing manual content edits or EXPLICIT selections.
 
-`IntegrationProject` 的存在表示 project 可以使用账号；`disabled` 决定暂停；`engageEnabled` 决定能否用于 reply。修正当前 reply 账号列表中“没有关系也算允许”的默认行为。
+Personal/page providers are no longer decided by whether some Integration type exists in the organization. The plan's canonical platform is preserved, and the concrete Integration selected at enqueue is validated against the corresponding provider/actor and content settings; LinkedIn page content must not be silently changed to personal sending.
 
-#### 平台身份唯一规则
+Retrying a plan does not regenerate, charge again, or rewrite existing tasks because a default account changed. Changing accounts goes through per-item/batch draft editing or the independent default configuration; no plan-level priority is added. The previous phase's executionRoutes/executionRevision and endpoints remain under the restricted compatibility of §7.6 and are not required fields or a default source for this version's plan flow.
 
-Integration继续表示一个确定的平台发布actor。新增必填的identityNamespace（先nullable回填），建议账号唯一键改为`(organizationId, providerIdentifier, identityNamespace, internalId)`，替换现有`(organizationId, internalId)`；平台ID必须按各平台规则规范化，不能统一把所有ID小写。首版支持平台的命名空间见§4.3；同handle在不同平台是不同账号，同平台不同ID命名空间不能直接比较或合并。
+### 4.6 Post: Selection Intent Separated from Resolved Execution Target
 
-服务端从上述身份生成canonicalAccountKey，用于回复防重和账号写锁；同一个Integration的已确认身份别名仍映射同一key。若支持实例型平台，provider/namespace规则必须包含实例域，不能把不同站点相同ID合并。已有Post/IntegrationProject引用的Integration.id保持不变，不能用迁移重建账号来破坏历史。
+Post.integrationId/providerIdentifier/publishMethod continue to be reused, as does EngageSentReply.postId; no second copy of the actual sending account is stored for a reply. Added or adjusted target fields:
 
-新增版本化identityAliases和credentialSource元数据：别名仅在有可靠同一actor证据或受权限保护的账号关联流程后写入；SESSION_ONLY不得被当成可用OAuth凭证，API发布/refresh/私有metrics必须单独验证OAuth能力。插件报告只能更新允许的身份展示信息，不能覆写已有OAuth token/refreshToken或将disabled账号重新启用。
-
-OAuth连接、插件上报、手工连接、refresh、findIntegrationByInternalId及所有upsert共同使用身份解析服务。已有账号跨namespace不能只因handle相同就自动合并；无足够证据时返回ACCOUNT_IDENTITY_UNRESOLVED，保存终端观察但不标为可发送。只有handle可用的平台将handle作为明确的handle命名空间身份；改handle或handle被复用不得静默改写旧发送历史，应重新核验/登记或显式关联。
-
-#### 同平台新账号登记与额度
-
-现有上报流程调整为：验证节点及观察证据 → 按provider/namespace/identity匹配具体账号 → 找到则更新允许字段及本节点会话 → 未找到且身份明确、创建权限和额度允许则创建 → 未找到但额度不足或身份不能确定则保存未匹配观察，返回ACCOUNT_REGISTRATION_LIMIT_REACHED或ACCOUNT_IDENTITY_UNRESOLVED。判定依据不是“平台已有几行”。
-
-重复上报幂等；多个终端同时发现同一账号，由数据库唯一键保证只创建一个Integration，冲突后读取胜者。账号额度检查也必须在并发创建时原子执行，不能让两个节点各自看到余量后同时超额创建。成功登记不自动分配project，额度失败不丢失其他平台上报。
-
-已有账号可更新profile/name或补缺失头像，但不因会话报告覆盖用户已自定义字段。租户内若历史上发生跨平台覆写，先保存审计证据、核对真实身份及引用，隔离无法恢复的记录；本次迁移不根据handle自动合并、删除或重新归属历史。
-
-### 4.2 ExtensionNode：节点与生命周期
-
-| 字段 | 用途 |
+| Field | Semantics |
 | --- | --- |
-| `id`, `organizationId`, `registeredByUserId` | 服务端节点 ID、租户、登记者 |
-| `installationId`, `name`, `browser` | profile 本地存储生成的安装 UUID、用户可读终端名称、插件上报的浏览器类型；UUID 不是凭证，浏览器名字不能代替 ID |
-| `credentialHash`, `credentialVersion` | 服务端发放的随机节点密钥摘要及轮换代次；原文只在登记/轮换响应返回 |
-| `status` | `ACTIVE / REVOKED`；在线与离线由心跳推导，不用同一字段混淆 |
-| `revision` | 节点管理的乐观并发版本，命名/撤销修改递增，不与credentialVersion混用 |
-| `lastSeenAt`, `extensionVersion`, `protocolVersion`, `capabilities` | 服务端接收时间、插件版本、协议版本、各平台可执行操作和身份校验能力 |
+| accountSelectionMode | EXPLICIT / INHERIT / CURRENT_SESSION; a draft saves the explicit input source, and enqueue may convert to CURRENT_SESSION; it must not be guessed from a non-null integrationId. A legacy draft with an account but an unknown source requires an explicit reselection |
+| integrationId, sendTarget | The account explicitly chosen on the draft or finally frozen at QUEUE; the target snapshot includes version, platform/actor, namespace, comparable ID, and canonicalAccountKey |
+| bindingSource, bindingSourceRevision | EXPLICIT/PROJECT/ORGANIZATION/CURRENT_SESSION and the source revision, used for explanation, so later default updates do not rewrite the task |
+| accountResolution | Draft unresolved, RESOLVED, AWAITING_CURRENT_ACTOR, or PRESELECTION_REQUIRED; after a successful first claim it becomes RESOLVED while bindingSource remains CURRENT_SESSION |
+| contentUnitId, sendIntentId | Stable business content identity and the unique sending intent; must not be rebuilt on retry or account switch |
+| routeRevision, contentRevision | Revision of route and of content/media/target/thread structure; authorization binds both |
+| sendBlockCode | Wait/refusal reason, without adding Post.state values to express every execution state |
+| executionProtocol | The server writes LEGACY or ACCOUNT_BOUND_V1; new controlled tasks under both product policies use the new protocol and clients cannot downgrade it |
+| sendOrigin, policyRevision | The real producer's MANUAL/AUTOMATION and the account policy revision; not inferred from source=engage or AI copy |
 
-建议唯一键 `(organizationId, installationId)`。节点凭证与 AIsee 用户凭证联合使用：用户 token 证明当前 organization 身份与权限，节点密钥证明安装实例。首版节点同时绑定登记者，所有执行请求要求当前 userId 等于 registeredByUserId；同 organization 的其他用户可在权限范围内命名/撤销节点，但不能借用其执行凭证。换用户或 organization 时不复用原 nodeId：旧身份仍有效时先撤销旧节点，清理本地凭证及会话，生成新的 installationId 和节点并重新登记。若旧身份已失效，则停止旧本地执行，由原登记者或管理员撤销旧节点，不能用新用户身份越权撤销。
+An EXPLICIT save on a DRAFT validates the account and permissions; INHERIT may clear an unused preview, but an execution snapshot that is already frozen or started is not treated as an ordinary clear. Returning to DRAFT also preserves the historical source and SendIntent, and later explicit edits/re-enqueue follow the state boundaries.
 
-未领取 QUEUE 保持原账号绑定，新终端仅在新登记者具备对应 project 权限且会话匹配时可领取，不需要重新选择业务账号；已 RESERVED 的旧 attempt 必须撤销/过期后重新领取，SENDING/RECONCILING 继续核对，不转交新节点。节点重装同样新建 ID；注销清理凭证并停止领取。installationId 在同一次登记身份期间稳定，换 AIsee 身份时更换 UUID，旧凭证、本地 attempt及历史缓存不得跨身份复用。
+The root and every thread segment share one account/route; the actual execution terminal is stored only on the attempt. Content/route modifications must CAS; editing a RESERVED task first safely cancels the old execution, and SENDING/UNKNOWN or content already confirmed partially or successfully cannot be rebound or rewritten and resent as new content. Enqueue, claim, and start validate consistency.
 
-终端名称由用户修改，例如“办公电脑 · Chrome · 运营A”；浏览器类型自动上报，电脑名称和 Profile 名称无法可靠获取时由用户补充。ID 保存在 profile 本地、不能经浏览器 sync 在不同安装共享；复制 profile 导致 ID/凭证克隆时需要重新登记，不能把它们视为独立终端。
+Create/edit/schedule requests remain idempotent: POST /posts reuses the existing posts[].integration.id and value[].id/group, and the missing selection mode and version are added through optional DTO extension. Creating and queuing requires a stable requestId/itemKey, or saving a draft with a deterministic ID first; the same key with the same digest returns the original root/content intent, and a different digest returns 409. The idempotency key must not be only a text hash; deliberately creating independent published content may use a new business intent, but safe recovery must not bypass an unknown result with a new key.
 
-在线心跳与平台身份探测分开：例如每60秒以POST /integrations/extension-session的platforms:[]轻量上报保持节点心跳，超过3分钟显示离线；空报告不探测平台、不清空既有会话、不刷新verifiedAt。现有有效due请求也可刷新终端lastSeenAt，不能把仅5分钟一次的reply轮询当成60秒心跳。阈值由配置控制，平台按能力刷新并在发送前现场验证；浏览器休眠后恢复先重建alarms并重新核验，不保证睡眠中持续心跳。
+### 4.7 SendIntent: Unique Sending of Content Across Accounts, Terminals, and Channels
 
-### 4.3 ExtensionNodeSession：节点当前平台身份
+A general SendIntent is added, containing at least id, organizationId, contentUnitId, rootPostId, contentKind, status, selectedIntegrationId?, routeRevision, fencingVersion, and segment facts. The unique key is (organizationId, contentUnitId), with rootPostId as the unique sendable root; **integrationId, nodeId, publishMethod, and contentRevision are not placed in the dedup unique key**.
 
-| 字段 | 用途 |
+An ordinary Post uses its root and thread as the content unit; a single Reply is one content unit. Each platform Post materialized independently in a plan is a different content record and must not be merged merely because the text matches. contentUnitId is generated by the server or derived from a stable business slot and cannot be replaced by a client on retry; repairing and rebuilding a Post, cloning the queue, and switching methods must all inherit the original content intent. If a recurring publication is an explicitly new occurrence in the product, it uses an explicit occurrence to form an independent new business content, and an old failure is not treated as a new occurrence's send.
+
+SendIntent states cover at least DRAFT/QUEUED/RESERVED/SENDING/SUCCEEDED/FAILED_FINAL/RECONCILING/CANCELLED; it is the sole authority on content sending, and Post.state is only a compatibility business projection. claim atomically writes RESERVED and the active execution, and start atomically writes SENDING; a safe cancellation that is definitively not started may return to QUEUED. Success does not roll back; FAILED_FINAL must be judged together with confirmed segments and must not be retried on the failure state alone. CONFIRMED/NOT_SUBMITTED/UNKNOWN are segment results, while SUCCEEDED/FAILED_FINAL/RECONCILING are overall intent/execution states; the two enum sets must not be mixed.
+
+Each started execution may settle only the facts of its frozen account and must not rewrite an old execution's account to conceal history; any CONFIRMED segment permanently blocks re-dispatch of the same content from the root, including through another account. UNKNOWN keeps its protection; only when submission is definitively not made and the old execution has stopped may a new attempt be created, still reusing the original SendIntent. An explicit content rebinding requires that no segment is confirmed or unknown and that all old active executions have ended safely; existing reservations must be checked and cancelled and versions incremented, and a new intent must not be created to "sidestep the conflict". An execution that was once permitted but is proven entirely unsubmitted keeps its history, and may be explicitly rebound under this rule after safe convergence.
+
+For threads in the first version, partial success only allows reconciliation/late recording, not root retry or automatic continuation. Different content may belong to the same account, subject to the shared account lock/quota; independent new content with identical text is not globally hash-banned. A user submitting directly on the platform is outside backend authorization control, and late recording must faithfully record it rather than pretending the system guaranteed no duplicate.
+
+### 4.8 ReplySendIntent: Generation Dedup Without Splitting a Business Reply by Account
+
+Reply generation keeps a separate ReplySendIntent, uniquely keyed by (organizationId, projectId, canonicalOpportunityId, kind, occurrenceKey), **excluding canonicalAccountKey and integrationId**. By default kind=PRIMARY and occurrenceKey is the server-fixed non-empty constant `PRIMARY`: the default manual and automatic replies to the same project/opportunity share one content unit. Every field of the unique key is non-null, so an ordinary nullable unique key cannot let multiple PRIMARYs through, and a client cannot pass another occurrenceKey to evade the rule. Changing the default account, switching execution channels, or deleting and recreating the Post cannot produce a second PRIMARY; another project gets an independent intent only for genuinely independent new content.
+
+A manual explicit addition uses ADDITIONAL with a stable requestId, derives a fixed occurrenceKey server-side from the authenticated idempotent request, and creates an independent content record; replaying the same request reuses the original key, and a different digest returns 409. automation cannot bypass default generation dedup via additions, a new account, or a new Post. When PRIMARY finds an existing manual DRAFT it returns that content without overwriting or auto-sending; SendIntent owns the unified sending state after generation, and ReplySendIntent owns only generation attribution/the unique sendable Post and the one-to-one mapping to SendIntent, no longer maintaining a second, conflicting execution state.
+
+The generation right stores generationTaskId, generationRevision, ownerTokenHash, reservationExpiresAt, modelStartedAt, and GENERATING/RECOVERING/DRAFT/FAILED/CANCELLED. Only a producer that successfully reserved the owner may call the LLM, save, and queue. An unbound draft may still obtain a generation intent first and does not need to choose an execution account early in order to reserve the generation right.
+
+Timeout recovery first CASes into RECOVERING, invalidates the old owner, and increments the version, then idempotently reconciles generation cost/reservation under the original taskId; external billing does not enter a long database transaction. While the cost is unknown or failing, RECOVERING is kept, and refunding before generating is not allowed. A new generation reservation may be created only after the original task is confirmed converged. A late old owner contributes only audit/usage evidence and may not write the Post, queue, or double-refund/double-charge; a recovering owner that times out again is also taken over by CAS. Saved content stays DRAFT and is not automatically regenerated.
+
+canonicalOpportunityId is normalized server-side and does not use URL aliases or project state IDs. Existing opportunity NEW/SCHEDULED/REPLIED values are only flow summaries, not sending mutexes; DISMISSED/EXPIRED and deleted/non-repliable targets remain validity rules. cancelAndSendNow must not delete an authorized/unknown Post and recreate it; a safe not-started reschedule reuses the same content and intent. Historical duplicates first keep the facts and are reconciled in isolation, rather than being deleted by adding a unique index.
+
+### 4.9 SendExecution: Extension Attempts and API Executions
+
+ExtensionSendAttempt stores the SendIntent, rootPostId, internal extensionNodeId link, integrationId, route/content revision, the sessionRevision at claim, credential/installation generation, leaseTokenHash, leaseExpiresAt, fencingVersion, startedAt/lastProgressAt, actualAccount, and the result. Each segment separately stores the sessionRevision confirmed at live-evidence time, and start compares this segment's revision with the current NodeSession, so the revision at claim is not treated as the session revision for the whole thread forever. The API uses an internal ApiSendExecution to record the workflow/credential actor without faking a node identity; both share SendIntent, AccountWriteState, budgets, and the result service.
+
+Active states are RESERVED → SENDING → SUCCEEDED/FAILED_FINAL/RECONCILING; a not-started reservation may become EXPIRED/CANCELLED. Each SendIntent has at most one active execution, and this cannot be constrained on only one Post or one attempt table. Cross-API/extension active uniqueness is guaranteed by a shared coordination row/database constraint; old executions are kept permanently. Segments record the permit, submission digest, evidence, and PENDING/AUTHORIZED/CONFIRMED/NOT_SUBMITTED/UNKNOWN.
+
+releaseId records only a real platform publication ID, and a new lease is not stuffed into that field. A lease manages claiming only; after sending, a timeout turns into reconciliation rather than opening a second permit. The one-shot permit is a controlled-executor protocol and must not claim that an external platform understands permitId or that absolute exactly-once holds.
+
+## 5. Permissions and IntegrationProject.engageEnabled
+
+| Mechanism | Question it answers |
 | --- | --- |
-| `organizationId`, `extensionNodeId`, `platform` | 会话所在节点与平台；唯一键 `(extensionNodeId, platform)` |
-| `integrationId?`, `accountIdentity` | 匹配到的 Integration；实际观察身份（ID、命名空间、handle 等） |
-| `verificationStatus` | `VERIFIED / LOGGED_OUT / UNKNOWN / UNSUPPORTED` |
-| `observedAt`, `receivedAt`, `verifiedAt`, `sessionRevision` | 客户端观察时间、服务端接收报告时间、服务端最后一次确认当前账号身份时间、节点平台会话版本 |
-| `evidenceKind`, `probeId`, `identityObservedAt`, `verificationExpiresAt` | 现场/缓存/未知证据来源、一次实际探测ID、真实身份探测时间及服务端计算的核验有效期 |
+| IntegrationProject exists | Is this project allowed to use this account |
+| IntegrationProject.disabled | Is this project's use of the account paused |
+| IntegrationProject.engageEnabled | Is this account allowed to reply in this project |
+| Organization/Project default | Which of several authorized accounts is chosen by default |
+| Automation master/publishing/replies | Whether the corresponding tasks are generated and scheduled automatically |
 
-只有服务端身份匹配成功才能写入 `integrationId`；请求里声称的 integrationId 不能直接成为匹配事实。每次身份改变、登出或核验失效时递增 `sessionRevision`。上报带节点内单调序号，拒绝乱序报告；重复序号幂等。插件重装通过新节点隔离序号。
+engageEnabled and Automation do not overlap: for example an account may be allowed to post officially but forbidden from commenting, or Automation may be off while the user can still reply manually. The first version keeps account-level reply authorization, and the UI may fold it into advanced settings. If the product later removes "can post but cannot reply", first audit the false configurations, migrate the API/UI/execution validation, and only then deprecate it; removing the field must not be used to expand permissions. Selecting a forbidden account must produce an error and must not quietly enable it.
 
-成功核验身份才更新verifiedAt。普通心跳只更新终端lastSeenAt；UNKNOWN报告只更新receivedAt，不刷新verifiedAt。verificationExpiresAt决定核验有效期，不能仅凭新接收时间重新授予完整TTL。显式UNKNOWN立即不可执行，即使前一次核验尚未过期。换账号或登出时清除原关联和原verifiedAt，新账号重新核验后才建立关系。
+The legacy reply list behavior of "allowed without a relationship" must be unified with the execution side on a real project relationship; historical attribution/metric backfill may read already-sent facts and does not erase the past author because the reply is currently disabled. The Organization default only supplies a candidate default and does not grant IntegrationProject.
 
-新报告逐平台携带`verificationStatus`、`evidenceKind=LIVE_COOKIE_ID/LIVE_PAGE_ACTOR/CACHED/UNKNOWN`、probeId、identityObservedAt、identityNamespace、账号身份和reportSequence。保持旧platform/loggedIn/id/handle/name/picture字段，checkedAt仅兼容诊断。身份核验状态不得复用社交账号蓝标/付费认证等同名verified字段。
+The first version's permissions are: a currently valid member of the organization with the capability to perform the action, ProjectValidationService confirming the project belongs to the organization's corresponding AIsee owner and is valid, and the actual account relationship allowing the action. The existing service does not accept userId as a project ACL, so "members see only some projects" cannot be claimed to exist. registeredByUserId is the local authenticated User.id and differs from the external ownerUserId.
 
-插件身份缓存复用原probeId、identityObservedAt和来源；重新包装快照、重传或读取缓存不得伪装成新探测。重复probeId不延长verifiedAt/verificationExpiresAt，新的reportSequence也不能替代新证据。服务端拒绝过旧、未来时间、乱序报告，按接收时间和实际观察年龄限制有效期；首次缓存报告不能取得比原观察更长的剩余TTL。时钟差异常则要求重新现场核验，不信任客户端时钟自动延期。
+When the backend is asked only by taskId, it still reads and validates organization/project from the persisted task and does not bypass that because the body omitted projectId. An ordinary member can manage their own terminals, and an administrator can manage organization terminals but must not impersonate credentials. Plan/quota guards do not replace member and role authorization. A failed external project check pauses new submissions; short caching means a disable has a finite delay, and cancelling in-flight requests instantly must not be claimed.
 
-缓存可用于账号展示及在原核验有效期内发现候选终端；start必须要求当前attempt/segment现场探测并产生新probeId，不能只调用返回缓存的probeSessionAccount。新鲜度阈值及强制现场探测API纳入两仓库协议测试。
+Policy/authorization validation runs at the save, enqueue, and claim/start boundaries; already-occurred results still allow authenticated settlement or a restricted manual import. Adding user-level project ACLs later requires upgrading backend execution, cache keys, and the session projection together.
 
-#### 身份与操作能力矩阵
+## 6. Business Flows and Configuration Changes
 
-以下是身份核验验收要求，不代表现有插件已经通过严格发送验证。上线前逐平台、逐POST/REPLY操作跑真实场景；只有通过者公布strictAccountVerification能力，其余只展示会话或返回CAPABILITY_UNSUPPORTED。
+### 6.1 Operation Plan and Drafts
 
-| 平台/actor | 身份契约 | 严格发送前置条件 |
-| --- | --- | --- |
-| X用户 | x.rest_id；handle仅展示/缺稳定ID时受限匹配 | 核验当前发送actor，验证切号后旧缓存不放行 |
-| Reddit用户 | reddit.user_id，统一t2_与裸ID | 当前用户ID与目标一致，发帖/评论均适用 |
-| LinkedIn个人 | 明确OAuth sub与浏览器member ID各自namespace | 有已验证别名映射或可靠同actor关联；不同namespace不比较裸ID |
-| LinkedIn页面 | 页面actor ID，与个人actor区分 | 插件明确支持页面选择且现场核验页面actor，否则不派发 |
-| Dev.to用户 | devto.user_id，cookie存在不等于命名身份 | 在实际提交页面识别expectedUserId，缓存/匿名cookie不放行 |
-| Hacker News用户 | hackernews.handle，平台规则保持大小写语义 | 登录页/提交页确认目标username，不能只证明有cookie |
-| Medium用户 | medium.user_id优先，缺稳定ID时medium.handle | 在可验证当前作者的页面确认actor，改handle需重新确认身份 |
-| Quora用户 | quora.user_id或quora.profile_slug | 当前页面核验expectedSlug/ID，设备cookie不证明已登录 |
+Generation, preview, retry, and materialization do not read default accounts to write Posts and do not require a plan-level account selection. In the draft editor the user may choose "inherit default" or an explicit account; applying an account in batch is essentially an explicit per-item edit, returning the editable count and the skip reasons for queued/started/sent items, without re-invoking the LLM or charging.
 
-N1/x=x1 与 N2/x=x2 是两条独立记录，互不覆盖。节点会话只记录当前状态；任务快照、attempt 才记录历史。旧 `activeSessionClient` 可暂作展示兼容字段，不再用于节点路由或成功归属；若继续输出，只能作为多节点会话的汇总信息，不能维持“匹配一个、其余全部 API”的上报写法。
+A default-configuration update changes only the effective preview of INHERIT drafts; the real enqueue freezes per §3. A historical plan's account snapshot is only for compatibility/audit and does not become an implicit level above the project default.
 
-同一账号可以出现在多个终端会话中，不对 integrationId 设置终端全局唯一约束。登出或确认切成其他账号时清除原账号的当前关联；UNKNOWN 可保留最近一次匹配用于诊断，但不可当成可执行会话。账号 API 的 terminals[] 是这些会话的只读投影，不是用户手动建立的永久关系。
+### 6.2 Manual Post/Reply, Scheduling, and Batching
 
-### 4.4 ProjectSendBinding：提前选择默认社交账号
+Saving a DRAFT may omit the account. An explicit choice is saved as EXPLICIT; clearing the choice uses INHERIT and is not guessed from an existing integrationId. An ordinary Post reuses integration.id, and a Reply keeps its existing account field and adds an optional integrationId when missing, so one DTO does not demand two synonymous account fields.
 
-| 字段 | 用途 |
-| --- | --- |
-| `id`, `organizationId`, `projectId`, `platform`, `action` | `action=POST / REPLY`；唯一键 `(organizationId, projectId, platform, action)` |
-| `integrationId` | 明确选择的社交账号；不保存 extensionNodeId |
-| `revision`, `updatedByUserId`, `updatedAt` | 乐观并发版本与变更审计 |
+Sending immediately is the same queue flow with publishDate=now. A manual explicit send of AI copy is still MANUAL; it may be submitted when the current page has no extension, and waits when the existing account has no terminal. An OPTIONAL task with no account shows AWAITING_CURRENT_ACTOR; newly added controlled tasks are always executed by the extension, and an existing API execution does not switch automatically.
 
-该表表达默认账号选择，不能替代 IntegrationProject 授权。默认绑定不放进 `replyPolicies`：那个 JSON 已承载回复与发布策略，账号外键、并发修改和统一查询需要独立模型。新增默认绑定不会创建账号与某一终端的永久绑定。
+A web page/popup bridge passes only a legal task ID and a wake-up hint, and the executing extension still claims/starts; a broadcast must not hand the same text to multiple extensions for direct submission. A local compose with no legal task is allowed only to fill in a draft, and behavior the user submits directly on the platform is not covered by the coordination guarantee.
 
-节点删除使用撤销/软删除；账号解除 project 分配不级联删除发送历史。绑定随授权丢失变为不可执行，并向用户说明原因。租户一致性由服务校验和同租户复合外键约束；不能仅依赖 UUID 难猜。project 是外部引用，继续由现有 ProjectValidationService 验证。
+A batch persists the content intent and execution per item before triggering side effects, keeping the original response wrapper. When a later item fails after an earlier one succeeded or is unknown, the earlier Post must not be deleted or the already-occurred facts rolled back as a whole; recovery retries the original item and must not resend the whole batch. A thread uses the root as the business unit with one submission permit per segment.
 
-### 4.5 OperationPlan：执行绑定快照
+### 6.3 Automation Controls Only Automation
 
-新增 `executionRoutes Json?` 和 `executionRevision Int`，独立于 LLM 生成的 `planPayload` 和现有目标摘要 `data`。Json 使用固定版本 DTO，保存每个平台 POST/REPLY 的已验证账号、绑定来源及目标账号快照；客户端只能提交账号标识，快照由服务端构造。executionRoutes 名称保留，但只表示业务账号路由，不保存终端 ID。
+Automation continues to store master, platform switches, time windows, reply policies, commit, and so on, and does not become a second default-account store. Reads may show the effective account/source/terminals; account editing moves to the independent configuration. Legacy accounts writes delegate to the same binding service and do not implicitly enable scanning, master, reply, alignment, commit, or retraction.
 
-LLM 不生成账号 ID、节点 ID或权限信息。计划内容生成与执行选择分开：内容可以先生成，但所有启用的执行操作在排队前必须完成绑定。提前选择时，生成前保存执行快照，materialize 时传给 Post，重复 materialize 不能重置用户已经编辑的路由。
+When an operation is enabled without a legal account: REQUIRED pauses that operation's new generation/enqueue and returns the missing-binding reason; OPTIONAL's extension may use controlled CURRENT_SESSION but still needs a candidate account meeting authorization/verification/capability. With no executable terminal, the first version pauses new automatic reply generation, while manual generation/scheduling of existing content can still proceed offline; the API checks its own credentials and does not require the extension to be online.
 
-当前 `create` 的内容幂等条件保持 project/日期/平台。改变执行账号不应重复收费生成同样文案：命中已有计划且请求路由不同，返回该计划并要求显式调用执行路由更新接口，不能忽略不同路由，也不能因重试悄悄改计划。执行更新带 `expectedRevision`，仅影响未排队、未开始的指定内容；已排队任务遵循单独重新绑定流程。
+Automatic generation first reserves the generation right under a ReplySendIntent that excludes the account, and only then deducts the generation quota; when a default exists its authorization and channel are pre-checked, and an OPTIONAL without a default pre-checks whether any eligible current actor exists. That check does not fix an execution terminal/account and produces no permit. At enqueue after generation it re-resolves against the latest selection/default; on failure the DRAFT is kept rather than deleted and regenerated; an already-QUEUE task does not re-read defaults. New generations and existing QUEUEs claim uniformly, and the branch that sends unclaimed content directly via _draftOne is cancelled.
 
-自动reply首版以ProjectSendBinding的REPLY账号为执行默认。计划提前选REPLY账号只保存“建议执行账号”快照；生成、保存、更新草稿或重试计划均不得修改project默认绑定。保存未来计划不会影响当前自动回复。
+Automatic and manual tasks are separated into lanes by the server-side sendOrigin. Turning off Automation/automatic replies stops only AUTOMATION's new generation/claiming and does not pause MANUAL tasks the user explicitly scheduled; both obey project authorization, content dedup, account safety pacing, and applicable hard quotas.
 
-需要应用计划建议时，用户明确调用现有POST /projects/:projectId/automation/replies，携带accounts里的integrationId和该binding的expectedRevision；计划启用界面可提供独立的“应用建议回复账号”选择，默认不应用。该操作显示会影响随后新生成回复、不会改绑已有QUEUE；失败返回版本冲突并要求重新读取。计划status更新不承担隐式账号配置副作用。
+### 6.4 Changing Configuration, Rebinding, and Disabling
 
-计划控制目标/节奏，当前project默认决定新回复身份；旧计划快照不覆盖后续automation配置。首版不支持同project多个计划并行指定不同实际回复账号；要支持需另定义明确的plan执行归属。与POST快照不同，计划REPLY字段是建议，不是假称会被每条回复执行的承诺。
+- Clearing the current level's default means restoring inheritance from the next level, not turning Automation off. After clearing under REQUIRED with no valid account, SEND_BINDING_REQUIRED is shown and new enqueues stop; whether OPTIONAL can run is still decided by the policy/candidate check. Saving an account does not automatically change switches.
+- A default or preference update does not change an already frozen QUEUE. Changing the account explicitly CASes a rebinding of the same content intent; RESERVED is safely cancelled first, and SENDING/RECONCILING/partially successful/successful forbid rebinding and resending.
+- A manual API/extension switch also keeps the same SendIntent; terminating a workflow, clearing releaseId, or changing the Post cannot lift the unknown protection.
+- Turning master/publishing off keeps the existing semantics of returning not-started planned QUEUE tasks to DRAFT; removing a platform retracts only that platform's planned tasks and does not wrongly retract manual Posts/Replies. Active executions/segments are inspected, and started ones are only reconciled; re-enabling does not re-dispatch already-successful content.
+- Unbinding an account, a member leaving, and revoking a terminal block new side effects without discarding already-occurred facts. Restoring or replacing a terminal does not change a task's account or clear quota reservations.
 
-### 4.6 Post：具体发送任务的唯一绑定
+## 7. API and Extension Execution Protocol
 
-保留 `integrationId`、`providerIdentifier`、`publishMethod`；新增：
+New write operations prefer POST, and existing PATCH/PUT/DELETE are not deleted or redefined for style. The following distinguishes already existing/partially implemented/to be added; the underlying services are shared, and the task protocol cannot be bypassed through a different HTTP method.
 
-- 不增加提前绑定的 `extensionNodeId`：未领取任务不指定执行终端；领取后的 ExtensionSendAttempt 保存终端，历史可通过 attempt查询。
-- `sendTarget Json?`：版本化目标身份快照，含平台、Integration ID、可比账号 ID 的命名空间、handle、必要的发布 actor 信息。
-- `routeRevision Int`：路由改变的版本；与内容修改版本共同用于发送授权。
-- `contentRevision Int`：内容、媒体、目标 URL 或 thread 结构变化时递增；SENDING/RECONCILING 期间禁止改动，RESERVED 期间编辑必须撤销旧 attempt 并失效旧许可。
-- `sendBlockCode?`：展示当前无法执行的原因；不新增 Post.state 枚举。
-- `executionProtocol`：服务端写入LEGACY或ACCOUNT_BOUND_V1，区分旧任务和严格任务；客户端不能设置或降级。灰度后新排队任务使用严格协议，nullable旧值仅在迁移期按LEGACY处理。
-- `sendOrigin`：服务端根据真实producer写入MANUAL或AUTOMATION，区分用户明确发送/预约和自动回复；客户端不能伪造。不能用source=engage、是否AI文案或QUEUE状态推断该来源。
+### 7.1 Two-Level Default Account and Product Policy API
 
-`providerIdentifier` 从选定 Integration 得到，不再靠 organization 里是否存在某类账号推断。计划的 canonical platform 与执行 provider 明确映射：例如 `linkedin` 不等于插件具有 `linkedin-page` 发布能力。公司页面需要页面 actor ID 和明确能力验证；首版插件若不支持则返回 `NODE_CAPABILITY_UNSUPPORTED`，不能退成个人账号。
-
-Post 根节点与整个 thread 使用同一账号和路由版本；领取后整个 attempt 固定一个终端，不逐段重新匹配。reply 仍经 EngageSentReply 关联 Post，统一使用这些字段；metrics 与历史继续读取 Post.integrationId。已确认历史不得因项目配置改变而改写。
-
-普通post也需要**创建/排队请求幂等**：当前内容ID/group编辑和每Post唯一attempt不能防止POST /posts超时后重试创建两个root。新增可选requestId；严格模式中会新建并排队root的请求必须提供稳定requestId，或先保存有确定ID的DRAFT再按该ID预约。持久化请求记录以`organizationId + authenticatedProducer + operation + requestId`唯一，保存规范化请求摘要及返回的root/group ID；相同键和摘要返回原结果，不同摘要返回409。批量子项使用稳定itemKey，重复排队同一root/版本幂等。历史客户端的LEGACY草稿/发送兼容保留，严格队列缺键时明确报错，不假称已有group能防创建重试。
-
-请求幂等不按文本或内容hash跨任务去重：用户明确再次发布相同内容仍可使用新键。计划materialize使用plan/content-slot键，周期发布使用原任务/周期键，安全重试复用原业务任务；账号改绑和内容编辑递增版本，不以新Post绕开未知结果。
-
-### 4.7 ExtensionSendAttempt：领取与真实发送分开
-
-为Post与reply共用发送尝试记录：`id, organizationId, postId, replySendIntentId?, extensionNodeId, integrationId, routeRevision, contentRevision, sessionRevision, leaseTokenHash, leaseExpiresAt, fencingVersion, state, startedAt, lastProgressAt, settledAt, actualAccount, outcome, result`。postId指root或单条reply；thread按Post ID保存分段结果。发送前持久化请求内容摘要、目标external post ID、目标actor与确定性request key。每个segment还保存permitId、submitBefore、执行确认及提交证据，见§7.4。
-
-状态：`RESERVED → SENDING → SUCCEEDED / FAILED_FINAL / RECONCILING`；RESERVED 过期或在开始前被撤销则进入 `EXPIRED / CANCELLED`。明确未触发平台提交的失败可以安全终止并允许新 attempt。每个 root/reply 最多一个活动 attempt，用部分唯一索引或等效事务约束；旧 attempt 永久保留，fencingVersion 单调递增。
-
-租约不再塞进 `Post.releaseId`。该字段恢复只表示真实平台发布 ID，新协议使用独立 attempt 租约。Temporal/API保留独立执行者和凭证，不借用节点attempt；但同账号的账号写状态、业务意图和硬额度必须共用，不能将“执行方式独立”理解为API不受并发保护。详见§8.2。
-
-需要这一小层状态的原因是：只校验成功回调的 lease，挡不住旧节点已经发出平台请求。必须在平台副作用发生前授权；进入 SENDING 后发生超时属于结果不确定，不允许租约到期自动再次发送。
-
-### 4.8 ReplySendIntent：跨Post的业务回复幂等
-
-Post/attempt ID只标识记录和执行次数，不足以防止两条Post发送同一业务回复。新增ReplySendIntent，包含`id, organizationId, projectId, canonicalAccountKey, opportunityId, kind, occurrenceKey, postId?, status, createdAt`；唯一键为`(organizationId, projectId, canonicalAccountKey, opportunityId, kind, occurrenceKey)`，postId若存在则唯一，指向该意图的唯一可发送Post。
-
-默认`kind=PRIMARY, occurrenceKey=""`，表示同project/目标账号/opportunity的默认回复。人工默认回复与automation共用它；不同project或不同账号保留独立意图。显式人工追加使用`kind=ADDITIONAL`及客户端幂等键，重复同一请求不能生成不同意图。automation不使用ADDITIONAL绕过防重。
-
-账号已绑定的保存/生成流程原子获取或创建PRIMARY意图；未绑定草稿可以保存，但排队前必须归入意图，若已有另一条可发送Post则返回REPLY_INTENT_CONFLICT及有权限可见的已有记录，不各自创建attempt。自动生成先预留意图再扣生成额度；遇到人工DRAFT不覆盖、不转换成自动QUEUE。人工编辑、自动生成、API发送、插件发送和批量项共同经过该意图服务。
-
-同一意图的安全重试复用intent和Post，新建attempt；SUCCEEDED保持防重，UNKNOWN保持阻塞，FAILED且确认未提交可重试，不能通过新Post ID绕过。成功/失败/人工补录/平台移除更新同一意图状态，历史不删除；外部人工发送确认必须如实记账，重复已发生的事实记录为冲突证据，不伪装成系统成功防重。普通post使用§4.6请求/任务幂等，不套用回复opportunity键。
-
-意图中的opportunityId使用服务端解析后的canonical EngageOpportunity.id，不使用项目state ID、URL字符串或客户端别名。旧claimOpportunityForReply的项目机会状态保留为展示/流程汇总；它不再是严格发送互斥锁，也不能在一个账号已SCHEDULED/REPLIED后阻止另一个已授权账号的独立意图。候选选择、API及批量方法同步按账号意图判断，DISMISSED/EXPIRED、目标删除/禁回等机会有效性规则仍保留。cancelAndSendNow改为检查并安全取消旧执行、复用同Post/意图再排队；SENDING/UNKNOWN/部分发送不得删除旧Post或重置机会后新建发送。
-
-意图状态至少区分GENERATING/RECOVERING/DRAFT/QUEUED/SENDING/SUCCEEDED/FAILED/UNKNOWN/CANCELLED；生成阶段保存generationTaskId、generationRevision、ownerTokenHash、reservationExpiresAt及modelStartedAt。获取唯一键不等于获得生成权：只有成功预留owner的producer可调用LLM，其他调用返回已有草稿/处理中；人工保存遇到有效GENERATING/RECOVERING不抢占并覆盖。所有保存Post/入队/状态修改校验ownerToken和generationRevision。
-
-超时接管先以旧ownerToken/版本/到期条件CAS，将意图原子转RECOVERING、递增版本并授予恢复owner，立即失效旧producer保存与排队权；不能先退额度再失效旧owner。恢复owner再通过原generationTaskId幂等结算/释放预占，费用流程不放进长数据库事务。确认原生成及计费状态收敛后才用新taskId创建新预占、进入GENERATING和调用LLM；结算失败保持RECOVERING，不能继续生成或重复扣退。模型已调用但结果/费用未知时不得仅因超时退费并再次生成。
-
-旧owner晚到结果只可作为原task的usage/结果审计证据提交给幂等结算服务，不获得写Post、排队或扣退额度的权限。若生产者仍持有效owner，明确生成失败/取消由CAS退出GENERATING至FAILED/CANCELLED，并通过原taskId结算；若已保存草稿则保留DRAFT。恢复owner本身超时可再次CAS接管RECOVERING，重复执行同一task结算不产生重复副作用；没有证据收敛时展示待核对原因，不留下无解释的GENERATING。
-
-账号改绑未开始回复时，必须原子检查并转入新账号意图，终止旧意图的未发送占位；目标账号已有PRIMARY则拒绝。SENDING/RECONCILING或已发送意图不可这样转移。历史多条重复回复先核对并保留事实，升级后不把重复Post同时入队。
-
-## 5. 统一绑定解析与权限
-
-增加 `SendBindingService`，所有 producer 和 executor 使用同一验证逻辑，避免 plan、post、reply、automation 各实现一套规则。
-
-对未固化任务，解析优先级为：显式单条选择 → 本次计划的 POST 执行快照（如果是计划 post）→ project 当前默认绑定。已固化任务只读自己的 route；不会重新解析默认值。reply 默认读取 project REPLY 绑定，规则见 §4.5。
-
-保存/排队验证：调用者/project 权限 → 账号租户与平台 → 实际 IntegrationProject 关系及开关 → 目标身份快照完整。账号已授权但暂未登录任何可用终端时也允许排队，返回等待状态。领取/开始再验证当前终端登记者权限、终端租户、撤销状态、在线会话与操作能力；API 发送则使用其独立凭证规则。
-
-保存账号及其目标快照一次完成，请求携带 `expectedRevision`，并发修改返回 409。客户端业务 DTO 不接受 extensionNodeId；终端选择是领取事务的职责。同租户且登录了相同平台账号不意味着有权执行所有 project：必须检查当前终端登记者的有效角色/project权限，不能单靠 NodeSession匹配授予权限。
-
-### 5.1 首版权限粒度与现有代码对应
-
-首版不新增用户级project ACL，文中的“project执行权限”具体指：当前用户是该organization有效成员，具有对应发送功能权限，ProjectValidationService确认project属于该organization对应AIsee owner且有效，账号已通过IntegrationProject分配到该project。registeredByUserId使用认证中间件解析出的本地User.id，不使用客户端传入用户ID；ProjectValidationService的ownerUserId不是终端登记者ID。
-
-角色规则必须显式配置：普通有效成员可登记/管理自己的终端并执行上述已授权任务，organization管理员可命名/撤销本组织终端；任何角色都不能借用另一用户终端凭证执行。账号/project绑定修改沿用该功能的授权规则。新增节点管理/发送操作使用能力guard，当前PoliciesGuard/PermissionsService中的套餐和额度检查不能代替成员身份与角色验证。
-
-后台claim/start没有request.projectId时，也根据任务projectId调用同一归属/有效性检查。成员退出/终端撤销从本地当前数据拒绝执行；外部project有效性查询失败则暂停，已有ProjectValidationService的短缓存意味着外部停用有有限延迟，不能宣称即时取消。成功结果回传属于已发生事实结算，不把project失效当成丢弃结果理由，仍要求attempt节点认证或受限核对授权。
-
-如果以后需要组织成员只能访问部分project，再新增用户级project ACL及userId维度缓存；不能将该未来能力写成现有assertProjectAccess已支持。
-
-## 6. 各业务流程的行为
-
-### 6.1 Operation plan
-
-1. 展示每个平台 POST、REPLY 的 project 默认账号及当前可执行状态，支持提前修改账号；关联终端作为只读说明，不提供必选终端下拉框。
-2. 生成请求接受执行选择，由服务端校验并保存快照；LLM只处理运营内容。未选完整也可生成内容草稿，返回UNBOUND状态；生成/保存不修改project默认回复账号。
-3. materialize 将 POST 路由写入每条新 Post 与 thread；重复 materialize 保留现有内容编辑和路由选择。
-4. automation 自动 commit 必须经过统一绑定校验。缺少 route 的 post 保留 DRAFT，返回逐项失败，不能成为“随便哪个浏览器都可以发”的 QUEUE。
-5. 调整计划发送账号无需重新生成文案；明确显示更新影响的 DRAFT 数量和不能更新的已排队/已发送数量。
-
-### 6.2 Post 编辑、立即发送、预约与批量发送
-
-编辑器提前选择账号，保存时固化。预约与立即发送共享相同校验；立即发送只是 publishDate=now 的队列任务，由持有该账号有效会话的授权终端自动领取。当前网页未安装插件也可以提交任务；无可用终端时显示等待，不换成其他社交账号。
-
-如保留同浏览器桥接快速发送，网页只传任务 ID与唤醒提示，插件仍走后端 claim/start，不能仅凭网页传来的文本直接发送。收到唤醒的插件只有在本终端会话匹配目标账号、权限有效且赢得 CAS 领取时才能执行；避免网页广播导致多个插件发送。
-
-批量接口返回逐项结果；一个任务缺失绑定不影响其他有效任务。thread 以根节点为一个发送单元，子节点继承同一 route。
-
-### 6.3 Reply 草稿、立即发送与 automation
-
-SaveDraftDto 支持提前选择账号；没有选择可保存 DRAFT，但点击发送/预约前必须完整。所有平台统一账号选择，不让非 X 平台默认使用当前网页所在浏览器的任意身份。前端展示所选账号关联的终端及发送可用性，不提前绑定终端。
-
-手动插件发送将同一草稿转为QUEUE并写sendOrigin=MANUAL，再由节点claim/start；自动producer写AUTOMATION。保留AI生成、编辑、计费和已发送记录，人工明确发送AI草稿仍是MANUAL。现有sendReply/scheduleReply/batch实际上硬编码api，DTO也没有publishMethod；新增可选字段，省略仍按旧api语义，显式extension才进入回复队列。API与extension共用意图，响应继续区分已确认与QUEUED，同一回复不能同时走两种执行方式。
-
-同步修改startWorkflow及执行入口：以持久化publishMethod和任务类型判定，EXTENSION回复交给reply-due，EXTENSION普通post交给publish-due，均不得启动Temporal；API交给API执行器，不被任何插件due返回。source=engage仍可用于业务归属，不能继续将所有Engage任务强制判成API；publish-due仍排除reply，避免把评论发成新帖。数据库读取/路由判定失败时不启动另一发送路径，严格任务等待重试读取。方法切换仅限明确未开始任务，原子取消旧执行及版本化重排；工作流terminate或HTTP超时不等于平台请求已停止。
-
-批量回复逐项持久化意图/Post/执行记录，再触发各项外部发送；当前batchSendReply在后项失败时删除前项Post并回滚机会的逻辑不能用于已发送或未知项。已确认项保留事实与计费事件，未知项保留保护，明确未开始项可安全取消；不因整批请求失败重新发送整批。各接口原有成功数组/对象包装按§7.6保留，逐项失败/处理中信息使用原本支持的字段或任务/意图查询展示，不为新增机制统一重包所有旧批量响应。
-
-automation 新回复在扣生成额度前检查 project REPLY 账号绑定完整且授权有效，并检查是否至少有一个具备操作能力、身份匹配且有 project 执行权限的可用终端；所有匹配终端不可用时首版暂停新增自动生成，避免持续生成积压。这个检查不预占或固定生成后的执行终端，实际生成完成后仍须 claim。人工生成草稿、手动预约已有内容可离线进行。
-
-`queueAutoReply/upsertDraft`通过ReplySendIntent服务把账号、意图及QUEUE原子保存，默认人工回复和自动回复不能各自创建一条可发送Post。新生成和已有QUEUE都经同一claim；消除_draftOne直接返回未领取回复的特殊路径。生成完成时再验证binding版本；配置已改变则保留草稿并说明，不用旧检查结果直接排队。
-
-### 6.4 Automation 设置
-
-overview在publishing/replies各平台项追加accountBinding及通道状态，不另起postBinding/replyBinding同义结构。既有POST publishing/replies保存accounts，账号与开关在同一事务写入，随后commit逐项返回；accounts-only保存不触发原平台集合变更、对齐或commit。
-
-启用的执行平台必须有完整账号绑定，已有无绑定配置可以读、关停、补绑定，但不能继续派发。仅修改策略时保留绑定；清除某项绑定必须显式操作，并禁止在仍开启该操作时清除。切换 project 后重置页面选择和缓存；下拉列表只列项目已分配账号，在账号项中展示关联终端和可用状态。账号列表采用平铺 API，页面的发布窗口/回复策略仍可按平台组织；不要求将所有业务 API 都改成相同布局。
-
-## 7. 插件领取、执行与回传协议
-
-保留现有 `/posts/publish-due`、`/engage/reply-due` 路径并统一升级为带节点认证的协议；不将前端发送的 nodeId 当成身份。下面接口/字段为建议契约，均尚未实现。
-
-### 7.1 登记与会话
+The two independent configuration resources each provide a read-only query and a POST create/modify; these are two business resources and two save entry points, and a read is not disguised as a POST with claim side effects.
 
 ```http
-POST  /extension/nodes/register
-GET   /extension/nodes
-POST  /extension/nodes/save
-POST  /integrations/extension-session
-PATCH /integrations/extension-session    (existing compatibility entry)
+GET  /sending-accounts
+POST /sending-accounts/save
+GET  /projects/:projectId/sending-accounts
+POST /projects/:projectId/sending-accounts/save
 ```
 
-register 需要当前用户的合法 organization 权限，返回 `nodeId` 和一次性可见 node secret。节点调用使用当前 AIsee access token，加 `X-Extension-Node-Id`、`X-Extension-Node-Token` 与协议版本；服务端检查 node secret 摘要、credentialVersion、租户、当前 userId 与 registeredByUserId 一致、撤销状态及权限。Web 账号管理请求不携带 node secret。
-
-POST nodes/save使用`{ id, expectedRevision, name?, status? }`管理已登记节点；首版status只允许ACTIVE→REVOKED，撤销无法直接恢复，重新登记走受限流程。登记/发密钥与普通展示字段保存分开，save不修改organizationId、registeredByUserId或credential。命名/撤销由统一角色规则校验，重复同一操作幂等；不为这两种修改再分别增加PATCH/revoke接口。
-
-会话上报按认证节点写入自己的 NodeSession，增加报告序号和平台能力。不能更新其他节点会话，也不能凭请求里的任意 integrationId 指定当前身份。
-
-新版使用POST同路径，既有PATCH保留，两者调用同一会话保存服务。逐平台结果返回integrationId?、registrationStatus=EXISTING/CREATED/LIMIT_REACHED/IDENTITY_UNRESOLVED/NOT_APPLICABLE、sessionRevision及verificationExpiresAt。登出或无账号观察时为NOT_APPLICABLE；platforms:[]仅更新已认证节点心跳，不清会话。账号额度不足不拒绝整批报告，也不阻止已有账号刷新。严格请求携带§4.3观察契约；旧payload按兼容模式记录，不产生严格可执行会话。
-
-响应追加results数组，legacy字段保持。旧PATCH读不读response body的行为不变；POST/PATCH切换不决定授权强度，决定因素是服务器协议模式、节点认证和持久化任务标记。不能把POST无条件当新版、PATCH无条件当旧版来绕过校验。
-
-服务端相同报告序号/请求ID只返回原处理结果，不新增账号、不刷新身份有效期。注册节点和保存社交账号是两种操作：register只发节点凭证，不创建社交账号；平台会话上报继续承担已授权账号发现/登记。
-
-### 7.2 绑定与项目 API
-
-```http
-GET  /projects/:projectId/automation
-POST /projects/:projectId/automation/publishing
-POST /projects/:projectId/automation/replies
-POST /projects/:projectId/operation-plans
-POST /projects/:projectId/operation-plans/:id/execution-routes    (new)
-```
-
-前四个接口已存在，直接扩展；最后一个POST仅用于不重新生成的执行快照编辑，与现有复数operation-plans路径及project scope一致。请求带expectedRevision及明确受影响草稿选择，核对plan确实属于路径project，禁止借本接口调用LLM/重复扣费。业务账号使用integrationId，不接收extensionNodeId；目标快照由服务端创建。
-
-automation overview在各平台追加`accountBinding: { integrationId, revision } | null`和通道状态，统一承载默认账号读取。publishing/replies DTO新增可选accounts增量映射；POST保存同时支持创建默认选择和修改已有选择，无需再新增send-bindings读写接口。示例为replies只更新账号：
+The Organization comes from the authentication context, and a Project path must verify ownership. POST saves incrementally by platform/action; the client passes only the account ID, expectedRevision, and requestId, never targetAccount, nodeId, or canonicalAccountKey. The example is identical at both levels:
 
 ```json
 {
   "accounts": {
     "x": {
-      "integrationId": "account_x1",
-      "expectedRevision": 0
+      "POST": { "integrationId": "account_x1", "expectedRevision": 0 },
+      "REPLY": { "integrationId": "account_x2", "expectedRevision": 3 }
     }
-  }
+  },
+  "requestId": "save_accounts_001"
 }
 ```
 
-每项expectedRevision=0表示当前没有绑定，否则必须匹配既有revision；配置冲突返回409。省略accounts或某平台保持不变，显式integrationId:null才清除，并校验该操作已关闭。原platforms/policies的完整替换语义继续只作用于平台开关/策略，不能因旧客户端不认识accounts而清掉账号选择。
+integrationId:null clears that level and keeps the revision; an omitted action/platform keeps its value. GET returns configured/effective/source/revision and the inexecutability reason, so the client does not assemble permissions or the inheritance algorithm itself. A Project query may also show the read-only organization source; the account list itself remains flat. Account configuration stores no node secret and does not assign project permissions to an account.
 
-publishing DTO将platforms放宽为可选，仅为支持accounts-only保存；旧请求明确发送platforms时行为不变，显式[]仍表示关掉全部发布平台。省略platforms时保留当前平台集合，不生成自动commit或停用事件；其他开关/commit字段若显式提供，仍按已有规则处理。replies允许只提供accounts而不报Nothing to update；仅账号保存不自动打开reply/scan/master开关。
+System policy and personal preference have the following settings entry points, which are not a third default-account resource:
 
-accountBinding的写入与本次策略修改在同一事务校验；后续队列commit仍逐项返回结果。账户配置中断与队列提交失败不能伪装成整体成功。旧客户端未提供版本字段的纯开关/策略保存保持旧校验，但绝不能覆盖默认账号；新增账号修改必须提供版本。
+| Entry point | Current code and the contract in this version |
+| --- | --- |
+| GET /admin/settings/:key, PUT /admin/settings/:key, DELETE on the same path | Existing global Settings interface, protected by SuperAdmin; distinct from the organization-authorized /settings/team, shortlink, metrics-window |
+| GET /admin/settings/sending.account_selection_policy | Reuses the global read above, keeps the {key,value} wrapper, with value containing the effective mode and revision; unconfigured on first use means REQUIRED, and a read failure pauses new authorization |
+| POST /admin/settings/sending.account_selection_policy | New strongly-typed save entry point in this phase; value.mode is REQUIRED/OPTIONAL and carries expectedRevision/requestId; configuration version, the tightening barrier, and the receipt update atomically; PUT on the same path delegates to the same service |
+| GET /user/send-preferences, POST /user/send-preferences | New in this phase; reads/writes requirePreselectedAccount and revision by the authenticated User.id, with GET also returning systemMode/effectiveRequirePreselectedAccount/policyRevision; POST carries expectedRevision/requestId, null means inherit, and only the caller's own preference may be saved |
 
-现有 create post、save draft、automation DTO 增加可选账号绑定输入；新协议的 extension 排队操作要求完整账号与目标快照。前端拿到账号、routeRevision、发送状态和只读终端信息，不返回密钥。
+The policy key must be included in protected configuration: if an old PUT still supports this key, it must delegate to the same strongly-typed policy service with the same version/idempotency rules; the generic SettingsService and DELETE must not directly overwrite, delete, or bypass the tightening barrier, and other existing settings keys keep their contract. An ENV feature flag must not be exposed directly as a user setting.
 
-#### 社交账号列表：平铺返回，前端按平台组织
+The current GET/POST /user/personal serves name, bio, and image, and its save DTO requires fullname while the repository handles image relations; it is not misdescribed as a general settings interface that can save preferences independently. The new send-preference endpoint avoids accidentally modifying the profile when saving preferences. Organization/project default account management still uses the existing organization roles and action authorization, and system policy may only be changed by a platform SuperAdmin; the automatic owner choice comes from organization configuration and does not accept arbitrary impersonation from a task request.
 
-扩展现有 `GET /integrations/list` 的 `{ integrations: [...] }` 响应，复用既有账号字段，每项增加 `sendAvailability` 和 `terminals[]`。不要改成 `{ x: [...], reddit: [...] }`，不额外提供后端平台分组结构。
+Source references: [global Settings controller](../apps/backend/src/admin-api/routes/admin-settings.controller.ts), [organization Settings controller](../apps/backend/src/api/routes/settings.controller.ts), [User controller](../apps/backend/src/api/routes/users.controller.ts), [profile save](../libraries/nestjs-libraries/src/database/prisma/users/users.repository.ts), [send policy service](../libraries/nestjs-libraries/src/extension/send-policy.service.ts), [personal send preferences endpoint](../apps/backend/src/api/routes/send-preferences.controller.ts). The new settings endpoints are protected by a base capability flag; prepared code does not mean deployed or connected to send authorization.
 
-字段名必须沿用实际 API：Integration 内部字段是 providerIdentifier，但现有 controller 对外使用 `identifier`，账号主键为 `id`，展示 handle/profile 为 `display`。因此本接口保留 `id/identifier/display`，不新增同义的 integrationId/platform/handle/providerIdentifier。任务 DTO 仍使用已有 integrationId 名称；内外字段映射由服务端明确维护。
+### 7.2 Reusing Existing Business, Account, and Terminal Entry Points
 
-示例以下只展示既有字段子集和新字段，未展示的既有字段继续保留；接口不会按照示例删减当前响应：
+| Entry point | Target behavior and compatibility requirements |
+| --- | --- |
+| GET /integrations/list | Keep {integrations:[...]} and id/identifier/display, appending terminals/sendAvailability |
+| GET /integrations/integration-project/list?projectId=... | Keep the project account-selection source and original wrapper, require real authorization, and allow an action filter to be added |
+| POST /integrations/integration-project, existing DELETE on the same resource | Only assign/modify/remove project permission; never save a default account |
+| POST /integrations/social/:integration/connect | Reuse the account connection and unify OAuth/manual/extension actor resolution; do not create another account entity |
+| GET /engage/reply-accounts, POST /engage/reply-accounts/:integrationId | Keep the reply-account array and engageEnabled management; not a default-selection store |
+| GET /projects/:projectId/automation | May show the effective account and source; does not add another default configuration |
+| POST automation/enabled, publishing, replies | Keep switch/window/full-policy replacement and commit/uncommit semantics; the legacy accounts field is routed by an adapter to the independent binding service |
+| POST /projects/:projectId/operation-plans and the existing GET detail/active | Keep generation and queries; the new flow submits no account; old requests without account parameters are unaffected |
+| POST /posts, POST /posts/schedule | Keep the existing create/edit/schedule structure, extending selection mode, version, and idempotency key; enqueue resolves and freezes |
+| Existing Reply save/send-now/schedule/batch | Keep the business fields and wrapper, adding publishMethod and selection mode; new controlled replies uniformly use the extension route while keeping historical API facts and the shared content intent |
+| POST /posts/publish-due, POST /engage/reply-due | Keep {due,pacing}, adding node authentication and claim request idempotency, claiming per §7.3 |
+| Existing post/reply success/failure/unknown/removal/URL backfill/lightweight status | Compatibility fields map to unified settlement; late fact recording grants no new sending right, and a status GET does not replace querying historical attempts |
+| POST /extension/nodes/register, GET /extension/nodes, POST /extension/nodes/save | Base code exists; register/read/versioned named revocation, and an ordinary save does not rotate credentials |
+| POST /integrations/extension-session, the original PATCH on the same path | Shared reporting service; a heartbeat with empty platforms does not clear sessions, and authorization strength is not judged by method |
+
+The session request combines AIsee authentication, the unified X-Extension-Node-Id, the current user/organization's X-Extension-Node-Token, and the protocol version, verifying scope and credential generation; the same nodeId does not merge sessions across users. It updates per node platform and returns integrationId, registrationStatus, sessionRevision, and verificationExpiresAt per platform; statuses include EXISTING/CREATED/LIMIT_REACHED/IDENTITY_UNRESOLVED/NOT_APPLICABLE. An account-count quota failure does not reject the whole batch, and a repeated report neither recreates the account nor extends verification. register restores the original registration result in a short window for the same requestId/digest, and a timeout retry must not rotate an active key.
+
+Account association view example (compatible with existing fields; the frontend groups by identifier):
 
 ```json
 {
@@ -446,69 +409,43 @@ accountBinding的写入与本次策略修改在同一事务校验；后续队列
       "sendAvailability": "AVAILABLE",
       "terminals": [
         {
-          "terminalId": "terminal_1",
-          "name": "办公电脑 · Chrome · 运营A",
+          "nodeId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "registeredByUserId": "user_1",
+          "name": "Office PC · Chrome · Ops A",
           "browser": "chrome",
           "connectionStatus": "ONLINE",
           "sessionStatus": "VERIFIED",
-          "lastSeenAt": "2026-10-14T03:00:00Z",
-          "verifiedAt": "2026-10-14T02:59:50Z"
+          "lastSeenAt": "2026-10-15T03:00:00Z",
+          "verifiedAt": "2026-10-15T02:59:50Z"
         }
       ]
-    },
-    {
-      "id": "account_x2",
-      "identifier": "x",
-      "display": "x2",
-      "sendAvailability": "WAITING_FOR_TERMINAL",
-      "terminals": []
     }
   ]
 }
 ```
 
-`terminalId` 是 ExtensionNode.id 的展示 DTO 名称，不是另一套实体。terminals[] 可含多个终端，表示当前或尚未被明确登出/切号的最近匹配会话；离线或未知不表示仍可发送。已确认登出/切号时，从原账号的 terminals[] 移除当前关联，历史仍保留在审计记录中，不能继续显示“已登录原账号”。
+The nodeId in terminals is the unified profile identity, and registeredByUserId makes explicit the user scope of that session/online state; state for the same nodeId under different users must not overwrite each other. terminals may contain several authorized current/recent associations; logout/account switch removes the old current association while history is retained; offline/revoked entries are diagnostic only. connectionStatus=ONLINE/OFFLINE/REVOKED; sessionStatus=VERIFIED/STALE/UNKNOWN, verifiedAt may be null, and no terminal returns []. nodeToken, OAuth token, refreshToken, cookies, or metadata not audited against a whitelist are never returned.
 
-终端字段语义：
+The backend filters by the requested action/project/current user and then merges availability: account/relationship disabled → ACCOUNT_DISABLED; any authorized terminal fully meeting online, identity match, fresh verification, and action capability → AVAILABLE; no online authorized terminal → WAITING_FOR_TERMINAL; online but no valid identity → SESSION_UNVERIFIED; valid identities but none with the action capability → CAPABILITY_UNSUPPORTED. Permission errors such as ACCOUNT_NOT_ASSIGNED are not masked by an online terminal.
 
-| 字段 | 规则 |
-| --- | --- |
-| `name` | 用户可编辑终端名，缺省名称使用浏览器类型加短 ID；不猜测无法读取的电脑/Profile名称 |
-| `browser` | 插件上报的浏览器类型，仅用于展示，不作为唯一键或授权证据 |
-| `connectionStatus` | `ONLINE / OFFLINE / REVOKED`，根据服务端心跳有效期和撤销状态计算 |
-| `sessionStatus` | `VERIFIED / STALE / UNKNOWN`；VERIFIED 必须身份匹配且核验未过期，旧成功记录不能无限维持 VERIFIED |
-| `lastSeenAt` | 服务端最后接收该终端心跳时间 |
-| `verifiedAt` | 服务端最后一次接受新的现场身份核验的接收时间，可为null；UNKNOWN、缓存包装、重复probeId或普通心跳不能刷新；有效期仍以verificationExpiresAt为准 |
+AVAILABLE is only an extension-channel snapshot and does not mean an execution right or a quota exists; a specific task's wait reason is returned separately. OAuth capability still uses an independent state, and activeSessionClient's mutually exclusive API/EXTENSION enum must not represent two real capabilities. The three legacy account lists keep their own scope and wrapper and share a batch projection to avoid N+1; the frontend groups, sorts, and collapses, and does not compute a second sending-eligibility model itself.
 
-账号关联视图可以展示经权限允许的离线/撤销终端；撤销项仅作诊断，不参与可用性计算。没有关联时返回 terminals: []。身份登出/不支持的原始状态由终端详情提供，不把已登出的终端冒充当前登录关联。
+### 7.3 Claim: Matching an Execution Terminal by Social Account
 
-sendAvailability由后端统一计算，描述所请求操作的插件发送通道可用性。先过滤掉无执行权限的终端，再按以下顺序归并，多终端混合故障也使用同一规则：
+All controlled extension tasks request due with an authenticated terminal identity. RESOLVED tasks match NodeSession by the frozen integrationId; CURRENT_SESSION tasks atomically determine the actual account on first claim as described below and must not fall back to the legacy organization shared pool. An account may correspond to multiple terminals, and the first version sets no fixed preferred terminal; eligible pollers compete on the CAS for the same task, only the winner creates the active attempt, and the extensionNodeId is fixed on that attempt. Execution selection is not random account rotation and not a terminal the user designated in advance.
 
-1. 账号或项目关系被禁用 → ACCOUNT_DISABLED。
-2. 存在未撤销、在线、会话匹配且新鲜核验有效、具备所需操作能力的终端 → AVAILABLE。
-3. 没有未撤销且在线的授权关联终端 → WAITING_FOR_TERMINAL。
-4. 有在线授权关联终端，但其中没有该账号的新鲜有效核验会话 → SESSION_UNVERIFIED。
-5. 有在线、新鲜有效核验的授权关联终端，但全部缺少所需操作能力 → CAPABILITY_UNSUPPORTED。
+CURRENT_SESSION first claim: first map the authenticated node's valid live identity to an existing Integration and verify its project assignment, action permission, and capability; in the same transaction CAS the unbound SendIntent and task, write integrationId/sendTarget, bindingSource=CURRENT_SESSION, increment routeRevision, and then create the unique active attempt. Another terminal competing with a different account can only fail. The account must first be reliably registered through session reporting; claim does not create or guess an account from a handle.
 
-例如一个终端离线但曾VERIFIED、另一个在线但STALE，结果为SESSION_UNVERIFIED；一个在线且核验有效但不支持操作、另一个离线且支持，结果为CAPABILITY_UNSUPPORTED。terminals提供逐终端原因，任何终端完整满足条件时都优先返回AVAILABLE。
+After first claim the target account stays frozen. A safe RESERVED expiry may move to another terminal logged into the same account, but must not automatically return to an unbound state and let another account take over; changing the account still requires an explicit rebinding that keeps the same SendIntent. OPTIONAL does not mean re-choosing the current browser identity on every retry. A CURRENT_SESSION task not yet bound for the first time holds an explicit "first authorized current session" choice and is not implicitly rerouted because defaults change later.
 
-organization账号管理继续用GET /integrations/list，表示允许查看的组织账号与通道状态，不代表某project已分配。项目账号选择复用GET /integrations/integration-project/list?projectId=...；回复参与管理复用GET /engage/reply-accounts?projectId=...，后者仍保留原数组及既有字段命名，不强制转换成organization列表的包装。三个接口共用终端投影/可用性计算，不复写三份匹配逻辑。
-
-项目列表可增加可选action=post|reply及平台过滤，action省略默认post，reply使用IntegrationProject.engageEnabled并只返回授权账号；这些参数为拟新增，当前实现尚未支持。sendAvailability固定表示extension通道，OAuth/API状态保持已有字段。按每个接口的真实organization/project/user上下文检查终端执行资格，organization列表不虚构用户级project ACL。平台分组由前端完成，不能改变现有返回包装或账号字段来实现分组。
-
-AVAILABLE 是读取时的通道快照，不保证任务现在就会提交；具体任务还受 publishDate、automation开关、配额、账号节奏及发送前重新授权约束。前端直接展示后端的状态，不自行用时间戳推导另一套发送资格。平台过滤由后端按需提供，平台分组/排序/折叠由前端按 identifier处理。
-
-账号管理页、账号选择器显示终端名称及状态；任务详情显示账号，并在领取后显示实际执行终端。`GET /extension/nodes` 则按终端展示其平台会话，用于诊断和管理。两种视图共用 NodeSession及可用性服务，不维护第二套手工关系。账号与终端查询均执行 organization/user/project权限校验，不能通过账号 ID读到其他租户的终端；不会返回节点 secret、OAuth token或cookie。批量加载当前页账号关联，避免每个账号调用一次终端接口。
-
-### 7.3 Claim：按社交账号自动匹配执行终端
-
-插件用认证终端身份请求 due；服务端从该终端的有效 NodeSession识别可发送账号，再筛选目标 integrationId匹配的到期任务。账号可能对应多个终端，首版不设固定首选终端；符合条件的轮询者竞争同一任务的 CAS，只有胜者创建活动 attempt，并在该 attempt固定 extensionNodeId。执行选择不是账号随机轮换，也不是用户提前指定终端。
-
-保留 `{ due, pacing }` 响应结构，任务统一新增：
+The `{ due, pacing }` response structure is kept; post keeps id/platform/segments and reply keeps sentReplyId/opportunityId/url/text. Example of the uniformly appended fields:
 
 ```json
 {
   "postId": "post_a",
+  "sendIntentId": "intent_a",
+  "bindingSource": "PROJECT",
+  "accountResolution": "RESOLVED",
   "projectId": "project_a",
   "integrationId": "integration_x1",
   "extensionNodeId": "node_n1",
@@ -517,8 +454,9 @@ AVAILABLE 是读取时的通道快照，不保证任务现在就会提交；具�
   "sessionRevision": 5,
   "attemptId": "attempt_a",
   "preflightChallenge": "opaque_challenge",
+  "challengeExpiresAt": "2026-10-15T03:00:30Z",
   "leaseToken": "opaque_secret",
-  "leaseExpiresAt": "2026-10-14T03:05:00Z",
+  "leaseExpiresAt": "2026-10-15T03:05:00Z",
   "fencingVersion": 1,
   "targetAccount": {
     "id": "123456",
@@ -528,23 +466,25 @@ AVAILABLE 是读取时的通道快照，不保证任务现在就会提交；具�
 }
 ```
 
-Post 保留原 `id/platform/segments` 等字段；reply 保留 `sentReplyId/opportunityId/url/text`，增加其关联 postId 和同一套执行字段。
+Post keeps its original `id/platform/segments` fields; reply keeps `sentReplyId/opportunityId/url/text` and gains its associated postId plus the same execution fields.
 
-claim返回contentRevision、sessionRevision和第0段的preflightChallenge/challengeExpiresAt。挑战绑定attempt、segmentIndex、fencingVersion及认证节点；插件现场探测后，用新probeId、实际观察时间、证据种类及challenge上报会话，再以服务端确认版本调用start。同身份持续VERIFIED的新证据不递增sessionRevision，更新核验时间；缓存/重复报告不延期，UNKNOWN恢复VERIFIED递增版本。start原子消费已被现场证据确认且未过期的本段挑战，不能自行猜版本或复用其他任务/段的挑战。
+claim returns contentRevision, sessionRevision, and segment 0's preflightChallenge/challengeExpiresAt. The challenge binds the attempt, segmentIndex, fencingVersion, route/content revisions, and the authenticated node/credential generation; after live probing the extension reports the session with a new probeId, actual observation time, evidence kind, and the challenge, then calls start with the server-confirmed revision. New evidence for a continuously VERIFIED identity does not increment sessionRevision and refreshes only the verification time; a cached/repeated report does not extend it, and UNKNOWN recovering to VERIFIED increments the revision.
 
-候选查询和 CAS必须约束 organization、目标 integrationId、routeRevision、内容版本、project/账号授权、当前终端登记者执行权限、完整发送身份、状态、到期时间和活动 attempt条件。创建 attempt时固定认证节点及 sessionRevision；start再校验当前会话，防止读取与领取之间的切号。不能先按 organization 抢占，再在内存里过滤账号不匹配的任务。严格节点身份缺失时返回授权/协议错误，不回退无账号约束的 organization池。
+The server associates that challenge atomically with the latest sessionRevision confirmed by this evidence only while the segment is still PENDING, the live actor reliably matches the frozen target, and the other revisions are valid; an already-AUTHORIZED segment must not have its authorization refreshed. start atomically consumes the challenge and compares the evidence revision with the current session, and must not guess a revision or reuse another task's/segment's challenge. The session revision at claim is kept for audit; a legitimate fresh live verification may establish this segment's new revision, but must not thereby change the account, node, or restore an old permit; another account switch/logout after verification changes the revision and immediately invalidates the old evidence.
 
-reply还校验ReplySendIntent的唯一可发送postId和状态，并在claim/start事务中锁定同一意图；不能只按postId防并发。候选查询不满足权限/身份就不创建attempt，数据库活动意图和活动attempt约束共同防止两Post、两节点竞态。
+The candidate query and CAS must constrain organization, SendIntent and the first-binding state/target integrationId, routeRevision, content revision, project/account authorization, the current terminal registrant's execution permission, the complete sending identity, status, expiry, and active-attempt conditions. Creating an attempt fixes the authenticated node and records the sessionRevision at that time; start then validates this segment's live evidence and the current session, preventing an account switch between read and claim. Tasks must not be preempted by organization first and then filtered in memory for a mismatched account. When the strict node identity is missing, an authorization/protocol error is returned and there is no fallback to an account-unconstrained organization pool.
 
-严格reply-due分两个持久化来源lane：MANUAL按用户scheduledAt/发送指令、账号授权、project有效性及既有业务额度/账号安全节奏领取，不依赖autoReplyEnabled或automation master；AUTOMATION另受master/reply开关及自动策略约束。不能直接沿用getAutoReplyConfigs先过滤整个项目，再让手动QUEUE消失。两lane共用意图/attempt防重；LEGACY来源不明确时保持原池或隔离核对，不能只凭QUEUE/engage猜测为手动以绕开开关。
+Ordinary post, thread, and reply all validate the SendIntent's unique sendable rootPostId and status; reply additionally validates ReplySendIntent ownership. claim/start compete on the same content intent, and the dedup unique key excludes the account. A candidate query that fails permission/identity creates no attempt; two Posts, two accounts, and two nodes competing cannot obtain a second execution right.
 
-未匹配身份、离线、撤销等原因不消耗领取租约。状态/计数接口分别提供“该节点可执行”和“该 project 等待”，只读操作不能 claim。
+Strict reply-due has two persisted-source lanes: MANUAL claims by the user's scheduledAt/send instruction, account authorization, project validity, and the existing business quota/account safety pacing, independent of autoReplyEnabled or automation master; AUTOMATION is additionally constrained by master/reply switches and automatic policy. getAutoReplyConfigs must not be reused to filter the whole project first and make the manual QUEUE disappear. Both lanes share intent/attempt dedup; when a LEGACY source is unclear it stays in the original pool or is isolated for reconciliation, and QUEUE/engage alone must not be guessed as manual in order to bypass the switch.
 
-新版due增加可选requestId，严格领取要求提供；以组织/认证节点/领取操作/requestId持久化请求回执和候选结果，原样重试只返回原attempt集合，不额外领取。claim响应丢失不会令重试再占一批任务。租约密钥只存摘要不足以重放领取回执，需短期加密保存可恢复响应或采用等效安全重放机制，过期后只返回已过期状态；不得记录明文密钥到日志。该回执重放只恢复RESERVED领取信息，**不恢复start的提交许可**；start重复请求仍按§7.4只读返回现状。普通GET不得公开leaseToken/可重放submit许可。
+Unmatched identity, offline, revocation, and similar reasons do not consume the claim lease. Status/count endpoints separately provide "executable on this node" and "waiting in this project"; a read operation cannot claim.
 
-尚未领取的任务不持有终端，可随在线会话变化自动匹配。RESERVED过期/撤销且确定尚未开始时可由另一个匹配终端新建 attempt；进入 SENDING/RECONCILING 后禁止自动切换终端重发，先按 §7.5核对结果。任务目标账号始终不变。
+The new due adds an optional requestId, required for ACCOUNT_BOUND_V1 controlled claiming (including OPTIONAL); the request receipt and candidate result are persisted by organization/authenticated node/claim action/requestId, and an identical retry returns only the original attempt set without claiming more. A lost claim response does not let a retry take another batch of tasks. Storing only the lease key's digest is insufficient to replay the claim receipt, so a recoverable response must be kept in short-term encrypted storage or an equivalent safe replay mechanism used, returning only an expired status afterwards; plaintext keys must not be logged. That receipt replay restores only the RESERVED claim information and **does not restore start's submission permit**; a repeated start request still returns the current state read-only per §7.4. An ordinary GET must not expose leaseToken or a replayable submit permit.
 
-### 7.4 Start：平台提交前再次授权
+A task not yet claimed holds no terminal and can be matched automatically as online sessions change. After RESERVED expiry/revocation with a definitive not-started state, another matching terminal may create a new attempt; once in SENDING/RECONCILING, automatic terminal switching and resending are forbidden and the result is reconciled per §7.5 first. Terminal failover does not change the frozen account; an explicit rebinding of a legitimately not-started task follows §6.4.
+
+### 7.4 Start: Re-authorization Before Platform Submission
 
 ```http
 POST /extension/send-attempts/:attemptId/start
@@ -556,333 +496,587 @@ GET  /extension/send-attempts/:attemptId
 POST /extension/send-attempts/:attemptId/stop-confirmation
 ```
 
-插件获得本地 write gate 后，在实际提交页面验证当前 actor。身份匹配以平台专用规则处理：同命名空间的稳定 ID 优先；只有确实缺少可比 ID 且 handle 可可靠验证时才用规范化 handle。稳定 ID明确不符时不能靠同名显示信息放行；LinkedIn 的 OAuth sub 与浏览器 ID 不同命名空间时不能简单比较字符串。公司页面另验证 actor。
+After obtaining the local write gate, the extension verifies the current actor on the actual submission page. Identity matching follows platform-specific rules: a stable ID in the same namespace takes priority; a normalized handle is used only when a comparable ID is genuinely absent and the handle can be reliably verified. A clearly different stable ID must not be allowed through on a same-name display; LinkedIn's OAuth sub and browser ID are different namespaces and cannot be compared as plain strings. A company page additionally verifies the actor.
 
-未知、登出、探测失败、能力不支持均停止在平台提交之前。允许先开页面做核验，但不能先点击发送再探测作者。post 复用并加强现有 account-guard，reply 共用同一规则；自动发送与人工点击均适用。
+Unknown, logged out, probe failure, and unsupported capability all stop before platform submission. Opening the page first to verify is allowed, but clicking send before probing the author is not. post reuses and strengthens the existing account-guard, reply shares the same rules, and both automatic sending and manual clicks are covered.
 
-start 带 leaseToken、fencingVersion、route/content/session revision 和现场实际身份。服务端重查 project、授权、节点、route、内容版本、会话、租约、配额及账号写锁，在一个事务中 CAS `RESERVED → SENDING`，持久化发送指纹，再给一次发送许可。只有首次成功的 transition 可授予发送许可；start 重试如果已经 SENDING，只能返回已有状态，不得再次授予可发送的许可。
+start carries leaseToken, fencingVersion, route/content/session revisions, and the live actual identity. The server re-checks policyRevision and any non-lowerable task requirement, project, authorization, node, route, content revision, session, lease, quota, and account write lock, synchronously CASes the SendIntent/execution record from `RESERVED → SENDING` in one transaction, persists the submission fingerprint, and only then grants one sending permit. Only the first successful transition may grant a sending permit; a start retry that is already SENDING may only return the existing state and must not grant a sendable permit again.
 
-start成功返回一个segment的短有效期许可`permitId, submitBefore, serverNow, attemptId, segmentIndex, fencingVersion`，绑定当前节点、账号、内容摘要及新鲜现场证据。submitBefore可配置，例如30秒，独立于RESERVED的长领取租约；已发许可不通过renew延长。这里的一次性是受控插件执行保证，不能声称平台理解服务端permitId。
+A successful start returns one segment's short-lived permit `permitId, submitBefore, serverNow, attemptId, segmentIndex, fencingVersion`, bound to the current node, account, content digest, and fresh live evidence. submitBefore is configurable, for example 30 seconds, independent of the long RESERVED claim lease; an issued permit is not extended by renew. This one-shot property is a controlled-extension execution guarantee and must not claim that the platform understands the server's permitId.
 
-插件在注入提交操作前持久化许可和执行阶段；页面内最终actor及许可截止时间检查紧邻submit，发送命令不得保存成之后随意重放的消息。每次worker恢复、页面/浏览器唤醒、网络恢复先检查许可有效性与本地执行日志：过期或不确定则停止，不恢复平台提交。使用serverNow校准的时间和本地单调经过时间判断短截止期，时钟异常则停止。
+The extension persists the permit and execution phase before injecting the submit action; the final in-page actor and permit-deadline check sits immediately before submit, and the send command must not be saved as a message that can be replayed at will later. On every worker recovery, page/browser wake-up, or network recovery, it first checks permit validity and the local execution journal: if expired or uncertain, it stops and does not resume the platform submission. It judges the short deadline using serverNow-calibrated time plus local monotonic elapsed time, and stops on an anomalous clock.
 
-许可收到后在受控操作内立即提交；无法可靠现场验证actor或停止过期命令的poster不发布严格能力。服务端和本地fencing不能撤回已在途的平台请求，也不能完全排除用户在浏览器外部切账号或暂停提交指令的竞态；边界是阻止已知错配及受控重放，并对不确定结果停止重试。
+Once the permit is received it submits immediately within the controlled action; a poster that cannot reliably verify the actor live or stop an expired command does not publish a strict capability. Server and local fencing cannot retract a platform request already in flight and cannot fully exclude the race of a user switching accounts outside the browser or pausing the submit command; the boundary is to prevent known mismatches and controlled replay, and to stop retrying an uncertain result.
 
-#### 插件必须改造的提交边界
+#### Submission Boundaries the Extension Must Change
 
-严格模式不能只在runner调用start后原样进入旧poster。每个平台poster/注入脚本都接收permit绑定的attempt/segment/账号/内容摘要及截止期；上传、开页和填表可先准备，最终submit前再次核验actor/许可，CAS占用本地permit执行权并等待提交日志写入完成。每段最多触发一次平台提交，禁止同许可被页面消息、桥接和alarm重复消费；本地执行日志的key包含AIsee owner/node/attempt/segment/permit，worker与页面脚本有一致的消费/去重规则。
+All controlled tasks under REQUIRED and OPTIONAL must not simply enter the legacy poster as-is after the runner calls start. Every platform poster/injected script receives the attempt/segment/account/content digest and deadline bound to the permit; uploads, page opening, and form filling may be prepared in advance, but the actor/permit is verified again immediately before the final submit, the local permit execution right is CAS-consumed, and the submission-journal write is awaited. Each segment triggers at most one platform submission, and the same permit must not be consumed repeatedly by page messages, the bridge, and alarms; the local execution journal key contains the AIsee owner/node/attempt/segment/permit, and the worker and page script share consistent consume/dedup rules.
 
-日志至少记录PREPARED、SUBMITTING（在可能触发请求前）、CONFIRMED或UNKNOWN及平台证据，采用可等待并校验写入成功的持久化；不能沿用当前queue.persist的fire-and-forget写法。存储失败/满额则不提交。worker重启、脚本失联、fetch/点击超时或普通异常，若已进入SUBMITTING一律按UNKNOWN处理；旧ok=false、error、segmentsPublished=0、neverSent提示本身都不是可靠未提交证据。只有执行适配器能证明尚未触发任何提交且已停止，才报告definitely_not_submitted。UI Retry、retryPublishTask、interrupted-recovery及reply.unconfirmed统一读服务端attempt，仅重报/核对结果，不从本地error直接重放；扫描查无结果不解除保护。
+The journal records at least PREPARED, SUBMITTING (before a request may be triggered), and CONFIRMED or UNKNOWN plus platform evidence, using a persistence that can be awaited and verified as successfully written; the current queue.persist fire-and-forget style must not be kept. If storage fails or is full, it does not submit. On a worker restart, script disconnect, fetch/click timeout, or ordinary exception, anything that already entered SUBMITTING is uniformly treated as UNKNOWN; the legacy ok=false, error, segmentsPublished=0, and neverSent hints are not by themselves reliable evidence of non-submission. A definite not-submitted may be reported only when the execution adapter can prove that no submission was triggered and that it has stopped. The UI Retry, retryPublishTask, interrupted-recovery, and reply.unconfirmed all read the server attempt uniformly and only re-report/reconcile results, never replaying directly from a local error; a scan finding no result does not lift protection.
 
-人工桥接/popup发送同样领取和start，不能继续使用unattended=false跳过账号安全间隔。本地compose触发插件实际提交前也应经已有post/reply保存接口建立账号/project明确的任务，再走受控协议；没有合法任务时仅允许填表草稿、由用户在平台页面自主提交，该外部人工行为不在后端协调保障内。thread可释放浏览器本地write gate，让其他账号/读取操作继续，但服务端账号锁不释放，当前账号的下一段仍等待其授权。
+A manual bridge/popup send also claims and starts and must not keep using unattended=false to skip the account safety interval. Before a local compose triggers an actual extension submission, it should also establish a task with an explicit project and selection mode through the existing post/reply save endpoint (OPTIONAL may await the current actor first), and only then follow the controlled submission protocol after claim binds the account; with no legal task it may only fill in a draft for the user to submit on the platform page, and that external manual behavior is not covered by backend coordination. A thread may release the browser's local write gate so other accounts/reads continue, but the server account lock is not released, and the current account's next segment still waits for its authorization.
 
-若 start 响应丢失，插件不能猜测许可并继续发，也不能重复提交；查询 attempt 状态进入 reconciliation。租约到期后且未进入 SENDING 的 RESERVED，先 CAS 标为 EXPIRED，再创建新 attempt 重新领取，旧 token/fencingVersion失效；SENDING 超时不重新授权，转 RECONCILING。renew 不允许超期旧 attempt 复活。
+If the start response is lost, the extension must not guess a permit and continue sending, nor submit twice; it queries the attempt state and enters reconciliation. A RESERVED lease that expires without entering SENDING is first CASed to EXPIRED, then a new attempt is created to claim again, invalidating the old token/fencingVersion; a SENDING timeout is not re-authorized and moves to RECONCILING. renew must not revive an expired old attempt.
 
-单条 reply/post 的 start 授权一次提交；thread 的首次 start 只授权第 0 段，并持有账号执行锁。每段维护独立的 `PENDING / AUTHORIZED / CONFIRMED / NOT_SUBMITTED / UNKNOWN` 状态和一次性许可。上一段确认且账号共享间隔已满足后，下一段调用 segments/:index/start，重新验证实际 actor 与权限、预占该段平台写配额，并 CAS 授予该段唯一许可。重复请求返回已有状态，不再次授予提交许可；任何一段许可响应丢失或结果未知均暂停，不继续下一段。账号锁在 thread 等待段间间隔时仍属于该 attempt，不能让别的节点插入发送。
+A single reply/post start authorizes one submission; a thread's first start authorizes only segment 0 and holds the account execution lock. Each segment maintains an independent `PENDING / AUTHORIZED / CONFIRMED / NOT_SUBMITTED / UNKNOWN` state and a one-shot permit. After the previous segment is confirmed and the account's shared interval is satisfied, the next segment calls segments/:index/start, re-verifying the actual actor and permissions, reserving that segment's platform write quota, and CAS-granting that segment's unique permit. A repeated request returns the existing state and does not grant a submission permit again; any lost permit response or unknown result in a segment pauses and does not continue to the next. The account lock still belongs to that attempt while the thread waits between segments, and another node must not be allowed to interleave a send.
 
-每段许可有独立submitBefore和现场挑战；下一段重新验证，不能将root许可当成无限期thread发送权。上一段confirmed的outcome响应或GET attempt返回nextSegmentIndex和preflightAvailableAt，不产生发送或领取副作用。到达账号段间可执行时间后，插件POST segments/:index/preflight取得挑战；重复请求返回同一个尚未过期且未消费的挑战。挑战过期可在该段仍PENDING时CAS轮换，使旧挑战失效；已AUTHORIZED不得借此重新取提交许可。
+Each segment's permit has its own submitBefore and live challenge; the next segment re-verifies, and the root permit must not be treated as an indefinite thread sending right. The previous segment's confirmed outcome response, or GET attempt, returns nextSegmentIndex and preflightAvailableAt without producing send or claim side effects. Once the account's inter-segment executable time arrives, the extension POSTs segments/:index/preflight to obtain a challenge; a repeated request returns the same not-yet-expired, unconsumed challenge. An expired challenge may be CAS-rotated while the segment is still PENDING, invalidating the old one; an already-AUTHORIZED segment must not use this to re-obtain a submission permit. The endpoint also supports index=0: when segment 0's challenge expires, as long as the attempt is still a valid RESERVED that was never authorized, it may re-verify without waiting for the whole claim lease to expire; both start paths share the same CAS for segment 0 and must not double-authorize.
 
-插件取得下一段challenge后重新现场探测/上报，再调用segments/:index/start；不得复用root挑战或在间隔等待前取得证据后无限期沿用。preflight只准备核验挑战，不授予提交许可；GET查询只返回状态。许可过期表示不得再开始该段，不证明该段此前未提交；已可能触发submit的状态仍进入RECONCILING。
+After obtaining the next segment's challenge, the extension re-probes/reports live and then calls segments/:index/start; it must not reuse the root challenge or keep using evidence obtained before the interval wait indefinitely. preflight only prepares a verification challenge and grants no submission permit; a GET returns status only. Permit expiry means the segment must not be started, but does not prove the segment was not previously submitted; a state that may already have triggered submit still enters RECONCILING.
 
-### 7.5 Outcome：身份、幂等与未知结果
+### 7.5 Outcome: Identity, Idempotency, and Unknown Results
 
-outcome 包含 attempt、当前节点凭证、leaseToken、fencingVersion、实发账号、平台 ID/URL、分段结果及 `confirmed / definitely_not_submitted / unknown`。所有成功、失败、移除、未确认回传都使用这一 envelope，现有 post/reply endpoint 内部适配同一服务。旧版 URL 补录属于人工修复，不能替代新的发送授权。
+outcome contains the attempt, current node credential, leaseToken, fencingVersion, the actually sent account, platform ID/URL, segment results, and `confirmed / definitely_not_submitted / unknown`. All success, failure, removal, and unconfirmed callbacks use this envelope, and the existing post/reply endpoints adapt internally to the same service. Legacy URL backfill is a manual repair and does not replace the new sending authorization.
 
-服务端只接受该 attempt 的节点及预定账号对应结果，不能因为仍持有同 organization token 就覆盖别的节点任务。重复相同结果幂等；已成功的冲突结果返回 409，不覆盖历史。合法 SENDING 或 RECONCILING attempt 的延迟确认结果可以落账，即使普通领取期限已过；其记录和 token 保留用于核对。旧 leaseToken 不要求仍处在普通领取期限，但必须对应这个未被替换的已开始 attempt；结果回传不具备重新授权发送的效果。
+The server verifies the attempt's node and frozen account; an identity conflict is still saved as reconciliation evidence and is not settled as a normal success, and holding the same organization token must not overwrite another node's task. A repeated identical result is idempotent; an already-succeeded conflicting result returns 409 without overwriting history. A late confirmation for a legitimate SENDING or RECONCILING attempt may be settled even if the ordinary claim window has passed; its record and token are retained for reconciliation. The old leaseToken is not required to still be within the ordinary claim window, but must correspond to this un-replaced, already-started attempt; a result callback has no effect of re-authorizing a send.
 
-结算区分发送结果与后续平台状态：UNKNOWN可单调收敛为CONFIRMED或有证据的NOT_SUBMITTED；较晚重复unknown不能把已确认结果降回UNKNOWN。CONFIRMED后可追加removed/gone、URL/平台ID补录或metrics证据，仍保持已发送、意图成功和COMMITTED次数，不重新扣费、释放次数或创建attempt。移除事件可以发生在SUCCEEDED之后，原节点或受限核对者按历史attempt/segment验证；它不是相互冲突的“第二次发送结果”。相同事件键同摘要幂等，不同摘要返回409并保留证据；已结算NOT_SUBMITTED后迟到成功是安全冲突，按下文冻结核对，不能忽略。
+Settlement distinguishes the sending result from later platform state: UNKNOWN may monotonically converge to CONFIRMED or to an evidenced NOT_SUBMITTED; a later repeated unknown cannot downgrade a confirmed result back to UNKNOWN. After CONFIRMED, removed/gone, URL/platform ID backfill, or metrics evidence may be appended while remaining sent, intent-succeeded, and COMMITTED count, without re-charging, releasing a count, or creating an attempt. A removal event can occur after SUCCEEDED and is verified by the original node or a restricted reconciler against the historical attempt/segment; it is not a conflicting "second sending result". The same event key with the same digest is idempotent, a different digest returns 409 and keeps the evidence; a late success after NOT_SUBMITTED has already settled is a safety conflict, frozen and reconciled as below, and must not be ignored.
 
-回传账号不符时，记录安全事件与实际平台证据，标为 RECONCILING/需人工处理，不伪装成预定账号成功，不允许自动重发。成功更新 Post、EngageSentReply、分段和现有计费使用幂等事务/事件键，避免重复扣费。
+When the reported account does not match, the security event and actual platform evidence are recorded and marked RECONCILING/manual handling, not disguised as a success for the intended account, and automatic resending is not allowed. Besides keeping the target-account protection, when the actual actor can be reliably identified its new authorization must be blocked and its actual usage reconciled; when it cannot be associated, the identity is reported as pending reconciliation and an account migration must not be guessed from a handle. Success updates SendIntent, Post, EngageSentReply, segments, and existing billing usage through idempotent transactions/event keys, avoiding double charging.
 
-插件必须持久化 attempt 与结果，网络恢复后只重试 outcome，不重试平台提交。thread 每段提交结果在本地持久化，并在继续下一段前报告；已成功部分保留，未知段停止整个任务。不自动重发 root；部分发送后不能修改 thread 路由，人工恢复必须以已确认分段为依据。
+The extension must persist the attempt and result and, after network recovery, retry only the outcome, never the platform submission. A thread persists each segment's submission result locally and reports it before continuing to the next segment; successful parts are kept, and an unknown segment stops the whole task. The root is not automatically resent; after a partial send the thread route cannot be modified, and manual recovery must be based on confirmed segments.
 
-thread 的中间段 outcome 只结算该段并保持整个 attempt=SENDING，直到全部段确认才标为 SUCCEEDED、释放账号锁。后续段确定未提交的失败可终止为 FAILED_FINAL 并记录部分成功，已确认段保留已消费配额，其余未用预占释放；任何未知段让整个 attempt=RECONCILING，已消费和该未知段的预占继续保留。
+A thread's intermediate segment outcome settles only that segment and keeps the whole attempt=SENDING until all segments are confirmed, when it is marked SUCCEEDED and the account lock is released. A failure that definitively did not submit can terminate as FAILED_FINAL recording the partial success, with confirmed segments keeping their consumed quota and the remaining unused reservations released; any unknown segment makes the whole attempt=RECONCILING, and the consumed quota and that unknown segment's reservation stay held.
 
-FAILED_FINAL不代表整个thread从未发送；持久化hasConfirmedSegments及各段事实。首版部分thread只提供结果核对/补录，不提供从root重试或自动续发；用户在平台手工补完后可受限记录事实。retryPost、预约和本地Retry必须同时检查分段历史，不能只按ERROR/FAILED状态放行。将来支持受控续发时需要明确从首个未提交段接续及已确认父段引用，不能复用从第0段开始的旧重试。
+FAILED_FINAL does not mean the whole thread was never sent; hasConfirmedSegments and each segment's facts are persisted. The first version provides only result reconciliation/late recording for partial threads, not root retry or automatic continuation; after the user manually completes it on the platform the facts may be recorded in a restricted way. retryPost, scheduling, and local Retry must all check the segment history and must not pass on the ERROR/FAILED state alone. Supporting controlled continuation in the future requires an explicit resumption from the first unsubmitted segment and a reference to confirmed parent segments, and cannot reuse the old retry that starts at segment 0.
 
-RECONCILING接受经上述身份校验的晚到确认或受权限保护的人工核对。人工流程记录核对者、证据与结论：确认已提交则补平台结果及结算额度；确认未提交且确认旧执行无法再提交，才终止attempt、释放预占并允许显式新attempt；证据不足继续UNKNOWN。完成最终结算才释放账号锁。已撤销/换用户节点不恢复执行凭证，由受限核对流程导入结果。
+RECONCILING accepts a late confirmation verified as above or a permission-protected manual reconciliation. The manual flow records the reconciler, evidence, and conclusion: if confirmed submitted, the platform result is backfilled and the quota settled; only if confirmed not submitted and the old execution is confirmed unable to submit any more may the attempt be terminated, the reservation released, and an explicit new attempt allowed; with insufficient evidence it stays UNKNOWN. The account lock is released only after the final settlement. A revoked/user-changed node does not restore execution credentials, and the result is imported through a restricted reconciliation flow.
 
-人工核对复用POST outcome，增加显式mode=RECONCILIATION及evidence/expectedResolutionRevision；缺省mode=EXECUTOR仍要求原节点/lease/fencing。核对模式使用当前用户身份、独立的发送核对管理能力、持久化组织/project归属、审计及结果版本校验，不要求伪造旧node secret，也不能只靠body中的mode越过执行认证。普通终端无该能力不能自称人工核对；核对模式不发许可或改路由，NOT_SUBMITTED仍须满足下述停止证据条件。GET attempt为有权核对者返回脱敏证据/状态，不返回节点密钥或可重放许可；无需另增公开核对API。
+Manual reconciliation reuses POST outcome, adding an explicit mode=RECONCILIATION plus evidence/expectedResolutionRevision; the default mode=EXECUTOR still requires the original node/lease/fencing. Reconciliation mode uses the current user identity, an independent send-reconciliation administrative capability, persisted organization/project ownership, auditing, and result revision validation; it does not require faking the old node secret and must not bypass execution authentication with only a body mode. An ordinary terminal without that capability cannot claim to be a manual reconciliation; reconciliation mode issues no permit and changes no route, and NOT_SUBMITTED must still meet the stop-evidence conditions below. GET attempt returns redacted evidence/state for a reconciler with permission and returns no node secret or replayable permit; no separate public reconciliation API is needed.
 
-安全重试必须同时满足：旧短许可已失效；旧执行者已持久化停止确认（覆盖该attempt及segment，确认尚未submit、没有待执行页面命令或在途请求），或经人工可验证的等效隔离与平台结果核对；所有相关段有明确未提交/已提交结果。单纯“现在没搜到帖子”、节点离线、账户撤销或等待租约超时都不足以证明未提交。不能确认停止或平台请求仍可能在途时保持RECONCILING，不提供绕过检查的强制重试。
+A safe retry must simultaneously satisfy: the old short permit has expired; the old executor has persisted a stop confirmation (covering that attempt and segment, confirming that nothing was submitted and that no pending page command or in-flight request exists), or an equivalent manual verifiable isolation plus platform result reconciliation has occurred; and all related segments have a definite submitted/unsubmitted result. Merely "no post can be found now", a node being offline, account revocation, or waiting for the lease to expire is not enough to prove non-submission. When a stop cannot be confirmed or a platform request may still be in flight, it stays RECONCILING, and no forced retry bypassing the checks is provided.
 
-旧执行报告一旦与已核对结论冲突，立即记录完整证据、冻结相关意图/后续attempt并人工核对，不能覆盖已结算结果或自动再发。停止确认接口只返回收敛状态，不授予新发送许可；后端保留所有旧attempt证据。恢复流程及管理界面是上线必要功能，不能只新增UNKNOWN状态而没有处置路径。
+Once an old execution report conflicts with a reconciled conclusion, full evidence is recorded immediately, the related intent/subsequent attempts are frozen, and it is reconciled manually; the settled result must not be overwritten or automatically resent. The stop-confirmation endpoint returns only convergence state and grants no new sending permit; the backend keeps all old attempt evidence. The recovery flow and an administrative UI are required for launch: adding an UNKNOWN state without a handling path is not acceptable.
 
-本方案保证受控领取和发送授权，不能承诺跨浏览器/平台的 exactly-once。平台没有统一幂等发送接口时，提交后崩溃可能无法知道是否成功；正确选择是停止并核对，而不是用租约到期当作“肯定没发”。
+This design guarantees controlled claiming and sending authorization; it cannot promise cross-browser/platform exactly-once. When a platform has no unified idempotent send interface, a crash after submission may make success unknowable; the correct choice is to stop and reconcile rather than treating lease expiry as proof that nothing was sent.
 
-### 7.6 新增API清单与兼容边界
+### 7.6 Compatibility, Recovery Endpoints, and Legacy Task Isolation
 
-#### 仅新增以下缺失能力
+§7.4's start/renew/preflight/segment start/outcome/GET attempt/stop-confirmation fill in capabilities the old API lacked. Organization, project, content, and account ownership are read from the persisted execution and arbitrary body claims are not trusted; a GET returns no secret or replayable submission permit.
 
-| 新增方法/路径 | 必要性与行为 |
+1. New default configuration goes through §7.1. The legacy Automation publishing/replies accounts may still accept the original flat per-action format, saved by an adapter into the same ProjectSendBinding; omitting accounts, or replacing policies/platforms, does not clear bindings. The legacy reply accounts array continues to be ignored and must not suddenly be interpreted as the new default; the new two-level endpoints use an independent DTO and do not directly change legacy field types.
+2. If a new plan create carries the previous experimental executionRoutes, it returns an explicit PLAN_ACCOUNT_SELECTION_MOVED with the target draft/default-configuration entry points, before the LLM/charging, rather than silently ignoring it. Existing executionRoutes/executionRevision continue to be shown read-only as history; the legacy execution-routes POST may only convert an explicitly listed editable draft's POST selection into a per-item EXPLICIT and no longer stores a plan default for newly materialized content. A REPLY plan selection write is rejected and points to the project default configuration without changing current automatic replies. Already-queued snapshots are preserved, and history is not deleted or re-charged just to clean up fields.
+3. New controlled enqueue uniformly saves publishMethod=EXTENSION, accepting legacy request fields but returning the actual extension route. Replies enter reply-due and ordinary Posts enter publish-due; existing API Intents still do not enter the extension pool, and a failed route read must not guess the other execution method. source=engage does not equal API; an OPTIONAL single reply may omit integrationId, while REQUIRED is still rejected by enqueue policy. QUEUED must not be wrapped as a platform-confirmed success.
+4. New controlled tasks use ACCOUNT_BOUND_V1 and the shared content protection under both REQUIRED and OPTIONAL. Legacy requests without a node may only access the still-open LEGACY pool; the client header alone cannot decide the pool, and authentication plus the persisted task protocol must be verified. Turning off an organization's legacy execution must also return an upgrade requirement when the version header is missing.
+5. Historical LEGACY callbacks settle under the restricted legacy rules; a new task arriving through an old PATCH/POST entry point must also verify the same attempt/content intent and cannot bypass via a changed method, missing fields, URL backfill, or a public nodeId. The safe exception is removing old credential output, while the original non-sensitive array/object wrappers are kept.
+6. Retryable configuration/edit/create/claim uses requestId/business ID/report sequence and revision; the receipt is replayed before the old revision is checked, and the same key with a different digest returns 409. expectedRevision alone is insufficient to recover a lost response. The claim receipt is short-term encrypted or equivalently recoverable and replays only RESERVED information; when expired it returns a recovery state, and a start retry never replays a submission permit.
+7. A session POST may fall back to the legacy PATCH for diagnostic reporting only on a confirmed 404/405; a timeout/5xx/426 must not guess that the protocol changed and resend. When the old backend does not support coordination, an upgrade requirement is shown and dedup must not be claimed.
+8. CORS/OpenAPI add the real node/protocol headers while keeping legacy methods. The extension's backendCall, request util, and direct fetch are adapted together; a 426 stops new claim/start/submit, but authenticated results, stop confirmations, and historical queries still work. An invalid user/revoked node is imported through restricted reconciliation and does not regain execution rights via settlement.
+9. An ordinary GET does not claim; the legacy status probe does not replace attempt history. A same-path POST alias is added to an existing PATCH/PUT only when the new editing flow actually needs it, and unrelated legacy routes such as keywords, group, and plug are not renamed.
+
+A same-machine same-profile reinstall re-pairs locally per §4.2, restoring the same nodeId and the original scope's credentials/sequence, without adding a new public backend recovery endpoint. register/save does not issue or rotate a secret just because the public hash matches; if all local backups are lost, identities conflict, or a registration replay times out, it must stop for review. Recovering an identity must not lift an active execution, UNKNOWN, or quota reservation; a submission journal deleted by uninstall must not be used to reconstruct it as unsent.
+
+Before switching, stop dual dispatch of old and new, and inventory the old extension's local queue, pending-report tasks, and sleeping Temporal workflows. Only tasks confirmed not started may migrate under the new policy; old UNKNOWN/partial sends are isolated and reconciled and are not automatically retried as failures. A rollback pauses the new protocol while keeping protections, and must not downgrade it to LEGACY or open the old arbitrary account pool through OPTIONAL. Controlled multi-terminal sending is not enabled for a shared account until protection or bypass closure is complete across all projects/channels.
+
+## 8. Pacing and Quota When Projects Share an Account
+
+The node's local write gate protects only the current browser. One account can be logged in on multiple nodes, so account pacing cannot be computed from `(node, platform)` or `(project, platform)` alone.
+
+The project/day objective and the existing generation-quota logic are kept; at submission authorization an account-level shared write right is added: it serializes post/reply/thread sending by `(organizationId, canonical platform account identity)` and records lastWriteAt, active executions, and uncertain state. It uses a shared `AccountWriteState` row with Prisma transactions/CAS, and the active owner includes executionKind=EXTENSION/API and the persisted executionId, not only the node attemptId; it must not be implemented or deployed through direct database SQL.
+
+The migration must replace the old gates at the same time and must not keep an org/platform limit and then stack the account lock on top. An explicit inventory:
+
+| Current logic | New granularity/behavior |
 | --- | --- |
-| POST /extension/nodes/register | 当前没有终端凭证登记；按安装身份登记，不能复用账号connect来发节点密钥 |
-| GET /extension/nodes | 当前没有终端及其会话管理视图；复用会话投影，仍只读 |
-| POST /extension/nodes/save | 命名/撤销已登记节点，版本化修改；不混入注册密钥操作 |
-| POST /integrations/extension-session | 现有PATCH同路径的新增方法入口；新版账号保存/心跳，业务处理复用现有服务 |
-| POST /projects/:projectId/operation-plans/:id/execution-routes | 当前只有计划生成，没有不收费重新生成的执行选择编辑；按project和版本校验 |
-| POST /extension/send-attempts/:attemptId/start | 当前status probe只检查已发送，不具备一次发送授权；原子start不可用查询或成功回调替代 |
-| POST /extension/send-attempts/:attemptId/renew | 续租未过期的本节点RESERVED；不能重新授予提交许可或延长已发短许可 |
-| POST /extension/send-attempts/:attemptId/segments/:index/preflight | 准备下一段现场核验挑战，不授权提交 |
-| POST /extension/send-attempts/:attemptId/segments/:index/start | 现场证据验证后逐段授权，不能把root许可覆盖整个thread |
-| POST /extension/send-attempts/:attemptId/outcome | 新版统一汇报确认/明确未提交/未知/移除和逐段结果；内部适配原post/reply落账服务 |
-| GET /extension/send-attempts/:attemptId | 历史/当前attempt恢复查询，不仅是Post当前状态；不能用getPost当前PUBLISHED推断某段旧attempt已结算 |
-| POST /extension/send-attempts/:attemptId/stop-confirmation | 旧执行者停止证据，禁止自动授予重试权 |
+| getLastPlatformWriteAt(org, platform), legacy claimedAt clock | Authorization/result facts and nextWriteNotBefore for the same canonicalAccountKey; a RESERVED claim does not count as a platform write |
+| getFirstSentReplyAt(org, platform), warmup | Confirmed sending history by canonicalAccountKey; account x2 does not inherit x1's maturity |
+| Account daily cap and in-flight reservation | By canonicalAccountKey; multiple projects/terminals share the same account budget |
+| countTodayRepliesByChannel and _exhaustedChannels | Account × community window, keeping community rules; a separate organization-wide community cap would be an independently named policy |
+| Project min-gap, plan objectives, and keyword objectives | Still by project/platform, narrowing account rules rather than replacing account limits |
+| Extension platform-throttle persisted cache | Partitioned locally by verified account identity; an account switch does not inherit the previous account's clock; the server account write lock remains the cross-terminal authority |
+| Automation overview and reply-queue-status | Use the same granularity as the new queries above, and must not show a wait time derived from the legacy org/platform |
 
-其中2个GET、10个POST；extension-session只是增加HTTP方法入口，不新增业务路径。原草案的send-bindings、独立heartbeat及PATCH节点管理接口不再新增。节点和attempt接口的组织身份来自认证，所有记录ID都做归属检查；attempt不能靠body声明另一个postId归属。
+For the account interval the first version uses a conservative server-confirmed clock: when each segment's CONFIRMED result is first persisted, nextWriteNotBefore is computed from that confirmation's receipt time, and the next segment/task waits out the configured interval; an idempotent replay does not postpone it again. The start authorization time alone must not be used, because the actual submit may be later than the authorization and could place two platform writes too close together. The account stays locked during UNKNOWN; a definite non-submission does not count as a write and must not clear the interval of previously confirmed writes. Platform creation time/client time is kept as fact and is not grounds to shorten the safety wait. The API and the extension share this rule, and a late callback conservatively delays subsequent sends.
 
-leaseExpiresAt只管理RESERVED领取期限；进入SENDING后使用lastProgressAt和独立执行超时规则，有效的分段preflight/start/outcome更新进度，正常段间等待纳入超时计算。不能让旧领取期限到达就中断正常thread，亦不能靠普通renew复活RECONCILING或重新授权已开始segment。
+The account daily budget uses the account's configured timezone or UTC as the account window; each project policy keeps its own existing window rules: auto-reply's dailyReplyLimit currently uses the schedule.timezone local day, and the API's plan/keyword target currently uses the UTC day, so it must not be claimed that all legacy queries already use the project timezone. Each budget dimension records its timezone/window rule explicitly, and the first version keeps the corresponding existing semantics; a shared account quota does not move its day boundary with the requesting project. Generation quota keeps the existing billing dimension and must not be mistakenly changed to a per-account quota. Legacy history with no reliable account attribution goes only into organization reports/isolated reconciliation and is not arbitrarily attributed to the current default account; a new account's warmup uses a conservative starting value with a stated reason.
 
-outcome新入口有必要：原post/reply回调字段和状态语义各不相同，缺少段级许可与UNKNOWN处理。新协议使用一个POST统一envelope，避免为每个旧PATCH回调再增加重复POST路径；旧回调仍保留，并进入同一结果适配服务。业务落账、计费、metrics、平台移除语义不复制实现。新版严格result新增attempt/node/lease/fencing/probe和段信息，旧releaseURL/releaseId/segments、reply url/author字段保持对应映射；具体资源由持久化attempt决定，不信任body随意指定。
+**First distinguish objectives from hard quotas**: the existing automatic driver treats plan dailyTarget/keywordTargets as an added generation gate that is off by default, while the manual API's _assertProjectDailyTarget uses the effective plan/keyword objectives for sending/scheduling admission. The two must not be merged merely because the field names match. This version fixes the following objective contract per producer; a new MANUAL extension reuses the existing MANUAL business admission and an AUTOMATION extension reuses the AUTOMATION business policy, and neither bypasses nor stacks the other lane's rules by changing execution method.
 
-已有PATCH /engage/sent/:id和PUT /posts/:id/date只在新版编辑器实际使用时加同路径POST别名。未涉及的keywords、tracked-account、group、plug等历史接口保持原方法，不为统一风格进行整库路由重命名。
+| Producer / send method | Automation switch | Project auto-reply window, derived min-gap, dailyReplyLimit | Plan/keyword objective | Account/community safety rules |
+| --- | --- | --- | --- | --- |
+| MANUAL / legacy API facts | Not required | Not a manual permission condition | Keep the existing UTC-day API admission: the narrower of the effective dailyTarget/dailyHardCap and the matching keyword sub-limit; no limit when there is no effective plan | Applies, shared by all controlled channels |
+| MANUAL / extension | Not required | Not a manual permission condition | Same as MANUAL API; changing the method cannot bypass the existing business hard admission | Applies; a manual click cannot skip it |
+| AUTOMATION / extension | Requires master and reply/platform switches | Applies; schedule.timezone local day/window, with dailyReplyLimit as the automatic execution hard quota | Limits new generation only when the existing generation gate is on; an already-queued task does not consume the generation objective again | Applies; cannot be skipped by having paid the generation fee |
+| AUTOMATION / legacy API facts | Same as AUTOMATION extension | Same as AUTOMATION extension | Same as AUTOMATION extension, without additionally applying the manual API's implicit plan hard limit | Historical ledger retained; this phase grants no new API writing |
 
-#### 请求与响应兼容
+In the table, project rules count by business root/single reply; account platform writes count each actual submitted segment, and community rules state their own unit. MANUAL's plan admission is kept as an explicit SEND_HARD_LIMIT compatibility policy; a scheduled date is only an estimate, and the actual start re-checks atomically against the authorizing UTC day; a dailyReplyLimit/min-gap configured for automation does not conversely block manual sending. An ordinary Post does not apply Reply-specific plan objectives but is constrained by the general account write right, platform write quota, and its own business hard rules.
 
-1. 旧非敏感字段名称、类型、数组/对象包装和省略语义保持；新增DTO字段可选，对严格执行的条件要求由服务端协议模式决定。POST /posts复用posts[].integration.id；不要让旧客户端同时补两个同义账号字段。普通POST upsert不能因为换方法变成追加创建，每个具体接口按已有业务ID/版本/幂等键决定新增或修改。
-2. 原publishMethod缺省行为按各现有入口保留；新版UI显式选择extension后才进入该分支，API任务仍走原发送路径且不得被插件due返回。新严格模式需要完整账号时，优先保留已绑定账号或解析已授权project默认；没有合法账号返回SEND_BINDING_REQUIRED，不能为“兼容”退回当前任意浏览器身份。
-3. 现有`{ due, pacing }`、`{ integrations }`、reply-account数组和批量scheduled/failed字段不改变；新版新增字段旧客户端可忽略。reply extension排队返回可读QUEUED状态和Post/intent ID，旧API成功返回不被伪装成已确认平台成功；任何新增结果字段不能让客户端误以为排队就是已发送。
-4. POST/PATCH同路径入口使用同一DTO解析和服务；新增node headers纳入backend main.ts的CORS allowedHeaders，GET/POST与既有方法全部保留，OpenAPI列出两个入口。不能仅更换method而忘记节点凭证、字段转换或限流设置。
-5. 所有可重试POST使用requestId/业务意图ID/报告序号/expectedRevision等对应幂等机制；网络超时原样重试，不因重试换ID。新版上报POST遇到已确认的404/405可退回旧PATCH记录会话；遇到超时/5xx/426不猜测换协议，尤其不能重试平台提交。旧后端不支持节点协议时显示需要后端升级，不声称严格能力可用。
+The project's replies-used retains the factual basis of all real MANUAL/AUTOMATION replies plus applicable in-flight occupancy: a manual send is not blocked by the automatic dailyReplyLimit, but its fact may still reduce the automatic task's remaining allowance or postpone the next automatic reply. Accounting must not cover only the automatic lane and let statistics ignore manual sends; when a fact pushes an automatic quota over the limit, it is faithfully recorded and new automatic authorization stops, without rejecting the fact or faking the count. Each lane's admission conditions and the fact counts are two different things.
 
-   幂等键与expectedRevision作用不同：版本校验不等于响应丢失后能安全重试。配置/改绑/编辑先检查请求回执，同键同摘要返回原保存结果，再检查版本；未使用幂等键的旧写请求重试遇409时重新读状态，不重复产生副作用。register响应丢失的同键重试只重放受限、短期加密的登记响应；不能为同installation反复创建节点/轮换活跃密钥，回执不可恢复时明确进入受认证的登记恢复流程，并保留旧执行记录供核对。
+All rules are labeled GENERATION_TARGET or SEND_HARD_LIMIT with the applicable producer, unit, window, and version. Only a SEND_HARD_LIMIT that is actually enabled reserves in the authorization transaction; a generation objective uses a generation-intent placeholder, and cash credits are recorded separately. ENGAGE_REPLY_BUDGET_GATE_ENABLED must not be quietly turned on, and no unnamed "API special exception" may be kept for a new executor to guess at.
 
-6. 账号列表明确输出DTO白名单：当前reply-account repository使用Integration对象展开，需核对并去掉token/refreshToken等凭证字段，不能把原始对象展开理解为兼容要求。id/name/profile/providerIdentifier/engageEnabled等客户端所需非敏感字段保留；组织/项目列表各自原包装保持。凭证移除属于明确的安全例外，实施时审计调用方并记录变化，不在新terminals信息中重新暴露它们。
+post, reply, and thread segments share the account write interval; the reply daily cap, community cap, and warmup use account-attributed statistics and keep the project's own narrower rules. Quota reservation and start complete atomically: sent and in-flight reservations both count in the decision, a definite non-submission releases, and an unknown result stays occupied until reconciled. A platform removal still counts as real sending behavior, and whether billing is charged keeps the existing product rule. The first version adds no inter-project fair allocation but must not claim that "count then send" has already eliminated concurrent over-sending.
 
-7. 仅按record ID的旧schedule、post/reply编辑/回传入口，使用数据库中的organization/project/account归属完成授权，不能因body省略projectId而跳过；分组批量项分别校验。纯GET的状态追加不会赋予新的修改权限。
+The counting units are explicitly distinguished: a project's plan/post count is by root, the Engage reply objective is by single business reply; platform account writes count actual submitted segments, and a thread continuation also consumes platform write quota and applicable reply quota. A multi-segment thread must not be treated as one platform write to bypass the account cap. The implementation states each cap's unit in the configuration and statistics DTOs.
 
-8. 插件HTTP传输层同时改造backendCall与fetchRequestUtil，让节点/协议headers真实透传；post-reply的直接fetch及reply.unconfirmed/queue已有backendCall调用统一适配节点和attempt协议。426/版本停止状态只禁止登记新执行、claim/start及平台提交，仍允许通过独立兼容且认证的GET attempt、outcome和stop-confirmation核对已发生事实。后端相应把版本门槛与结果结算协议校验分开，不能用fail-open版本guard放行新发送，也不能让全局升级短路永久丢弃已发生结果。失效用户凭证/已撤销节点仍走受限人工导入，不借结算豁免恢复发送权限。
+The account lock blocks other nodes from interleaving writes during an active thread or an uncertain attempt; lease expiry cannot lift the unknown-send protection; the same applies when the account policy is OPTIONAL. It is released only after a manual result confirmation, and a node revocation alone must not automatically decide that nothing was sent.
 
-#### 旧插件与严格任务隔离
+### 8.1 Multiple Terminals on One Account and Double-Spend Prevention
 
-兼容不表示允许旧插件执行新账号绑定任务。上线前先扩展schema/服务端，保留旧路径及LEGACY任务池；新版插件登记并以POST上报，待其身份能力验收后按organization/project开启ACCOUNT_BOUND_V1。
+"Double spend" here covers both re-executing the same business send and concurrent requests reusing the same quota; allowing multiple browser logins does not mean each extension gets its own copy of a task or budget. The first version coordinates with PostgreSQL persistent state, Prisma transactions, unique constraints, and conditional CAS updates; browser-local locks or optional Redis locks are auxiliary only and are not the final basis for sending eligibility/quota.
 
-POST due在服务端按节点协议和任务executionProtocol选择：无节点认证的旧请求只可能看到尚未关闭的LEGACY池；严格请求只领取完整账号及有效会话匹配的严格任务。关闭某租户旧执行时对旧请求明确返回升级要求；缺version header也不能获得严格任务。不能只用新版客户端header当分池依据，更不能在同一批due中混入两个协议。
-
-既有成功/失败/移除/PATCH回调处理时先读记录协议：LEGACY历史任务按受限旧规则和原字段落账；严格任务无论从POST outcome还是旧PATCH进来，都必须验证其attempt/node/lease/fencing，不允许通过换method或省略字段绕过。人工URL补录仍是事实核对，不改变发送权。
-
-灰度前先停止新旧双派发，核对旧已领取/本地待报告任务，再将确认未开始且已明确选账号的旧QUEUE升级。未知旧结果隔离核对，不自动迁移为可重试新任务。回滚只暂停严格池，不能把它降级给旧插件。支持旧调用方的GET读取、DRAFT保存、已发生结果结算和手工/API路径可以保留，不因严格自动发送限制被一刀切删除。
-
-## 8. 多项目共用账号时的节奏与配额
-
-节点本地 write gate 只保护当前浏览器。一个账号可以在多个节点上登录，因此账号节奏不能只以 `(node, platform)` 或 `(project, platform)` 计算。
-
-保留 project/day 的目标和现有生成额度逻辑；在提交授权时加账号级共享写权限：按 `(organizationId, canonical platform account identity)` 串行化post/reply/thread的发送，记录lastWriteAt、活动执行与不确定状态。使用共享`AccountWriteState`行和Prisma事务/CAS，活动owner包含executionKind=EXTENSION/API及持久化executionId，不只保存节点attemptId；不要通过直接数据库SQL实现或部署。
-
-迁移必须同步替换旧闸门，不能保留org/platform限制后再叠加账号锁。维护明确清单：
-
-| 当前逻辑 | 新粒度/行为 |
-| --- | --- |
-| getLastPlatformWriteAt(org, platform)、旧claimedAt时钟 | 同canonicalAccountKey的真实发送开始/分段写时钟；RESERVED领取不计为平台写 |
-| getFirstSentReplyAt(org, platform)、warmup | 按canonicalAccountKey的已确认发送历史；账号x2不能继承x1的成熟度 |
-| account daily cap与在途预占 | 按canonicalAccountKey；多个project/终端共享同一账号预算 |
-| countTodayRepliesByChannel及_exhaustedChannels | 账号×社区窗口，保留社区规则；如另设organization总社区上限则作为独立命名策略 |
-| project min-gap、plan目标及关键词目标 | 继续按project/platform，缩窄账号规则，不取代账号限制 |
-| 插件platform-throttle持久缓存 | 本地按已核验账号身份分区；切号不继承上个账号时钟；服务端账号写锁仍是跨终端权威 |
-| Automation overview和reply-queue-status | 与上述新查询使用同一粒度，不能展示旧org/platform推导的等待时间 |
-
-账号日预算使用统一配置的账号timezone或UTC作为账号窗口；各project策略保留自身既有窗口规则：auto-reply的dailyReplyLimit当前按schedule.timezone本地日，API的plan/keyword target当前按UTC日，不能宣称所有旧查询已使用project时区。每个预算维度显式记录timezone/window规则，首版保留对应既有语义；共享账号额度不随请求project改变日边界。生成额度继续按现有计费维度，不能误改成每账号额度。无可靠账号归属的旧历史只进入组织报表/隔离核对，不随意归给当前默认账号；新账号warmup采用保守起始值并说明原因。
-
-**先区分目标与硬额度**：账号/社区安全上限是所有受控发送共享的硬闸门；项目dailyReplyLimit按适用的自动/人工策略独立，MANUAL不因automation关闭而停发。plan dailyTarget/keywordTargets在现有auto driver中是默认关闭的新增生成gate，已排队回复不再次按生成目标领取；API现有_assertProjectDailyTarget却将有效target用于发送/预约准入，缺plan为uncapped。首版分别保持这些lane语义，把规则标为GENERATION_TARGET或SEND_HARD_LIMIT及适用producer，不把生成目标一律改成所有Start的硬上限。实际启用的SEND_HARD_LIMIT才原子预占；生成目标使用生成意图占位，和现金credits、发送次数分别记账。所有新增规则在配置中标明单位、窗口和适用lane，不能悄悄开启ENGAGE_REPLY_BUDGET_GATE_ENABLED，也不能用“已经扣生成费”绕过账号安全上限。
-
-post、reply 和 thread 段共用账号写间隔；reply 日上限、社区上限和 warmup 使用账号归属统计，并保留项目自身更窄的规则。配额预占与 start 原子完成：已发送和在途预占都计入判断，明确未提交时释放，未知结果保持占用直到核对。平台移除仍算真实发送行为，计费是否收取保持既有产品规则。首版不增加 project 间公平分配，但不能声称用“查 count 后发送”已经消除了并发超发。
-
-统计单位明确区分：project 的 plan/post 数量按 root、Engage 回复目标按单条业务回复；平台账号写次数按实际提交段计数，thread continuation 也消耗平台写额度及适用的回复额度。不能把一个多段 thread 当成一次平台写来绕过账号上限。实现时在配置和统计 DTO 中明确每个上限的单位。
-
-账号锁在活动 thread 或不确定 attempt 期间阻止其他节点交错写入；lease 过期不能解除未知发送保护。人工确认结果后再释放，不能仅因节点撤销就自动判定未发送。
-
-### 8.1 同账号多终端与防“双花”机制
-
-这里的“双花”包括重复执行同一次业务发送，以及并发请求重复使用同一份额度；允许多浏览器登录不意味着每个插件各自获得一份任务或预算。首版以PostgreSQL持久状态、Prisma事务、唯一约束和CAS条件更新协调，浏览器本地锁或可选Redis锁仅作辅助，不作为发送资格/额度的最终依据。
-
-| 层次 | 防止的问题 | 权威约束 |
+| Layer | Problem prevented | Authoritative constraint |
 | --- | --- | --- |
-| 社交账号登记 | 三个终端为同一账号创建三份Integration | 统一平台身份解析、账号唯一键，三个NodeSession指向同一Integration |
-| 业务意图 | 两条不同Post代表同一次默认回复 | ReplySendIntent唯一键及唯一可发送postId；重试复用意图 |
-| 任务领取 | N1/N2同时领取同一root或reply | 领取事务与活动attempt唯一约束，仅一名胜者；fencingVersion跨attempt递增 |
-| 账号执行 | N1发post、N2发reply同时使用x1 | canonicalAccountKey对应的账号写状态；同账号活动发送/thread串行化，共享间隔 |
-| 发送额度 | 两请求均读到剩余1次后各发送1次 | 发送授权事务内创建额度预占，确认发送与在途预占一起计入上限 |
-| 结果/计费 | 重复回调重复扣费或重复释放 | attempt/segment/计费业务事件键、状态CAS及幂等结算 |
+| Social account registration | Three terminals create three Integrations for the same account | Unified platform identity resolution and account unique key; the three NodeSessions point to the same Integration |
+| Content sending intent | The same content resent by changing account, Post, or channel | SendIntent unique by organization/contentUnitId; ReplySendIntent's PRIMARY key also excludes the account, and a retry reuses the original content intent |
+| Task claiming | N1/N2 claim the same root or reply simultaneously | Claim transaction plus active-attempt unique constraint, only one winner; fencingVersion increments across attempts |
+| Account execution | N1 posts while N2 replies, both using x1 | The account write state for canonicalAccountKey; active sends/threads on the same account are serialized with a shared interval |
+| Sending quota | Two requests both read one remaining unit and each send once | A quota reservation is created inside the send-authorization transaction, and confirmed sends plus in-flight reservations are counted together against the limit |
+| Results/billing | A repeated callback double-charges or double-releases | attempt/segment/billing business event keys, state CAS, and idempotent settlement |
 
-#### 事务边界
+#### Transaction Boundaries
 
-1. **Claim事务**：校验并锁定业务意图及任务版本，原子创建唯一活动attempt并固定节点；败者返回未领取。不调用平台、不消费发送次数，也不把领取时间当成真实平台写时钟。多个不同任务可以处于RESERVED，发送权另由账号状态控制。
-2. **Start事务**：外部project核验、页面探测、token刷新等先在事务外完成，事务内重查本地权限/任务/账号/现场证据版本及上述校验的有效期，CAS取得账号执行权，检查预算并唯一预占，消费本段challenge，将RESERVED转SENDING或授权下一PENDING段，持久化请求指纹及一次性许可。任一步失败全部回滚，不返回提交许可。统一按账号状态→任务/意图→执行/segment→排序后的预算键访问相关行；没有账号状态访问的claim/配置事务只获取所需后缀，不能锁意图后反向申请账号状态。懒建预算行也须唯一键与原子upsert/CAS；外部网络调用不进入数据库事务，冲突重试不重复授予许可。
-3. **Outcome事务**：验证attempt、节点、fencing及结果幂等键，原子写入对应Post/回复/分段状态及业务意图、结算预占、更新账号进度和可释放状态。同一个结果只完成一次状态迁移，重复请求返回已经结算的结果，不再次扣减或释放。
+1. **Claim transaction**: validate and lock the business intent and task version, atomically create the unique active attempt and fix the node; the loser returns not-claimed. It does not call a platform, does not consume a send count, and does not treat claim time as the real platform write clock. Multiple different tasks may be RESERVED, and the sending right is controlled separately by account state.
+2. **Start transaction**: external project verification, page probing, and token refresh complete outside the transaction; inside it re-check local permissions/task/account/live-evidence revisions and the validity of the validations above, CAS the account execution right, check the budget and reserve uniquely, consume this segment's challenge, move RESERVED to SENDING or authorize the next PENDING segment, and persist the request fingerprint and the one-shot permit. Any failure rolls the whole thing back and returns no submission permit. The row access order is uniformly policy coordination row (only when needed, e.g. first current-actor binding) → account state → task/intent → execution/segment → budget keys in sorted order; a claim/configuration transaction with no preceding row access acquires only the needed suffix, and must not lock the intent and then request the policy/account state in reverse. A lazily created budget row must also use a unique key and an atomic upsert/CAS; external network calls do not enter the database transaction, and a conflict retry does not grant a permit twice.
+3. **Outcome transaction**: verify the attempt, node, fencing, and result idempotency key, atomically write the corresponding Post/reply/segment state plus the business intent, settle the reservation, and update account progress and releasable state. One result performs the state transition once; a repeated request returns the already-settled result without deducting or releasing again.
 
-这里的事务只覆盖本地数据库状态。平台提交和外部计费服务不在数据库事务中；外部计费沿用既有服务，通过持久化结算事件及稳定业务键重试，不能宣称跨服务事务已经实现。确认结果先可靠保存，费用回传失败只重试计费事件，不能重新发送平台内容。生成额度与平台发送次数是不同账本，不混为同一个扣费操作。
+These transactions cover only local database state. Platform submission and external billing services are not in the database transaction; external billing keeps the existing service and retries through persisted settlement events and stable business keys, and cross-service transactions must not be claimed as implemented. A confirmation is reliably saved first, and a failed charge callback retries only the billing event without resending the platform content. Generation quota and platform send counts are different ledgers and are not mixed into one deduction.
 
-#### 额度预占与结算
+#### Quota Reservation and Settlement
 
-发送预占需要持久化记录，至少包含organizationId、canonicalAccountKey、intent/post、executionKind/executionId（插件对应attemptId）、segmentIndex、quotaDimension、policyId/version、windowStart/windowEnd、units、state及结算事件键。唯一键包含execution/segment/额度维度/窗口，重复start不能生成第二份预占。账号日上限、社区额度和启用的project执行硬上限各自有预算维度，不能混用生成目标；预占与对应预算版本/CAS检查在同一授权事务完成，不能先COUNT后另行发送。不同账号仍可能竞争同一project/社区/组织预算，必须对所有实际共享预算行排序并原子检查，不能只靠账号锁保护这些维度。
+A send reservation needs a persisted record containing at least organizationId, canonicalAccountKey, sendIntentId/contentUnitId, executionKind/executionId (attemptId for the extension), segmentIndex, quotaDimension, policyId/version, windowStart/windowEnd, units, state, and the settlement event key. The unique key includes execution/segment/quota dimension/window, so a repeated start cannot create a second reservation. The account daily cap, community quota, and enabled project execution hard caps each have their own budget dimension and must not be mixed with a generation objective; the reservation and the corresponding budget version/CAS check complete in the same authorization transaction, and a COUNT followed by a separate send is not allowed. Different accounts can still compete for the same project/community/organization budget, so all actually shared budget rows must be sorted and checked atomically, not protected by the account lock alone.
 
-预算bucket唯一键按真实作用域定义：账号为组织/账号/维度/窗口，账号社区额度再含canonicalChannelKey，project额度为组织/project/平台/维度/窗口。policyId/version是审计元数据，不能因请求来自不同project或策略版本变化而另开一份同账号额度；账号硬上限从统一账号策略解析，项目更窄规则另用project预算。root/业务回复数量仅在对应根段预占一次，后续段只预占实际平台写次数及适用的评论额度，不再次消费整条业务数量。
+The budget bucket unique key is defined by the real scope: for an account it is organization/account/dimension/window, with the account community quota additionally including canonicalChannelKey, and a project quota is organization/project/platform/dimension/window. policyId/version is audit metadata, and a request from a different project or a changed policy version must not open a second quota for the same account; the account hard cap is resolved from the unified account policy, and a narrower project rule uses a separate project budget. The root/business reply count is reserved once at the corresponding root segment, and later segments reserve only the actual platform write count and applicable comment quota rather than consuming the whole business count again.
 
-当前countAccountSentRepliesToday/countProjectSentRepliesToday将QUEUE与PUBLISHED都纳入publishDate窗口，不是纯已发送计数。迁移不能把所有旧QUEUE导入COMMITTED，或把它们同时作为count和HELD重复计算；预约准入/积压展示仍可单独统计预计窗口的QUEUE，执行账本只计已确认事实及已获提交授权的HELD。无活动许可的普通QUEUE/RESERVED不占发送次数，start才做权威预占；未知旧任务先隔离核对，不按QUEUE状态猜测未发送。
+The existing countAccountSentRepliesToday/countProjectSentRepliesToday include both QUEUE and PUBLISHED in the publishDate window and are not pure sent counts. The migration must not import all legacy QUEUE as COMMITTED, nor count them both as count and HELD. Scheduling admission/backlog display may still separately count QUEUE in the expected window, while the execution ledger counts only confirmed facts and HELD with a granted submission authorization. An ordinary QUEUE/RESERVED with no active permit does not occupy a send count; start performs the authoritative reservation; an unknown legacy task is isolated and reconciled first, and its QUEUE state is not used to guess that nothing was sent.
 
-预算不变量为`confirmedUnits + heldUnits + requestedUnits <= limit`。成功确认将HELD原子转换COMMITTED，held减少且confirmed增加；明确未提交并满足安全停止条件时转换RELEASED；未知结果保持HELD。重复确认/释放不再改变计数，原窗口记录永久可审计。跨日不自动释放旧UNKNOWN预占；新增窗口不能解除账号上仍未收敛的发送保护。预算日界与§8账号timezone一致。
+The budget invariant is `confirmedUnits + heldUnits + requestedUnits <= limit`. A successful confirmation atomically converts HELD to COMMITTED, decreasing held and increasing confirmed; a definite non-submission meeting the safe-stop conditions converts to RELEASED; an unknown result stays HELD. A repeated confirm/release does not change the count again, and the original window record stays permanently auditable. An old UNKNOWN reservation is not automatically released when the day rolls over; a new window must not lift the send protection on an account that has not converged. The budget day boundary matches the §8 account timezone.
 
-窗口以**服务端本段授权时间**确定，预约时的scheduledAt检查只作准入估算；执行延期到另一日必须重查实际授权窗口。预占保存不可变窗口，晚到确认、跨日结算仍结算原窗口，不能按收到outcome当天再扣一次；额度口径为授权提交次数，平台实际创建时间另作历史事实统计。submitBefore限制为各适用预算窗口结束前的安全截止，跨界还未授权的下一段使用新窗口；已在途请求跨界完成仍保留原预占。timezone/限额修改版本化，已发许可/HELD不改归属；调低到confirmed+held以下时阻止新增授权，保留真实已用/预占和超限说明，不修改账本来伪造不变量。
+The window is determined by the **server-side authorization time of this segment**; the scheduledAt check at scheduling is only an admission estimate, and an execution delayed to another day must re-check the actual authorization window. The reservation stores an immutable window, and a late confirmation or cross-day settlement still settles the original window rather than deducting again on the day the outcome was received; the quota unit is the number of authorized submissions, while the platform's actual creation time is tracked separately as historical fact. submitBefore is limited to a safe deadline before the end of each applicable budget window, and a next segment crossing the boundary before authorization uses a new window; a request already in flight that completes across the boundary keeps its original reservation. timezone/limit changes are versioned, an issued permit/HELD does not change ownership, and lowering a limit below confirmed+held blocks new authorization while keeping the real used/reserved amounts and an over-limit explanation without editing the ledger to fake the invariant.
 
-同窗口限额更新不重建bucket/重置计数；账号timezone变更首版只在旧窗口结束、无活动/未知执行且随后第一个完整新时区窗口开始时生效，过渡空档暂停新增授权，不能创建与旧窗口重叠的新预算来重获额度。上述不变量是新增授权的准入条件；调低上限、迁移补入历史或事后核实外部发送可能产生真实超限，仍须如实结算并阻止新增，不能拒绝保存已经发生的事实。
+A same-window limit update does not rebuild the bucket or reset counts; an account timezone change takes effect in the first version only after the old window ends with no active/unknown execution and the first complete new-timezone window begins, and new authorization pauses during the transition gap — a new budget overlapping the old window must not be created to regain quota. The invariant above is an admission condition for new authorization; lowering a cap, importing history during migration, or manually verifying an external send may produce a real over-limit, which must still be faithfully settled and block new sends, and already-occurred facts must not be refused persistence.
 
-计数以预占账本为唯一执行权威，不能同时将同一结果的Post统计和COMMITTED预占各加一次。上线时对可确定账号/段/窗口的已发送历史幂等建立COMMITTED基线，与结果重放共用稳定结果键；不确定历史隔离。发生错账号提交时保留目标预算及实际actor证据、冻结相关执行，核对后按实际已发送事实处理额度，不因ACCOUNT_MISMATCH直接释放并自动再发。
+Counting uses the reservation ledger as the sole execution authority and must not add both the Post statistics and the COMMITTED reservation for the same result. At launch, a COMMITTED baseline is idempotently established for sent history with determinable account/segment/window, sharing a stable result key with result replay; uncertain history is isolated. When a wrong-account submission occurs, the target budget and the actual-actor evidence are kept and the related executions frozen, and after reconciliation the quota is handled according to the actually sent fact rather than being released and automatically resent because of ACCOUNT_MISMATCH.
 
-platform removal仍计入实际发送次数，收费是否发生沿用既有产品规则。不同project合法独立回复仍消耗同一个账号预算；不同账号x1/x2有各自预算。普通post、reply及thread各维度计量按§8执行，每段只结算自己的一份预占。
+A platform removal still counts toward the actual send count, and whether a charge occurs keeps the existing product rule. Legitimate independent replies in different projects still consume the same account budget; different accounts x1/x2 have their own budgets. Ordinary post, reply, and thread dimensions are measured per §8, and each segment settles only its own reservation.
 
-#### 多浏览器竞态与故障切换
+#### Multi-Browser Races and Failover
 
-例：x1在Chrome/N1、Arc/N2、Firefox/N3同时登录。三个终端均可报告会话并参与领取，但同任务只有一个活动attempt；不同任务即使分别被领取，只有取得账号发送权的终端可提交，其他终端等待间隔/执行权，不能因各浏览器本地锁都空闲就同时提交。
+Example: x1 is logged in on Chrome/N1, Arc/N2, and Firefox/N3. All three terminals may report sessions and take part in claiming, but a task has only one active attempt; even if different tasks are claimed separately, only the terminal holding the account sending right may submit, and the others wait for the interval/execution right — they must not submit simultaneously just because every browser's local lock is free.
 
-RESERVED尚未授予平台提交许可，到期或安全取消后可新建attempt交给其他匹配终端；SENDING已获得许可，超时进入RECONCILING并保留账号保护及未知额度预占，不自动重新授权。账号锁/领取租约到期、节点离线或终端切号都不是“已经发送失败”的证明。
+A RESERVED state has not yet been granted a platform submission permit, so after expiry or safe cancellation a new attempt may be created for another matching terminal; SENDING has been granted a permit, so a timeout enters RECONCILING and keeps the account protection and the unknown quota reservation without automatic re-authorization. An expired account lock/claim lease, an offline node, or a terminal account switch is not proof that a send failed.
 
-恢复发送必须按§7.5确认旧执行不会再提交且结果明确，安全重试仍复用业务意图。fencing只能拒绝旧节点改后端状态，不能阻止已经在途的浏览器平台请求；插件必须同时遵守短许可截止、持久化执行日志、恢复后不重放submit。平台无统一幂等发送能力时不承诺外部exactly-once，UNKNOWN阶段停止重试就是重复发送保护的一部分。
+Recovering a send must confirm per §7.5 that the old execution will not submit again and that the result is definite; a safe retry still reuses the business intent. fencing can only reject an old node's backend state change and cannot stop a browser platform request already in flight; the extension must also obey the short permit deadline, persist the execution journal, and not replay submit after recovery. When a platform has no unified idempotent send capability, external exactly-once is not promised, and stopping retries during UNKNOWN is itself part of the duplicate-send protection.
 
-账户通道AVAILABLE仍只代表有匹配在线会话；账号忙、额度暂时预占或等待结果核对通过已有queue-status/任务详情的阻塞原因展示，不把所有正常登录终端标为离线。账号核对期间可以继续接收心跳/结果报告，但不能发放同账号的新提交许可。
+An account channel being AVAILABLE still means only that a matching online session exists; an account being busy, a quota being temporarily reserved, or a wait for reconciliation is shown through the existing queue-status/task-detail blocking reason, and all normally logged-in terminals must not be marked offline. Heartbeats/result reports may continue during account reconciliation, but no new submission permit may be issued for that account.
 
-### 8.2 API/Temporal及灰度执行也必须共享保护
+### 8.2 Historical Protection and Rollout After OAuth API Disablement
 
-一个Integration可能同时有OAuth/API能力和多个插件会话。不同任务的API与插件写入同账号时，共用AccountWriteState、意图、执行硬预算和结算账本；API不需要节点密钥或浏览器probe，使用后端凭证和provider actor核验，但不能跳过提交授权。新增内部ApiSendExecution及分段记录（或等效共用执行表），保存post/intent、工作流执行ID、route/content版本、授权指纹、fencing及确定/未知结果，不新增公开API。节点attempt与API执行分别保留身份模型，共享服务实现账号竞争和额度结算。
+One Integration may keep both OAuth credentials and multiple extension sessions, but in this phase only the extension can obtain a new controlled execution. A new controlled Post/Reply is created through the existing HTTP business endpoints and the legacy publishMethod field is still accepted; enqueue uniformly saves EXTENSION. OAuth keeps only connection, refresh, and read-only identity verification and takes no part in new posting. "Calling the HTTP API to create a post" must not be misunderstood as "allowing the OAuth API to post to social platforms".
 
-Temporal的纯读/预备/结算activity可以幂等重试；postSocial/postComment等外部副作用必须先获取该段唯一授权，已授权或UNKNOWN时重新执行activity只能读状态/核对，不能再次调用平台。平台若有可靠幂等键，按原业务段键使用并核对；没有则请求超时或activity丢响应进入UNKNOWN，禁用现有通用activity及外层循环的自动发送重试。只有确认未提交并旧执行已停止才创建安全的新执行；workflow terminate、retryPost清releaseId、cancelAndSendNow删Post或同任务切到另一发送方式都不能解除未知保护。已有API成功响应和publishMethod缺省保持，保护尚未适配时返回明确等待/阻塞，不静默切成extension。
+Historical API Intents, SendExecutions, UNKNOWN, quota reservations, and result receipts are all retained; protection cannot be lifted by deleting records, terminating workflows, changing routes, or creating new Posts. A controlled API route calling startWorkflow returns API_PUBLISHING_UNSUPPORTED_USE_EXTENSION without terminating the original workflow or resetting the claim. Temporal activity names are kept for historical compatibility: reserveCoordinatedSend no longer creates an API execution and returns CAPABILITY_UNSUPPORTED; sendCoordinatedSegment reads only confirmed/unknown facts, and PENDING neither calls a provider nor obtains new quota. Historical API pending facts are still handled by the original result settlement/administrator reconciliation flow and are not automatically converted into extension tasks.
 
-灰度范围必须按canonicalAccountKey覆盖其所有project、节点、API/Temporal和LEGACY执行。按project开启严格任务可以保留，但同账号旧发送入口必须同步接入共享保护，或先停止领取/提交并结清旧执行；不能一边在A启严格锁，一边让B/旧插件用同账号绕过。已有睡眠中Temporal workflow和插件本地队列也需纳入清单，不只是后台due查询。旧活动发送无法确认时隔离账号核对，不能直接terminate后将它重新放入严格队列。若API适配未完成，首版只启用已确认无API/旧执行旁路的账号，不宣称整个账号已经具有全链路防重。
+The rollout scope still covers all projects, nodes, and historical API/LEGACY executions by canonicalAccountKey. Before enabling, old workers, sleeping workflows, and the extension's local queue must be stopped and settled; an old activity that cannot prove non-submission is isolated and reconciled, and must not be terminated and re-dispatched directly. New code retaining historical execution structures does not mean the old version has stopped, and rolloutReady must still be set after the deployment flow audits it.
 
-## 9. 配置变更与失败展示
+## 9. User-Visible States and Result Boundaries
 
-| 情况 | 任务处理 | 用户可见结果 |
-| --- | --- | --- |
-| 缺少账号 | DRAFT 可保存，排队失败 | `SEND_BINDING_REQUIRED` |
-| 账号未分配到 project / 已禁用 | 不领取，不开始 | `ACCOUNT_NOT_ASSIGNED` / `ACCOUNT_DISABLED` |
-| 没有该账号可用终端 | 保留 QUEUE和预约，等待匹配终端 | `WAITING_FOR_TERMINAL`；终端详情区分 OFFLINE/REVOKED |
-| 已领取 attempt的节点撤销 / 离线 | RESERVED可撤销/过期重领；SENDING/RECONCILING核对，禁止自动转发 | `NODE_REVOKED` / `NODE_OFFLINE` |
-| 节点当前账号错配 / 身份未知 | 不提交，不消费发送额度 | `ACCOUNT_MISMATCH` / `SESSION_UNVERIFIED` |
-| 会话过期 / 平台操作不支持 | 等待刷新或更换合法 route | `SESSION_STALE` / `NODE_CAPABILITY_UNSUPPORTED` |
-| 路由或内容被并发编辑 | start 拒绝旧快照 | `ROUTE_CHANGED` / `CONTENT_CHANGED` |
-| 旧租约 / 旧 token / 旧节点 | 不允许开始或覆盖结果 | `LEASE_EXPIRED` / `ATTEMPT_NOT_OWNED` |
-| 提交结果不确定 | RECONCILING，自动发送暂停 | `SEND_OUTCOME_UNKNOWN` |
-| 已登录账号因额度未能登记 | 保留本节点观察，允许其他账号继续刷新 | `ACCOUNT_REGISTRATION_LIMIT_REACHED` |
-| 账号身份命名空间/别名不能可靠关联 | 不创建猜测关系，不派发 | `ACCOUNT_IDENTITY_UNRESOLVED` |
-| 默认回复已有同一业务意图 | 返回已有记录/冲突，不能另建可发送Post | `REPLY_INTENT_CONFLICT` |
-| 短发送许可过期 | 本地停止提交；已可能提交者核对，不直接重试 | `SEND_PERMIT_EXPIRED` |
-
-修改 project 默认账号不会改写 QUEUE；显示仍使用旧账号的数量。需要换账号时显式重新绑定：未领取 QUEUE 可原子更新 route；RESERVED先撤销旧 attempt、递增 fencing/routeRevision；SENDING/RECONCILING/已部分发送/已发送禁止改绑，先核对结果。更换执行终端无需改默认账号或Post；只允许未领取或已确认未开始的任务重新竞争领取。解绑账号或撤销节点不能假设已开始发送被远程取消。
-
-保持已核实的automation行为：master关闭或publishing关闭时，现有_uncommitPlanPosts将未开始计划QUEUE退回DRAFT；移除发布平台只撤回该平台计划任务；手工post及Engage回复不被这个撤回扫描包含。重新启用按原规则重新commit。严格实现改为检查attempt/意图，而不是只看旧releaseId/claimedAt；RESERVED安全取消后才能退回DRAFT，SENDING/RECONCILING/部分发送跳过并返回原因。无需为该既有能力新增“召回API”。
-
-reply或automation开关关闭只停止sendOrigin=AUTOMATION的新回复生成/领取，不暂停MANUAL的用户预约/发送；MANUAL仍遵守账号授权、project有效性、业务额度及安全节奏。已开始真实发送继续结果核对；账号绑定修改本身不触发撤回/重排。权限失效与账号解绑在start阻止新副作用，但已授权外部请求可能在进行，不能承诺即时取消。
-
-## 10. 实施顺序与迁移
-
-1. **身份与模型**：先审计既有Integration身份及引用，回填namespace并准备新唯一键；统一OAuth/手工/插件匹配和所有按internalId查找。增加节点、会话、project binding、Post route、Plan executionRoutes、ReplySendIntent、attempt、ApiSendExecution、共享AccountWriteState、额度预算/预占、请求回执与结算事件。提供migration SQL/Prisma，新增字段先nullable，实际应用由用户/流水线执行。
-2. **复用上报与可见状态**：现有extension-session增加POST入口、保留PATCH，共用节点身份/证据/逐平台保存；空platforms作心跳。按具体账号创建并原子计额度，不覆盖OAuth/其他节点。org/project/reply三个已有列表按原包装追加terminals/可用状态。
-3. **配置和producer**：统一权限和账号默认；计划保存无project默认副作用，应用建议走显式版本化操作；回复先获得业务意图再生成/保存/排队。所有新QUEUE原子写完整账号route，自动/人工/API/插件共享防重。
-4. **执行与原闸门迁移**：两种due按当前终端核验账号匹配，CAS胜者固定attempt；新回复同样claim。实现短许可/现场证据、可等待的提交日志、结果分类及单调结算、停止确认与核对；同步改造reply路由、所有直接fetch及本地Retry，426仍可结算。API/Temporal按§8.2接入共享保护或阻止未适配旁路；按§8替换原org/platform间隔、warmup、社区计数及UI状态查询，区分生成目标与发送硬额度。
-5. **旧任务处理与切换**：先暂停旧协议领取，等待已领取任务结算；对无法确定是否已提交的旧任务隔离核对。已发送历史不重写；无绑定 DRAFT可明确批量套用默认；旧 QUEUE必须用户确认社交账号，不能根据“最近活跃会话”自动填充账号。终端由新协议领取时匹配，不要求用户逐条选节点。
-6. **启用严格协议**：升级独立插件，确认严格账号能力；对执行 endpoint 要求节点认证与协议版本。旧插件缺身份、旧请求缺节点凭证均拒绝领取和开始，不依赖现有 fail-open 版本 guard 保证正确性。
-7. **清理**：停止新插件租约使用 releaseId，保留旧结果受限 reconciliation 导入；更新旧文档和误导性代码注释。
-
-灰度按organization或project选择完整新链路，同时按§8.2覆盖共享账号的所有执行入口；同一任务不能在新旧执行池同时可见。部署先扩展schema，再部署后端、工作流和新版插件，核对已有API/旧插件执行后启用严格领取。回滚暂停严格任务执行、保留记录；不能把严格绑定任务重新放进旧organization共享池，也不能在同账号仍有UNKNOWN时恢复旧API/插件发送。
-
-身份唯一键迁移需先列出旧记录的provider/namespace映射、冲突及无法判定项，保留原Integration.id和所有FK；重复报告、同名跨平台、OAuth/浏览器别名必须用离线数据测试验证。无法判定记录隔离，不能自动删除真实账号或把历史归到新账号。业务意图升级同样先核对旧重复Post，不借唯一索引部署删除历史。所有唯一约束应用与索引文件由部署流程执行，不由代理操作数据库。
-
-数据库限制：不运行 `prisma db push`、`prisma db execute` 或直接 SQL。后续实现只准备 schema 和 `libraries/nestjs-libraries/src/database/prisma/migrations/` 下的迁移文件，并向用户说明应用步骤；实际应用前确认项目数据库是 `aisee_postiz_dev`。
-
-## 11. 实现文件与文档对齐
-
-| 范围 | 需要修改的入口 |
+| Reason | Handling/display |
 | --- | --- |
-| 数据模型 | `schema.prisma`、身份唯一键迁移、ReplySendIntent、节点/binding/attempt/ApiSendExecution/AccountWriteState、预算/预占、请求回执和结算事件repository及migration SQL |
-| Project 授权 | 成员/角色能力guard、`projects/project-validation.service.ts`、ProjectAuthGuard、IntegrationProject；按§5.1不虚构现有用户级ACL；backend main.ts保留旧CORS方法并加入节点协议headers |
-| 账号发现/匹配 | 保留extension-session调用链；IntegrationService、repository及所有internalId查找/upsert、OAuth/refresh/手工连接、身份namespace/别名及额度原子创建 |
-| Plan | `operation-plan.service.ts`、`operation-plan.repository.ts`、`operation-plan.controller.ts` 及输入 DTO |
-| Publishing | `posts.service.ts`（含startWorkflow/retryPost/changeDate分流与保护）、`posts.repository.ts`、post create/schedule/outcome DTO、`posts.controller.ts` |
-| Reply | `engage.service.ts`、`engage.repository.ts`、`engage-auto-reply.service.ts`、`engage.controller.ts`、`engage.dto.ts` |
-| Automation | 扩展现有automation DTO/controller/service的accounts和revision；保持policies/platforms替换及uncommit/commit语义，accounts-only不触发开关副作用 |
-| 会话 | `integration.service.ts`、`integration.repository.ts`、`extension-session-report.dto.ts`、节点认证 guard |
-| 账号/终端查询 | `integrations.controller.ts` 的 `/list`、IntegrationService、节点会话批量查询、统一通道可用性计算；保持现有字段命名和平铺结构 |
-| 业务防重/恢复 | 请求幂等服务、ReplySendIntentService、自动/人工/API/插件producer及cancelAndSendNow/机会状态、attempt查询/停止确认/人工核对界面、旧许可冲突证据 |
-| API/Temporal执行 | `apps/orchestrator/src/activities/post.activity.ts`、`workflows/post-workflows/post.workflow.v1.0.1.ts`及provider调用适配、ApiSendExecution、共用账号/预算/结算服务；已有workflow版本与活动发送迁移清单 |
-| 账号节奏 | engage-auto-reply driver、repository的间隔/warmup/社区计数、账号配额预占与timezone、overview/queue status、本地platform-throttle账号分区 |
-| 当前前端 | post 编辑/预约入口、Engage reply 编辑与发送入口、reply-accounts、project 切换缓存；本仓库 `engage/automation/page.tsx` 是扫描面板，不能误认为已有完整运营 Automation 账号 UI |
-| 独立插件 | `executor/api.ts`、`request.util.ts`、`publish.runner.ts`、`reply.runner.ts`、`post-publish/queue.ts`、`account-guard.ts`、`interrupted-recovery.ts`、`reply.unconfirmed.ts`、`pages/background/post-reply.ts`及各poster/注入脚本、`extension-session-report.ts`、`session-maintenance.ts`、本地owner/提交日志/缓存隔离、对应shared DTO |
+| REQUIRED with no valid account | The DRAFT can be saved, enqueue is blocked, SEND_BINDING_REQUIRED |
+| OPTIONAL, extension with no preset | AWAITING_CURRENT_ACTOR, waiting for the first binding by an eligible terminal, without claiming a determined account |
+| Account unassigned/disabled/reply-forbidden | ACCOUNT_NOT_ASSIGNED / ACCOUNT_DISABLED / REPLY_ACCOUNT_DISABLED, with no fallback to a lower level |
+| No matching terminal/unknown identity/insufficient capability | WAITING_FOR_TERMINAL / SESSION_UNVERIFIED / CAPABILITY_UNSUPPORTED, without switching the account |
+| Default/per-item configuration version conflict | 409; re-read configured/effective and the revision, with no side effects |
+| Node revoked, registrant lost permission | Blocks new starts; RESERVED converges safely, and started ones are reconciled |
+| Route/content/session revision changed | ROUTE_CHANGED / CONTENT_CHANGED / SESSION_CHANGED; the old permit does not submit |
+| Content already sent or has an active execution | Returns the current result/conflict for the same SendIntent and does not create a second send under a new account |
+| Send permit expired/response lost | Stops new submissions; anything possibly submitted goes to RECONCILING, and start is not replayed |
+| External result unknown/actual actor mismatch | SEND_OUTCOME_UNKNOWN / ACCOUNT_MISMATCH, keeping evidence and reservations for manual reconciliation |
+| Insufficient account registration quota/identity cannot be associated | ACCOUNT_REGISTRATION_LIMIT_REACHED / ACCOUNT_IDENTITY_UNRESOLVED, keeping the observation |
+| Platform deleted already-successful content | Appends the removed fact; it remains sent, with no count given back and no republication |
 
-共享协议目前两仓库各有类型副本，需同一 protocolVersion 和契约测试覆盖；只修改后端类型不会自动更新独立插件。
+The task detail shows at least the selection mode, effective/frozen account, source and revision, SendIntent, blocking reason, current/historical executions, and segment facts. Before first claim, CURRENT_SESSION clearly indicates that the account is not fixed; after claim it shows the fixed actor and no longer says "any current account". An administrator with permission can handle RECONCILING, so adding an UNKNOWN state without evidence, conclusions, and an audit entry point is not acceptable.
 
-实施后同步更新 [automation-api.md](automation-api.md)、[operation-plan-api.md](operation-plan-api.md)、[post-publish-api.md](post-publish-api.md)、[extension-post-publish-protocol.md](extension-post-publish-protocol.md)、[extension-reply-and-auth.md](extension-reply-and-auth.md)、[Engage API](engage/api.md)、[project-scoped-post-engage-design.md](project-scoped-post-engage-design.md)，以及独立插件 README/发布说明。特别删除“Automation 不选账号”“无绑定默认当前会话”“租约到期就可安全再次发送”的新链路说明。本草案不修改当前 API 文档，以免让待审阅能力被误认为已上线。
+## 10. Implementation Order and Migration
 
-## 12. 验收与测试
+1. **Align the semantics of this version first**: separate policy/default configuration/explicit selection/frozen results out of the original account-binding code; add the Organization level, converge plan snapshots, and refactor the account-free content/reply intents. All producers use the unified resolution service.
+2. **Audit identity and authorization**: unify OAuth/manual/extension registration and the atomic account-count quota, confirm namespace/aliases/canonicalAccountKey, and fix the legacy reply-list authorization; preserve Integration.id and historical FKs, and do not delete or rebuild by handle.
+3. **Configuration and content flow**: two independent default resources plus user preference/system policy; keep the Automation compatibility entry point; INHERIT drafts, enqueue freezing, CURRENT_SESSION first binding, MANUAL/AUTOMATION lanes, business request idempotency, and UI explanation.
+4. **Execution protection**: general SendIntent, cross-table active-execution uniqueness, AccountWriteState, budget reservation/result events; disable new OAuth API writes while keeping their historical settlement protection, and connect the extension's claim/start/per-segment journal/reconciliation rather than changing only due.
+5. **Standalone extension and failure recovery**: node registration, heartbeat and live identity, header pass-through, real page submission boundaries, local persistence/permit, stop confirmation, and continued settlement during upgrades. Publish capability per platform/actor/POST/REPLY.
+6. **Rollout**: inventory every legacy path and in-flight request for the same account, clean up those provably not started, isolate the unknown ones; deploy the schema expansion, then the backend, workflows, and extension, and only then enable per the account's full protection scope. OPTIONAL does not lower this threshold.
+7. **Cleanup**: deprecate the legacy global-session routing basis, reusing releaseId for new leases, the plan account level, and duplicate account-configuration stores. Historical compatibility reads/fact settlement are retained, and data is not deleted directly.
 
-实现时必须跑所有非冻结目录的完整测试套件，报告通过/失败数量；独立插件运行自己的完整套件，并做两 profile 的真实流程验证。当前提交只新增设计文档，不代表实现测试已通过。
+Data migration first outputs a conflict, unknown-identity, duplicate content/reply, and reference audit. When different namespaces/duplicate Posts make the fact undeterminable it is isolated, and history must not be deleted to make a unique index deploy. All new constraints, relations, and indexes are prepared in the schema and migration SQL, and the actual application is done by the user or the project's deployment pipeline.
 
-最低验收场景：
+Database limits: the agent does not execute database SQL, does not run prisma db push/db execute, and does not apply migrations; the actual target must be aisee_postiz_dev. A wrong connection is not a reason to probe/repair the database with direct SQL. Offline code/schema checks and database deployment are different steps.
 
-1. 同一用户、同 organization：A选x1、B选x2；N1登录x1、N2登录x2时，plan post、手动post、手动reply、自动reply只由会话匹配的授权终端发送，业务DTO不需nodeId。
-2. N1 与 N2 交替上报，不改变对方会话；重复/乱序/伪造节点报告被正确处理。
-3. 缺 IntegrationProject、跨 organization、project失效或账号禁用时，账号绑定/发送被拒绝；节点撤销则不参与领取，不能让本身合法账号无法保存预约；任何客户端伪造 targetAccount无效。
-4. N1从x1切成x2后，不发生原x1任务的平台submit；新的x2任务只有在权限有效、身份核验且claim/start成功后才可执行。登出、探测失败或无法取得可比身份时不提交；Dev.to/Quora页面核验也不能绕过同一规则。
-5. 默认绑定变化不影响已有 QUEUE；显式改绑未发送任务后旧 attempt 不能 start。SENDING 和部分 thread 不可改绑。
-6. 两节点同时领取只有一个有效 attempt；新生成回复不能未经 claim 直接发；start 重试、start 响应丢失、租约超时均不能再次授予相同发送许可。
-7. 实发成功但回传断网只重试 outcome；未知结果不自动重发；晚到合法结果可结算；不同节点/不同账号/冲突结果不能覆盖。
-8. 同账号跨 project/跨节点 post 与 reply 共用账号间隔，配额预占原子；不同账号互不误用账号配额。thread 部分发送可见且不重发 root。
-9. Plan 改账号不重复生成或扣费；重复 materialize 不覆盖编辑；LinkedIn personal/page 不由 organization 全局账号自动决定。
-10. 手动/API发送与 extension模式互斥；远端匹配终端可完成当前网页提交任务；Web广播不能直接触发多个插件提交。
-11. 旧插件即使缺少版本头也无法领取严格任务；新旧池不同时派发同一任务；回滚不会退回随机浏览器账号发送。
-12. 历史、metrics、reply 计费仍正确按 Post.integrationId 归属；URL-less 成功、平台移除、重复回传均保持准确历史与幂等。
-13. 同账号同时在多个终端在线时terminals[]展示全部授权关联，但只有一个终端赢得任务claim；RESERVED安全过期后可换终端，SENDING/未知结果不可自动换终端重发。
-14. N1切成x2时，从x1当前关联移除且仅能领取x2的授权任务；x1在另一终端有效登录时可领取原x1未领取任务，目标账号无需修改。
-15. `/integrations/list` 保留平铺integrations及id/identifier/display，新增字段不破坏现有调用方；不重复新增platform/providerIdentifier分组字段。前端平台分组与排序不影响后端权限/领取规则。
-16. 终端在线但会话UNKNOWN/STALE不算AVAILABLE；普通心跳不刷新verifiedAt；无终端返回空数组，离线/撤销只显示诊断状态；所有账号关联查询不泄漏跨租户/未授权终端。
-17. projectId/action过滤与sendAvailability计算使用同一执行权限、能力、新鲜度规则；AVAILABLE只是通道快照，start依然重新校验配额/节奏/任务状态。批量查询无账号级N+1。
-18. 插件现有保存API继续可用：首个x1登记后另一个终端上报x2可登记；重复/并发上报同账号只创建一行；额度不足仍保存观察和返回逐项原因，不丢其他平台结果。
-19. 不同平台相同handle/裸ID不覆盖provider；OAuth与已可靠关联浏览器身份复用同一Integration，未知namespace不误合并。上报不覆盖OAuth凭证、用户自定义字段或禁用设置。
-20. 两个并发人工保存、人工与automation竞争、两Post两终端竞争都不能让PRIMARY回复发两次；不同project/账号合法独立回复，ADDITIONAL请求重试幂等，改绑新账号遇到已有PRIMARY则冲突。
-21. 保存未来计划、重试生成或修改REPLY快照不改变当前默认；显式应用建议校验binding版本并只影响新回复，旧QUEUE不变。
-22. 缓存读取、旧probe重传、快照重新包装不延长核验；过旧/未来观察被拒绝。start必须使用本attempt新现场证据，各平台严格能力用真实切号测试确认。
-23. 旧许可收到后进程暂停、管理者暂时查不到帖子、节点撤销、许可过期或start响应丢失：无停止/结果证据时不允许新attempt；旧执行恢复不重放过期submit，晚到冲突冻结核对。
-24. 同organization退出成员、角色变更、失效project、另一user冒用节点均拒绝start；已发生结果仍可受限结算。首版不声称支持用户级project ACL。
-25. x1发送不阻塞x2；x1成熟度不授给x2；同x1跨项目/终端共享日边界、间隔和额度。原org/platform闸门及本地切号时钟已按新粒度迁移，UI等待时间与执行一致。
-26. 生成owner超时先CAS失效再接管；计费失败保持RECOVERING，旧owner晚到不能保存/排队或重复扣退。生成失败/取消可明确退出，恢复owner重试原task结算幂等。
-27. thread下一段由outcome/attempt查询发现索引与可执行时间，再POST preflight获取绑定段/版本/节点的挑战；GET不改执行状态。过期轮换失效旧挑战，已AUTHORIZED不能重新授权，root证据不能用于下一段submit。
-28. 旧PATCH session与新POST同payload调用同一保存服务；空platforms心跳不清会话/延长身份；CORS与OpenAPI支持新节点headers及旧方法，POST请求404/405回退不绕过严格执行。
-29. 三个原账号列表保留各自数组/对象包装、scope、字段；org列表不替代project列表，reply-account参与开关不被误当默认账号选择。automation旧客户端省略accounts或完整替换policies不清绑定。
-30. publishing旧请求显式platforms/[]保持原行为，accounts-only省略platforms不commit/对齐/退队；master/feature关闭仍安全uncommit计划任务，不误撤回手工post/reply或已经SENDING任务。
-31. 新旧due按持久化executionProtocol隔离；旧PATCH回调不能绕过严格attempt验证，旧待报告LEGACY结果可结算；POST生成plan不是更新plan的幂等入口，执行编辑只用project-scoped新POST。
-32. POST编辑/date别名与旧PATCH/PUT保持相同业务ID、revision及幂等效果；API默认路由不静默改变，extension返回QUEUED不被误报成已平台成功。当前Post/轻量reply状态不能替代历史attempt查询。
-33. 手动回复与自动回复按服务端sendOrigin进入不同领取lane；关闭automation/reply不阻止用户明确预约的MANUAL，但权限失效/账号禁用仍阻止。AI文案人工发送不被误判自动，旧QUEUE不能通过猜测来源绕过开关。
-34. x1同时登录N1/N2/N3只创建一份Integration及三份独立会话；N1退出不清N2/N3，账号额度不重复计入，列表可展示全部终端。
-35. 三节点对同任务并发claim/start只有一个有效执行者和一次本段许可；两个不同任务同账号竞争也不能同时提交，post/reply/thread共享账号保护。
-36. 同一预算窗口只剩1次时，用并发事务屏障验证两个start至多一个取得预占/许可；事务回滚、冲突重试及重复start不会留下孤儿预占或重复扣减。
-37. 重复成功/失败/释放/outcome及外部计费重试幂等；confirmed与held转换保持预算不变量，UNKNOWN和跨日不自动释放，平台移除仍计发送次数。
-38. 平台成功而响应丢失、旧节点迟到、锁到期、额度已预占但提交未知时，只能结算/核对，不因另一个浏览器在线而重发；已停止且确认未提交才能释放并安全接管。
-39. POST /posts及批量新建/排队响应丢失后同键重试返回同一root/子项；同键不同摘要409，显式新键允许有意再次发布同文案；plan/周期producer使用稳定业务键。
-40. 同账号API post、API reply与多个插件任务并发时只有一个提交执行权，共享硬预算；Temporal activity/外层重试、工作流终止、retryPost、cancelAndSendNow不能重发未知结果或删除证据。不同project灰度不能留下同账号LEGACY旁路。
-41. reply发送DTO省略publishMethod保持旧api语义，显式extension进入reply-due且不启动Temporal；publish-due不把reply当post；数据库路由读取失败不自动切执行方式。不同账号意图不再被项目机会SCHEDULED/REPLIED状态错误互斥。
-42. 多个账号竞争同一project硬预算也不超额；生成目标、默认关闭的plan gate与SEND_HARD_LIMIT保持各lane语义，已付费QUEUE不再次消费生成额度；API/自动本地日与UTC策略的窗口明确。
-43. 预约跨日执行、午夜thread段、迟到确认、timezone修改及降低上限使用不可变预占窗口/策略版本；同一发送事实不被Post统计及账本重复计数，移除不退还发送次数。
-44. 存储写入失败/满额、日志提交前后worker崩溃、页面消息重复、网络超时及扫描查无记录：只有可靠未提交证据才可安全重试；SUBMITTING/UNKNOWN不变回普通可重试error。部分thread的FAILED_FINAL禁止root重试。
-45. CONFIRMED后迟到unknown不回退；成功后移除、URL-less后补URL和重复事件不再次扣费或释放预占；NOT_SUBMITTED后迟到成功冻结核对。已有426升级状态允许认证的结果结算/停止确认，禁止新提交。
-46. claim/register响应丢失的同键重试不新增任务/节点或轮换活跃密钥；回执加密且过期后只返回恢复/过期状态。start重试不重放提交许可；节点headers实际透传，旧直接fetch、人工bridge及popup均受控。
+## 11. Code and Documentation Adjustment Inventory
 
-## 13. 建议审阅的产品决策
+| Area | Entry points/responsibilities that must be adjusted |
+| --- | --- |
+| Data model | schema, OrganizationSendBinding, selection/source/policy revision, content SendIntent, reply generation intent, active-execution coordination, quota/result events, and migrations |
+| Defaults/policy | Two-level resource service/controller/DTO; the protected global Settings policy key/POST and the personal send-preference endpoint; ProjectSendBinding reuse with the Automation legacy field adapted to the same service |
+| Plan | create/materialize store no plan account for new content; restricted executionRoutes compatibility, keeping deterministic IDs/existing edits and not inferring a page actor from the organization account |
+| Post | create/schedule/retry/date/changeState/clone, thread editing, publishMethod routing, bridging; all recovery preserves contentUnitId/SendIntent |
+| Reply | draft/send/schedule/batch, auto generation owner/claim, opportunity summary, cancelAndSendNow; PRIMARY excludes the account, and ordinary replies are unified with manual/automatic |
+| Identity/authorization | Integration resolution, OAuth/refresh, session registration, account-count quota, IntegrationProject/engageEnabled, and current member/action capability |
+| Node/Session | Registration credential, generation, session/heartbeat, new evidence, terminal projection; a public ID may be copied and never exposes a secret; recovery is not an ordinary registration takeover |
+| Extension | The standalone repository's runner, queue, account-guard, post-reply, each poster/injection, request util, direct fetch, logging/Retry/426 recovery |
+| Legacy API/Temporal | Keep activity names and fact reads/settlements; forbid new API authorization and platform writes, do not automatically reroute to the extension; audit legacy worker bypasses |
+| State/UI/billing | configured/effective/frozen clearly separated; flat account list, read-only terminals, blocking/reconciliation; monotonic results and stable billing keys |
 
-草案按以下选择落地，供审阅时调整：
+## 12. Acceptance Matrix
 
-- 默认以两个浏览器 profile 实现同平台多账号，不做插件自动切号。
-- 每个project/platform分别设置POST、REPLY默认社交账号，允许二者相同；plan/post/reply/automation不提供必选终端配置。
-- 可以先生成未绑定账号的计划/草稿；排队前必须绑定账号，有账号但无可用终端时可以预约等待。
-- 首版计划控制回复目标，project REPLY binding 控制新回复身份；不支持同一 project 多计划同时指定不同回复账号。
-- 默认绑定变更不自动迁移已排队任务；重新绑定是显式操作。
-- 身份无法可靠确认时暂停发送；支持的平台范围由真实身份核验与 actor 能力决定。
-- 将发送前授权、未知结果保护和账号级并发保护作为多节点上线的必要条件。
-- 账号列表平铺返回terminals[]与服务端sendAvailability，平台分组、排序、折叠由前端完成；复用真实现有字段identifier，不另增同义platform字段。
-- 终端名称用户可编辑；一个账号可关联多个终端，实际执行终端在claim胜出时固定于attempt，不在Post提前绑定。
-- 复用插件现有账号上报API，修正具体账号登记条件与身份唯一规则，不新增重复保存入口。
-- 默认回复采用PRIMARY业务意图防重，显式人工追加另建幂等意图；保存计划不修改project默认，应用建议是独立操作。
-- 首版权限是organization成员/操作能力加project归属，不引入尚未存在的用户级project ACL；平台严格能力必须逐项验收。
-- 未知结果恢复同时要求旧执行已停止及明确结果证据，不用平台暂时查无记录作为唯一重试依据。
-- API先复用既有列表、automation、post/reply保存/预约与due；新增写入口使用POST，旧PATCH/PUT/DELETE按业务兼容保留，共用服务而非重命名整库路由。
-- 同账号可多终端登录，防重复发送/额度并发使用以数据库持久约束为权威；未知结果保留保护，锁到期不是重试授权，外部exactly-once不作无依据承诺。
-- 保留API默认与既有返回包装，同时要求同账号API/Temporal共享执行保护；未完成适配的旁路账号不启用严格多终端发送。首版部分thread仅核对/补录，不自动续发或从root重试。
+This matrix describes subsequent implementation requirements and does not mean the tests already exist. After changing code, run the full non-frozen suite and report pass/fail/skip; the standalone extension runs its own full suite, with real multi-profile and API concurrency verification in addition. Mock-only unit tests cannot prove database isolation or a single external submission.
 
-本轮交付仅为该方案。后续在审阅通过后实施业务代码、插件协议、数据库迁移文件与测试。
+| ID | Behavior that must be verified |
+| --- | --- |
+| P01 | System REQUIRED cannot be turned off by a user; only a platform SuperAdmin changes system policy, generic PUT/DELETE cannot bypass it, and saving a preference does not alter the profile or another person's preference |
+| P02 | System/user relaxation does not downgrade existing tasks; a tightening racing with first binding converges by version, rapid tighten-then-relax drops no task, and already-bound targets hold |
+| P03 | OPTIONAL lets a person raise the preselection requirement; manual/automatic tasks use the server-determined owner snapshot, and the extension registrant's preference cannot lower a task's requirement |
+| B01 | EXPLICIT outranks Project outranks Organization; independent per platform/POST/REPLY; no fallback when an account is invalid |
+| B02 | Clearing the current level restores inheritance and keeps a tombstone revision; unsubmitted items are unchanged; the old expectedRevision conflicts |
+| B03 | An organization default cannot cross tenants or automatically grant a project; missing relationship/disabled/engageEnabled=false each reject the corresponding action |
+| B04 | A draft INHERIT only previews; the enqueue transaction reads consistent defaults and revisions; a later default change does not alter QUEUE |
+| B05 | Two new POSTs with the same key where the response was lost return the original save on retry, and a different digest returns 409; the legacy Automation compatibility write is only the same single binding |
+| G01 | Plan generate/preview/retry selects no account, changes no default, and does not double-charge; materialization preserves INHERIT, existing manual edits, and deterministic IDs |
+| G02 | A new plan rejects the experimental account input before the LLM/charging; the legacy route endpoint only explicitly edits selected drafts and does not become a plan default or change the Reply default |
+| C01 | An OPTIONAL extension task with no preset is atomically bound by the first legal actor; when x1/x2 terminals compete for the same content only one wins |
+| C02 | After CURRENT_SESSION binding, an account switch/RESERVED expiry does not re-select the actor; no identity/capability/project permission means no execution; the API cannot send by exploiting a missing account in the current session |
+| C03 | With no project-usable terminal, extension automatic new generation pauses while manual drafts/scheduling work offline; this phase has no new API generation/write eligibility; after generation completes it re-resolves rather than reusing the pre-generation default |
+| I01 | The same content across accounts, Post rebuilds, API/extension, manual/automatic, and node reinstall has only one SendIntent; the business key excludes the account and content revision |
+| I02 | Confirmed content cannot be dispatched again via an account change, platform removal, ERROR state change, or new requestId; independent new content is not wrongly merged by text hash |
+| I03 | The PRIMARY generation key excludes the account; concurrent manual/automatic yields only one owner and one content; ADDITIONAL is stably idempotent and is not an automatic bypass |
+| I04 | A generation owner timeout CASes the old owner invalid before RECOVERING; an unknown cost does not double-charge/double-generate, and a late old owner cannot save or enqueue |
+| I05 | A thread keeps one account across the whole chain, and partial confirmation does not retry from the root or auto-continue; repair/copy/recurrence business identities are explicit |
+| A01 | The same handle/bare ID on different platforms such as X does not overwrite; the same actor's OAuth/extension reliably reuses one row, and cross-namespace without evidence is not merged |
+| A02 | A handle change does not change the stable identity; another person taking over an old handle does not inherit history; a report does not overwrite OAuth credentials/custom fields/disabled |
+| A03 | A second actor on the same platform can register; three nodes for the same actor yield one row and consume the account-count quota once; an insufficient quota still saves the per-platform observation |
+| N01 | Different browsers/profiles on the same machine hash differently; restart/IP change/in-place upgrade do not change it; uninstall-reinstall on the same path with re-pairing restores the same hash and the current account credential; a path/machine-identifier change, wrong pairing, or lost backups must stop for review |
+| N02 | Switching AIsee accounts in the same profile shares nodeId but keeps credentials/sequences/logs independent; the public identifier cannot execute or recover; even with the same nodeId and another user's lease it cannot take over their execution; reinstall does not lift unknown protection |
+| N03 | Profile cloning is not claimed to be absolutely detectable; concurrent use of the same credential still shares node/execution protection, and an independent terminal must register anew; an old generation/another identity is rejected, and exit/revocation does not lose results |
+| S01 | Reports from multiple nodes do not overwrite each other; an account switch/logout removes this node's old association without affecting other terminals; out-of-order/replayed/conflicting reports are handled correctly |
+| S02 | A heartbeat/cache/duplicate probe does not extend verification; future/too-old observations are rejected; UNKNOWN/STALE do not count as AVAILABLE |
+| S03 | Each segment has a fresh live challenge, and final-page actor verification for Dev.to/Quora etc.; an unreliable platform does not publish a strict capability, and both product policies apply |
+| L01 | The three account lists keep their original wrapper/fields and flat structure, with consistent permission/action/freshness projection and no N+1/secret leakage |
+| E01 | Multi-terminal claim of the same content and cross-API execution uniqueness hold; a newly generated reply also goes through claim rather than sending directly; a claim retry does not take a new batch |
+| E02 | A repeated start/lost response/expiry never re-issues a permit; a content/route/session/generation/fencing change rejects the old submission |
+| E03 | Segment 0's and later segments' expired challenges can be rotated safely; the segment's live revision is confirmed with legitimate re-verification, an account switch invalidates old evidence, and an already-AUTHORIZED segment cannot be re-authorized |
+| E04 | Full storage/write failure does not submit; after SUBMITTING a worker crash/timeout/duplicate message/browser recovery enters UNKNOWN rather than Retry |
+| E05 | A single-segment success with a network break re-reports only the outcome; a late success can be reconciled; a confirmation is not downgraded by a late unknown, and conflicting facts are frozen for audit |
+| E06 | Permit expiry, an offline/reinstalled/revoked node, and a platform record not found do not prove non-submission; without stop evidence the terminal is not switched and the send is not repeated |
+| E07 | A manual bridge/popup does not bypass backend tasks/permits; a different node or a forged body cannot settle someone else's attempt |
+| Q01 | The same account is serialized across projects/nodes/API/extension, and a late actual submit still waits out the interval; a callback replay does not reset the clock, x1 does not consume x2's maturity, and the legacy org/platform gates are replaced at the same time |
+| Q02 | A real concurrent transaction barrier verifies that at most one start authorizes when one budget unit remains; different accounts competing for the same project hard budget also do not exceed it |
+| Q03 | HELD/COMMITTED/RELEASED are idempotent, unknown and cross-day do not auto-release, a platform removal still counts, and Post statistics do not double-count |
+| Q04 | A delayed schedule/midnight segment/late result uses the immutable window; a timezone/limit reduction does not reopen a bucket or fake the used amount |
+| Q05 | Generation quota, plan objectives, business root count, and actual platform segment writes are measured separately; the existing lane/timezone and the default-off generation gate are preserved |
+| R01 | API/Temporal retries and workflow terminate do not resend an unknown; a later batch item failing does not delete a succeeded/unknown item; a method switch preserves the content intent |
+| R02 | MANUAL is not wrongly filtered out by Automation being off; an AI-copy manual send is not mislabeled automatic; stopping a plan retracts only the corresponding tasks explicitly not started |
+| R03 | Both product policies pool by the persisted protocol; a legacy request without headers/an old PATCH cannot access a new task, and a rollback does not downgrade |
+| R04 | Headers are actually passed through, and with 426 stopping new submissions authenticated settlement/stop confirmation still work; a legacy-backend 404/405 diagnostic fallback grants no sending right |
+| R05 | Metrics, authors, URL-less success, billing events, and manual backfill are faithfully retained; a wrong-account submission enters reconciliation rather than being automatically released and resent |
+
+## 13. Boundaries of This Version and What Is Not Promised
+
+The first version does not do extension automatic account switching, container multi-account scheduling, inter-project fair allocation, a nonexistent user-level project ACL, hardware identity anti-counterfeiting or absolute permanence, profile auto-pairing without user confirmation, automatic continuation of a partial thread, or an external platform exactly-once guarantee.
+
+Supporting default accounts and OPTIONAL does not mean ignoring an explicitly specified account, opening the legacy arbitrary send pool, or allowing the same content to be resent by switching accounts. Allowing OAuth and multiple extensions to be connected at the same time also does not mean each channel exclusively owns the content's sending eligibility or budget. Users do not have to choose a terminal for a business task, but terminal authentication, live verification, and the execution journal remain necessary backend protocols.
+
+## 14. Implementation Status, Target Gaps, and Deployment Boundaries
+
+The following is the implementation inventory of the current code as of 2026-10-16. The preceding text is the complete target; an interface/table already existing does not equal the standalone extension having implemented safe submission.
+
+### 14.1 Implemented Configuration and Planning Foundations
+
+- Node/NodeSession/ReportReceipt, organization composite relations, register/list/save, POST/PATCH session, and account terminals/availability projection have code. Registration recovery for the same key uses a server HMAC, and the database stores no plaintext node token.
+- OrganizationSendBinding and ProjectSendBinding support four GET/POST resources with atomic batch save, CAS, tombstones, and request receipts; Automation's legacy flat accounts reuses the same write flow. Resolution order is EXPLICIT→Project→Organization, with no fallback for an invalid configuration.
+- The system REQUIRED/OPTIONAL policy, personal preferences, the lastRequiredRevision barrier, and snapshot services have code; the reserved key cannot be bypassed by the generic Settings interface. New controlled enqueue saves the policy owner and revision, and re-checks the owner's organization membership before starting.
+- Integration's provider/namespace/internalId unique key, the identityNamespace migration, and the refresh scope are prepared; canonicalAccountKey is now computed from organization, provider, namespace, and the normalized platform ID rather than from the Integration row ID. **The same hash in code cannot replace an audited merge of existing duplicate actors, identity aliases, and credentials.**
+- Operation Plan generation still produces only INHERIT/DRAFT content and preselects no account; the legacy execution-routes resource only modifies explicitly editable draft chains and preserves historical plan snapshots. A new SendIntent does not automatically migrate historical plans or executions.
+
+### 14.2 Send Coordination Connected in This Phase
+
+The current implementation covers **controlled extension sending with explicit/inherited accounts and OPTIONAL first binding on seven platforms, platform-specific identity resolution, and automatic producers**; the latest extension is in §14.9. `ACCOUNT_BOUND_SENDING_ENABLED` defaults to off and uniformly controls configuration, terminals, and execution capability; enabling it does not mean launch acceptance is complete.
+
+| Capability | Current implementation |
+| --- | --- |
+| Content uniqueness | SendIntent unique `(organizationId, contentUnitId)`, one content unit allows only one rootPostId; the identity is reused across accounts, channels, and terminals |
+| Create idempotency | The new controlled `POST /posts` adds optional requestId and posts[].itemKey; new content with controlled sending enabled must provide a requestId, itemKey defaults to the stable array position, and a mismatched body returns a conflict. An existing saved root post may reuse its original ID. Receipts and fixed sub-post IDs prevent a network retry from creating a second send chain |
+| Enqueue | `POST /sending/intents { rootPostId }` is for already-saved content; manual create/schedule/now connect to the same logic. A DRAFT is saved first, then the policy and content are snapshotted; if an account resolves it is frozen, otherwise OPTIONAL saves CURRENT_SESSION to await first claim. Uniformly EXTENSION, exposing no sendable LEGACY window |
+| Reply identity | A single manual send/schedule uses `reply-primary:<projectId>:<opportunityId>` derived from the server canonical opportunity. When an existing EngageSentReply is enqueued, the reply target, channel, and keyword are restored from the database rather than treating the reply as an ordinary new post |
+| Shared execution record | API and EXTENSION share SendExecution while keeping their own executor/node identity; the Intent's active pointer, a transaction CAS, and a SQL partial unique index together constrain a single active execution |
+| Claim and authorization | RESERVED occupies only the content execution right and reserves no sending quota. Each segment is authorized separately; only the first PENDING→AUTHORIZED returns a one-shot 30-second short permit, and a repeated start is read-only and returns no permit |
+| Account write lock | AccountWriteState is shared across projects, post/reply, and API/extension; a thread and UNKNOWN keep it occupied, and after a successful confirmation the interval advances by the server confirmation time |
+| Quota | SendQuotaBucket/Reservation atomically maintain HELD/COMMITTED/RELEASED; budgets are identified by real scope/dimension/window, and limit and policyVersion do not reset the key. Competing budgets are ordered uniformly and a failure rolls back entirely |
+| Quota compatibility | Supports the configured dailyWriteLimit account daily write cap and keeps the account reply cap, warmup, channel, project auto-reply local-day quota, manual plan/keyword UTC cap, and the existing publish interval. Each segment counts an actual platform write and a reply root segment counts a business root quota; a manual fact reduces the automatic remaining allowance but is not constrained by automatic switches/automatic business caps; an automatic fact does not turn the generation plan objective into an automatic sending hard gate |
+| Historical counts | New window initialization includes historical PUBLISHED within the audit scope and existing controlled HELD/CONFIRMED facts. An unknown reservation is kept across days and a late confirmation settles in the original authorization window; nothing is double-counted and no second write clock is advanced |
+| Temporal | Historical activity names and shared execution/settlement structures are kept. New controlled tasks use the extension; historical API dispatch is explicitly rejected, and old activities produce no new API platform write and clear no existing facts, claim, or quota |
+| Results | An event receipt validates the payload; confirmations are monotonic, and a late UNKNOWN cannot roll back a success. Conflicting facts are persisted and then frozen; a late success corrects a previously released quota while keeping the current execution protection. An unauthorized execution whose adapter has stopped may fail safely; an authorized one must wait for the short permit to end and provide stop proof before release. The client persists the full stop-proof payload first, and after a restart retransmits the original eventId, time, and digest; the server first recognizes an existing event, an exact replay returns the existing receipt, and a modified payload still conflicts |
+| Reconciliation | A system super-admin reconciliation GET/POST constrained by current organization membership is provided, requiring evidence, resolutionRevision, and event idempotency; an ordinary node cannot impersonate an administrator reconciliation |
+| Legacy entry isolation | A managed account can no longer be written by the legacy API/automatic plug; legacy Post activity for a shared-budget project is also intercepted. A legacy extension cannot prove the actual actor, so a managed platform inside the organization no longer enters that organization's legacy extension post/reply send pool. A legacy callback cannot modify a controlled Post's sending facts |
+
+Controlled extension coverage spans the existing publish/reply capabilities of X, Reddit, LinkedIn personal/company, Medium, Quora, Hacker News, and Dev.to; Reddit ordinary publishing is still limited to a single target, and Medium/Quora/Dev.to are still single-article publishing, so the expanded platform list must not be used to add thread capabilities they never had. OAuth API posting is currently unsupported. A provider outside those seven platforms or one that has not declared the corresponding execution capability is not granted a permit. Recurring needs an explicit occurrence identity before it can be connected and is currently explicitly rejected by controlled enqueue; controlled batch multi-account reply is also explicitly rejected. After controlled content enqueue, legacy editing, deletion, cancel-and-recreate, and retry claim-clearing cannot lift the protection; the full not-started rebinding/rescheduling UI is still the next phase.
+
+### 14.3 Existing API Compatibility and the New Protocol
+
+An existing request without the V1 node headers continues on the original response and LEGACY path; when `ACCOUNT_BOUND_SENDING_ENABLED=false` the new business endpoints keep their original parameter requirements. Protection for managed content/accounts is not downgraded when the flag is turned off.
+
+`POST /posts/publish-due` and `POST /engage/reply-due` recognize the complete `x-extension-node-id`, `x-extension-node-token`, `x-extension-protocol-version: ACCOUNT_BOUND_V1`; the V1 body requires a requestId, returns `due` and `pacing`, and also marks executionProtocol. V1 never claims from the legacy pool. The legacy endpoints were not deleted and no switch to PATCH/PUT is required.
+
+The standalone controlled endpoints are below; paths omit the existing common API prefix:
+
+| Method/path | Purpose |
+| --- | --- |
+| GET `/extension/send-protocol` | Returns protocol, coordinationRequired, nodesEnabled, the current authenticated organization/user, and serverNow; it only negotiates the protocol and grants no sending right |
+| POST `/sending/intents` | Freezes an already-saved root post into the queue; adds an optional publishMethod so an existing caller need not add fields. When an Intent already exists it returns only the original task state, without rebinding or re-granting a sending right |
+| POST `/integrations/:id/identity/verify` | A current-organization administrator uses the original OAuth credentials to read-only verify a historical legacy X/Reddit identity; the same actor upgrades the original row and returns an identity projection, no credentials and no sending right |
+| POST `/sending/intents/reply` | body is sentReplyId; the server resolves the EngageSentReply and Post by organization, restores the reply target, and enters the same coordinator |
+| POST `/extension/send-attempts/:id/renew` | Extends only a valid, not-yet-started RESERVED preparation lease, by 120 seconds up to the current time each time, for a maximum of 30 minutes total preparation; it does not extend the short permit |
+| POST `/extension/send-attempts/claim` | body is requestId, action, and an optional rootPostId; at most one execution per call. An empty result also saves a receipt; a replay restores only a still-valid RESERVED claim |
+| POST `/extension/send-attempts/:id/segments/:index/preflight` | Generates this segment's 30-second challenge |
+| POST `/integrations/extension-session` | The original session report adds platforms[].preflightChallenge; it must use a new probe after the challenge, LIVE evidence, and the same account, and a CACHED/duplicate probe generates no submission proof for the segment |
+| POST `/extension/send-attempts/:id/segments/:index/start` | Consumes the fresh proof and atomically obtains the account write lock and quota; the first call returns permit, serverNow, submitBefore, and the revision/digest, and a repeat returns no permit |
+| POST `/extension/send-attempts/:id/segments/:index/outcome` | Reports confirmed/unknown; a late result is not rejected just because the ordinary claim lease expired. A revoked node may backfill historical results only while the original credential generation and current organization permission remain valid, and cannot start new ones |
+| POST `/extension/send-attempts/:id/segments/:index/stop-confirmation` | Structured stop proof: eventId, journalDigest, permitHash, lastPhase, noPendingSubmit, executorStoppedAt; when already authorized it must wait for submitBefore to end. permitHash is the SHA-256 of the permit's UTF-8 bytes, and an empty string is used when unauthorized |
+| GET `/extension/send-attempts/:id` | The node reads state/segment results and receives no lease or permit |
+| GET `/sending/executions/:id` | A super-admin reads the original execution, account/segment facts, and resolutionRevision, and receives no credentials |
+| POST `/sending/executions/:id/segments/:index/reconcile` | A super-admin submits a manual reconciliation with evidence, expectedResolutionRevision, and eventId; a platform record not being found is not itself stop proof |
+
+Node execution endpoints additionally require `x-send-lease-token`. Node registration and execution claiming use two separate server keys: `EXTENSION_NODE_CREDENTIAL_KEY` and `SEND_EXECUTION_CREDENTIAL_KEY`, each at least 32 characters; the execution key is identical across all backend/worker instances and must not be logged. Claim recovery may re-derive the lease, but it never re-derives or resends a submit permit that was already granted.
+
+The extension attempts renew every 20 seconds during preparation, and the server allows renewal only for a not-yet-expired RESERVED execution. Renewal is refused once it enters SENDING, has an unknown result, has an expired lease, or carries an old fencing generation; a started execution is not automatically unlocked when the preparation lease expires, and renewal does not refresh the 30-second short permit. A status GET includes serverNow, leaseExpiresAt, nextWriteNotBefore, and the segment facts. A revoked original terminal may still read the original execution state, submit stop proof or results, but must pass the original credential generation, lease, and current organization membership checks; a new start is not allowed.
+
+### 14.4 Actual Wiring of the Standalone Extension and Automatic Producers
+
+The standalone extension implementation is in `../aisee-browser-extension/src/utils/coordinated/`. The frozen directory was not read or modified.
+
+- **Entry points and protocol negotiation**: the manual post queue, the Engage reply bridge, and the publish/reply alarm all negotiate first. The original flow is kept only for an explicit LEGACY with no management barrier, or for a never-managed owner hitting a 404 on an old backend; network failure, a managed organization, disabled features, or a changed logged-in user all stop controlled sending without degrading. An enabled installation that logs out also does not enter the legacy send path. The original business message names, legacy due response wrapper, and old client interfaces stay compatible.
+- **Terminals and accounts**: each browser profile independently persists the unified nodeId; within the user/organization scope the requestId is saved first, then this account's credential is registered. A restart and an account switch reuse the original credential, and the social account takes no part in terminal numbering. Credentials are partitioned by backend, AIsee user, and organization, and the journal and execution manifest are further partitioned by node. Before each claim it reports the live actor per platform: X's numeric cookie, Reddit's live `/api/me.json`, and the live identity of the five platforms added in §14.9; each segment's preflight uses a new probe/challenge and an incremented report sequence, and no social cookie/token is uploaded.
+- **Persisted journal**: the legacy saveLocal error-swallowing logic is not used. A Chrome storage write must receive a success callback and be read back for verification; the index, execution manifest, and PREPARED→AUTHORIZING→AUTHORIZED→SUBMITTING→CONFIRMED/UNKNOWN are all persisted. It records the execution and content revisions, account, segment, permit digest, time, stable result eventId, and reported state; it does not persist a replayable raw submit permit. A storage failure means no platform submission is triggered.
+- **X final submission**: open the page, upload, and fill the form first, then request start. The page script accepts only commands registered by the current worker; the worker verifies the sending page/terminal/current AIsee user and the live X actor, atomically consumes the permit, and completes the SUBMITTING persistence before returning. After the final await the page re-checks the account, original text, button, and remaining time, then clicks once. The actual CreateTweet request must match the frozen text and reply target, and the returned actor numeric ID must match; a controlled result never uses a toast, timeline, or text-similarity guess for success.
+- **Reddit final submission**: before the actual `/api/submit` or `/api/comment`, the same challenge/start, live actor re-check, short permit consumption, and SUBMITTING persistence run. A controlled write request is not retried and does not enter the legacy page fallback. The first version limits ordinary publishing to a single community with plain text; images, flair, and other scenarios needing page completion stop and wait for later adaptation. Media for a reply/later thread segment is not silently dropped.
+- **Short permit**: validates attempt, segment, fencing, route/content revision, actor, and contentHash; serverNow calibrates the remaining time and subtracts the request duration, while the monotonic clock and wall clock are both checked, and a clock going backwards, an anomalous jump, or insufficient safety margin stops it. The worker and the page each have a one-shot consumption guard; the send command is not saved as a replayable message.
+- **Restart and disconnection**: recover the journal/report late first, then claim a new task. PREPARED can supply non-submission proof; AUTHORIZING (lost start response), AUTHORIZED, and SUBMITTING recover to UNKNOWN and never restore the permit or resend the platform request. An already-persisted confirmation result only retransmits the same event. The legacy interrupted-recovery, failure callback, and backfill do not process V1 queue records. A partial thread keeps its protection after a worker restart, and the first version does not automatically continue an unfinished segment.
+- **Upgrade and rollback**: a 426 allows through only protocol reads, execution state, results, and stop confirmations under the original authentication; claim, renew, preflight, start, and legacy callbacks are still rejected by the version gate. The client also keeps transport for those late reports, and a known upgrade pause blocks the final submission. When the sending master switch is turned off, existing credentials recover the journal in late-report-only mode, registering no new node and claiming or requesting no new permit; it does not retract existing facts or lift unknown protection.
+- **Automatic producers**: a new `ProjectSendOwner(organizationId, projectId, action)` records the configuring operator. Automation registers the owner after a successful configuration save, the enqueue snapshot is explicitly AUTOMATION, and membership plus the live switch/budget are still checked before execution. An automatic reply is atomically saved first as `DRAFT + ACCOUNT_BOUND_V1 + AUTOMATION`, separate from a manual DRAFT, and then the SendIntent is created; an automatic draft left by an interrupted run is recovered into the queue by a later producer. It does not take over a manual draft or treat a legacy LEGACY queue as a new task. Plan generation still selects no account; plan submission after enabling automatic publishing and new plan materialization both enqueue under the persisted owner.
+- **Legacy configuration migration**: an existing automatic configuration with no owner stops controlled generation and requires a user with permission to save the corresponding configuration; the polling extension's current user or the organization's first user is not used to guess an owner. The owner and the business configuration are currently written in sequence and an atomic single commit is not claimed; after a save or process interruption the configuration save should be retried, and an existing Intent keeps its own owner snapshot.
+
+Additional constraints from the 2026-10-16 review:
+
+- Permit timing starts when the response is received and subtracts the request, digest computation, persistence, read-back, and local mutex queue wait; it must not restart after the journal is written.
+- The manual send's worker mutex covers the whole asynchronous submission and result handling. While it is incomplete, an alarm must not run a recovery scan that turns a still-running record into UNKNOWN.
+- After a lost claim response, recovery follows the original rootPostId, requestId, and entry point, persisting the manifest first and then clearing the pending claim; alternating manual/polling entry points neither overwrites the request identity nor blocks permanently.
+- A successful protocol negotiation response must also validate the complete structure and known protocol; an unknown value, missing field, invalid identity, or time stops sending and must not be used to enter LEGACY.
+- Reddit is compatible with the existing `settings.subreddit[0].value.title`. Unadapted configuration such as links, media, and flair is rejected before submission rather than dropping the parameters and sending plain text. Controlled automatic replies generate tasks for the seven platforms per the project's existing policy; enabling the new version does not silently exclude or downgrade the other five platforms to LEGACY.
+- Every pending execution inherited when a new quota bucket is initialized also gets a HELD reservation built, written in the same transaction as heldUnits; only a late confirmation/stop of the original execution can settle all related buckets, and an aggregate count alone must not be inherited.
+
+Product and acceptance scope still incomplete:
+
+1. **Product UI and rebinding**: the first-binding protocol and policy barrier are complete; the frontend still needs to fully show AWAITING_CURRENT_ACTOR, PRESELECTION_REQUIRED, and explicit account reselection. The explicit rebinding/rescheduling endpoint and UI for a controlled not-started task are still pending, and protection must not be cleared through the legacy edit entry point.
+2. **Generation identity and historical archiving**: X/Reddit same-namespace identity reuse, protected legacy OAuth verification, and the new-account transactional quota are complete; cross-namespace aliases, manual merging of duplicate rows, unverifiable historical SESSION_ONLY records, providers outside the seven platforms, and the existing-volume audit are still to be handled. The complete ReplySendIntent generation key/historical multi-version draft normalization is incomplete, and the PRIMARY send key is not equivalent to generation-stage dedup.
+3. **Operations and recovery**: rebinding/rescheduling of not-started tasks, recurring occurrence, more platforms and complex Reddit publishing, the administrator reconciliation UI, unknown-permit scanning/alerting, and a complete business settlement outbox. The existing overage is not equivalent to a credit-fund pre-authorization; the log retention/cleanup policy still needs operational configuration.
+4. **Real acceptance**: PostgreSQL Serializable/partial-index concurrency, multi-profile/multi-browser login switching, real platform timeouts, process exit and late receipts, real API/extension side effects, and a legacy client migration drill. A passing build and simulated DOM tests cannot replace these acceptances.
+
+### 14.5 Verification Records
+
+Configuration/planning foundation phase: on Node 22.22.0 the complete non-frozen suite had 3898 passing, 0 failing, 96 skipped; backend production TypeScript passed. This record is kept as a historical baseline.
+
+Final verification of the send-coordination phase: on Node 22.22.0 the complete non-frozen suite had 3946 passing, 0 failing, 96 skipped (253 files passing, 4 skipped); 48 tests were added in this phase. Backend and orchestrator production TypeScript checks passed. Targeted coverage of the six send-coordination core files was 91.25% lines, 74.85% branches, 92.30% functions, not whole-project coverage. Prisma offline validate/generate passed, the incremental schema diff was generated and reviewed, and the migration files were not applied. The tests explicitly blank DATABASE_URL/REDIS_URL and use an in-memory transaction model and in-memory Redis without connecting to the application database; the database SQL integration suite keeps its existing skip-when-DATABASE_URL-is-missing mechanism. In-memory concurrency tests can verify the state machine and contention decisions but **cannot replace real PostgreSQL concurrency acceptance**.
+
+Standalone extension and automatic producer phase: the main repository's complete non-frozen suite had **3958 passing, 0 failing, 96 skipped** (254 files passing, 4 skipped); the standalone extension's complete suite had **2491 passing, 0 failing, 0 skipped** (169 files passing), including 57 new protocol/failure tests. Backend, orchestrator, and extension TypeScript checks passed; both Chrome and Firefox built to a temporary directory, with no install, signing, or publication. Prisma used an offline fake connection string for validate/generate/diff without connecting to the database; the new owner migration was only generated as a file. Tests cover permit double-consumption, storage failure, clock changes, disconnection/restart, confirmation late-reporting, account changes, actual X request association, automatic owner, manual draft isolation, preparation renewal, and 426 late reporting. Targeted coverage of the four new extension coordination modules: 99.50% lines, 80.49% branches, 97.77% functions; this does not represent the whole extension or platform-poster coverage. Coverage reused the same-version V8 provider as the main repository, explicitly allowing the standalone repository's source in a temporary configuration, with no dependencies installed or changed. Real database and real platform acceptance are still not executed.
+
+After the 2026-10-16 two-repository review: the main repository's complete non-frozen suite had **3965 passing, 0 failing, 96 skipped** (255 files passing, 4 skipped); the standalone extension's complete suite had **2503 passing, 0 failing, 0 skipped** (169 files passing). This round added 7 main-repository and 12 extension regression tests; the extension coordination directory has 69 tests passing. Backend, orchestrator, and extension TypeScript checks and the Chrome/Firefox temporary-directory builds all passed. The four extension coordination modules currently have targeted V8 coverage of 95.91% lines, 82.61% branches, 97.82% functions; this is not whole-extension coverage. The tests still blank DATABASE_URL/REDIS_URL, the 96 skips follow the existing suite conditions, and no run was made against the application database; no migration was applied, no extension installed, and no real social content published.
+
+### 14.6 Prepared Migrations and Safe Deployment
+
+The following files are only prepared and checked, not executed:
+
+1. [add-extension-nodes.sql](../libraries/nestjs-libraries/src/database/prisma/migrations/add-extension-nodes.sql)
+2. [add-project-send-bindings.sql](../libraries/nestjs-libraries/src/database/prisma/migrations/add-project-send-bindings.sql)
+3. [scope-integration-identity.sql](../libraries/nestjs-libraries/src/database/prisma/migrations/scope-integration-identity.sql)
+4. [add-plan-execution-routes.sql](../libraries/nestjs-libraries/src/database/prisma/migrations/add-plan-execution-routes.sql)
+5. [add-organization-send-bindings.sql](../libraries/nestjs-libraries/src/database/prisma/migrations/add-organization-send-bindings.sql)
+6. [add-send-policy-preferences.sql](../libraries/nestjs-libraries/src/database/prisma/migrations/add-send-policy-preferences.sql)
+7. [add-send-coordination.sql](../libraries/nestjs-libraries/src/database/prisma/migrations/add-send-coordination.sql): adds SendIntent, shared execution/segments, the account write lock, the quota ledger, and result events; Post gains content/Intent associations; the SQL contains a cross-channel active-execution partial unique index and count CHECK constraints and cannot be replaced by db push.
+
+8. [add-automatic-send-owners.sql](../libraries/nestjs-libraries/src/database/prisma/migrations/add-automatic-send-owners.sql): adds ProjectSendOwner stored by organization/project/action plus constraints; no owner is guessed for historical configurations.
+
+The release order must be carried out by the user/deployment pipeline: confirm the real target is `aisee_postiz_dev`, review, and apply the eight base expand incremental migrations above. The current version must additionally apply §14.7's identity-check increment and §14.10's company-session increment; the latter removes the old two-column session unique index, so controlled entry points must be paused and old controlled-write instances stopped before deploying an application matching the current Prisma fields/indexes. `scope-integration-identity.sql` keeps the old `(organizationId, internalId)` unique index during that phase while creating the new provider/namespace-scoped index; the old constraint may temporarily reject a new account that the new scope would allow, which is a conservative compatibility boundary during mixed versions and must not be claimed as fully opening the identity namespace. **Even with the flag off, the new code may query new tables, so the flag cannot replace migrate-then-deploy.** The agent does not execute SQL, migrations, or db push.
+
+Also prepared is [contract-integration-identity.sql](../libraries/nestjs-libraries/src/database/prisma/migrations/contract-integration-identity.sql), which **is not part of the first eight-migration sequence**. Only after the new index has been successfully created, all backend/worker instances use scoped queries, the old version and old writers have all exited, and identity aliases and duplicate records have been audited, may the user/deployment pipeline separately review and apply it to drop the old unique index. All SQL files must not be executed in one batch by directory; after the contract it is also not possible to roll back directly to a version depending on the old unique key.
+
+AccountWriteState.rolloutReady defaults to FALSE and the application does not set it to TRUE on its own. Before enabling, audit per actor: merge all OAuth/extension identity aliases; stop and settle all related old workers, sleeping workflows, and the extension's local queue; also check the other accounts/old producers sharing the project quota; backfill applicable historical counts, first/lastConfirmedAt, and cooldown clocks; and confirm there are no in-flight or UNKNOWN requests. An unknown result present means ready must not be set. Only after the standalone extension submission protocol and real concurrency acceptance are complete may a controlled release flow set it to ready and enable ACCOUNT_BOUND_SENDING_ENABLED; turning the flag off only stops new claiming/permits, and result reporting and the existing dedup protection continue to apply.
+
+An earlier check found the database was named `postiz_dev` rather than the required `aisee_postiz_dev`; this phase performed only offline Prisma checks and did not reconnect to confirm or repair the environment configuration.
+
+### 14.7 OPTIONAL First Binding and Identity Unification Phase (2026-10-16)
+
+- Only when there is no explicit/project/organization default and the owner snapshot allows OPTIONAL does enqueue save CURRENT_SESSION, AWAITING_CURRENT_ACTOR, and an empty account; a valid default takes priority and an invalid default does not fall back. An explicit but missing selection is still rejected. A single manual reply may omit integrationId; the legacy LEGACY endpoint still requires an account. A new draft saves its EXPLICIT/INHERIT source, and an update that omits the account does not clear the source; a legacy draft with an account but an unknown source returns SEND_BINDING_RECONFIRMATION_REQUIRED and must be explicitly reselected through the original save/send request carrying integration.id.
+- claim matches the current NodeSession by platform, first taking the same coordination lock as system-policy writes, then verifying owner membership, the policy barrier, the stable actor, project authorization, reply permission, and account rolloutReady. First binding completes in the same transaction as the whole-chain account snapshot, routeRevision increment, and execution reservation; a failure rolls everything back. A new default or a terminal account switch does not re-select the account; tightening and then relaxing still keeps the lastRequiredRevision barrier. A task blocked by the barrier shows PRESELECTION_REQUIRED and occupies no sending quota.
+- X uses x.rest_id and preserves the decimal ID; Reddit's reddit.user_id normalizes case and the t2_ prefix. Fresh extension evidence and OAuth connect/refresh share SocialAccountIdentityService; a known existing identity reuses the original Integration ID, and the extension does not change credentials, disabled, the user's name, or project assignment. A new SESSION_ONLY uses an empty token/refreshToken and an empty tokenExpiration. Duplicate/cross-namespace/unknown legacy is never merged by guessing.
+- A historical legacy OAuth upgrade requires first calling the administrator POST identity verification, reading the platform actor with the original token, re-checking member role and the credential digest, and upgrading the original row inside the transaction while saving identityAudit. A numeric appearance or the same handle is not upgrade evidence; when verification is impossible, the identity is duplicated, or a coordination reference already exists, an explicit blockCode is returned and the observation and history are kept. An extension report verifies the server registration result and does not enter submission with an unresolved identity.
+- A new account counts/creates inside a Serializable transaction; matching an existing account no longer consumes the count quota. The count cap follows the user's plan/Stripe entitlement snapshot, and with no reliable snapshot new creation stops while existing accounts can still report; all non-deleted accounts are counted conservatively, and the count limit is not bypassed through refreshNeeded. No IntegrationProject is automatically assigned and rolloutReady is not automatically enabled.
+- New controlled tasks go only through the extension, and legacy API sending parameters are accepted and normalized to EXTENSION; historical API tasks are not migrated or resent. Keeping the API activity names/internal ledger serves only historical-fact compatibility and must not be taken as support for OAuth API publishing.
+
+New prepared migration: [add-stable-social-identity-checks.sql](../libraries/nestjs-libraries/src/database/prisma/migrations/add-stable-social-identity-checks.sql). It is reviewed and applied by the user/deployment pipeline after the original eight expand migrations; the NOT VALID constraints first protect newly inserted/updated known identities without guessing a namespace for or modifying historical rows, and existing-data validation is scheduled separately after an audit. The contract must still be deferred independently; the code decides whether to keep the legacy bare-ID collision check from the actually effective unique index in the current schema rather than using an INTEGRATION_IDENTITY_CONTRACTED manual marker. Only after the contract is actually complete does the scoped unique key allow the same bare ID across providers; the detection does not execute migrations, and old-version exit/auditing is still guaranteed by the release flow. All migrations are only prepared, not executed.
+
+This phase's API usage, tests, and remaining boundaries are also in the [implementation notes](project-account-optional-identity-implementation.md).
+
+Final verification of this phase: on Node 22.22.0, the main repository's complete non-frozen suite had **4035 passing, 0 failing, 96 skipped** (262 files passing, 4 skipped); the standalone extension had **2509 passing, 0 failing, 0 skipped** (169 files passing). Backend, orchestrator, extension TypeScript, and the Chrome/Firefox temporary-directory builds all passed. The identity-unification service has targeted coverage of 99.49% lines, 95.83% branches, 100% functions; the four extension coordination modules have 96.21% lines, 82.67% branches, 100% functions, neither representing a whole repository. The complete service chain covers registration, identity resolution, OPTIONAL first binding, preflight/start, one-shot permit return, and result idempotency/quota settlement. The application database was not connected, no SQL or migration was executed, and real PostgreSQL/browser-platform acceptance remains for the deployment phase.
+
+### 14.8 Single Deployment Master Switch and Default Legacy Mechanism (2026-10-16)
+
+The only feature switch requiring manual configuration is `ACCOUNT_BOUND_SENDING_ENABLED`, enabled by the string `true` only; default, false, or any other value turns it off. The previous SEND_COORDINATION_ENABLED, EXTENSION_NODES_ENABLED, and PROJECT_ACCOUNT_BINDINGS_ENABLED no longer participate in the decision, and an old environment keeping them true cannot quietly enable the new mechanism. A deployment that needs it enabled must explicitly set the new master switch.
+
+| State | Post / Reply and extension behavior |
+| --- | --- |
+| Default or false, not yet managed | Keeps legacy creation, account registration, default routing, due claiming, callbacks, and response wrappers; does not force SendIntent/terminal protocol and does not require new node keys or default accounts |
+| true | Simultaneously opens organization/project default accounts, personal preferences, node registration/session reporting, controlled Post/Reply enqueue, and automatic producers; multiple terminals for the same account compete for shared execution, and the social account must be fixed and verified before the actual submission |
+| true + REQUIRED (default product policy) | A valid per-item/project/organization account is required before enqueue |
+| true + OPTIONAL | Only when no account is preset may it await first claim to bind an eligible actor; it still binds first, then authorizes, then sends, and cannot submit under any current account |
+| Managed, then turned off | Stops new controlled claiming/authorization; existing content/account protection, UNKNOWN reservations, and result settlement are retained and it does not automatically enter the legacy send pool |
+
+The master switch is also used for the protocol negotiation's protocol/nodesEnabled, and the standalone extension keeps the original response fields without adding another local business switch. An unmanaged deployment returns LEGACY; a managed deployment that is turned off keeps the coordinationRequired barrier, and the extension only late-reports/pauses without degrading and resending.
+
+Turning it off also restores the ordinary legacy OAuth/extension account upsert and creation-permission path, and this identity unification must not require an old account to be verified before the legacy mechanism can continue. An already-unified/managed account still reuses its original identity and protection and must not create a legacy alias to bypass the lock after being turned off. The new read-only identity verification endpoint follows the master switch and does not affect the original business endpoints.
+
+INTEGRATION_IDENTITY_CONTRACTED has been removed. When a new bare-ID collision would occur or an existing actor's identity would change, the application reads the current schema's effective complete unique-index columns in the current transaction, confirms the new scoped unique key and determines whether the old key still exists; it does not guess from an index name or an environment value and does not cache a stale detection result. When the read fails or cannot be confirmed, the identity change requiring that judgment is blocked and the contract must not be claimed complete. This runtime read-only capability check creates, deletes, and modifies no index; this round's tests were all mocked and performed no database query or migration.
+
+The database must still be upgraded before deployment. Defaulting to off only guarantees choosing the legacy business mechanism and does not replace the migration for the new fields/tables; after the schema upgrade, a deployment can first run with the default off to validate the legacy system, then explicitly enable the master switch and prepare per actor under the original audit conditions. Two server keys must be configured before enabling, and the backend/worker must use a consistent switch and keys; rolloutReady, project authorization, and the product REQUIRED/OPTIONAL policy still each carry their own responsibility.
+
+Final verification of this phase: the main repository's complete non-frozen suite had 4053 passing, 0 failing, 96 skipped (265 files passing, 4 skipped); the standalone extension had 2509 passing, 0 failing (169 files passing). Backend and orchestrator production TypeScript passed; the two new master-switch/index-detection modules have 100% targeted lines, branches, and functions. The database was not connected and the catalog check used mocks; no SQL or migration was executed. Details are in the [implementation notes](project-account-optional-identity-implementation.md#single-deployment-switch-supplement-2026-10-16).
+
+### 14.9 Seven-Platform Controlled Sending Completion (2026-10-16)
+
+**Scope correction**: the user's X/x1/x2 example was not an authorization for X and Reddit only. Describing the two implemented adapters as "the first version supports only two platforms" was an implementation-scope reduction and must not be used to exclude platforms the system already has. This section covers extension publishing and replying on the existing seven platforms; the X/Reddit content in §14.7 is that phase's record and no longer represents the current platform support scope.
+
+| Platform | POST submission boundary | REPLY submission boundary | Existing content capabilities |
+| --- | --- | --- | --- |
+| X | The native editor's final publish button | The native reply button | Keeps the existing text, image, and per-segment thread protocol |
+| Reddit | Before the actual /api/submit request | Before the actual /api/comment request | Still applies the existing single-target and controlled-composer limits |
+| LinkedIn personal | After completing the Quill fill and finding a usable button | After completing the comment fill and finding a usable button | Keeps images and native comment continuation; the selected sending identity must verify as the person |
+| Medium | The final Publish confirmation once the original editing draft enters the same-ID preview | The Respond button after validating the full response text | Keeps title, body, images, and single-article publishing; a reply target on a custom publication domain still resolves through the canonical Medium story ID |
+| Quora | The native Post button | The answer comment button | Keeps text, images, and single-article publishing; the new-resource confirmation excludes links already present before submission and does not confirm a new send from old identical content |
+| Hacker News | The native story form submit | The native comment form submit | Keeps title, text, and the existing anchored comment continuation; does not send images the platform does not support |
+| Dev.to | The article form's Publish button | The comment form submit | Keeps title, Markdown, images, tags, and single-article publishing; tags are compatible with the existing label/value structure |
+
+This section records the seven-platform base adaptation phase; the LinkedIn company page is completed by §14.10, whose account, session, and native identity selection are independent of the personal actor. OAuth-only publishing parameters do not automatically become extension capabilities.
+
+#### Submission and Recovery Protocol
+
+- The backend controlled enqueue and the automatic reply producer use the same seven-platform list and no longer silently exclude the other five platforms at generation/enqueue. New platforms reuse the existing SendIntent, execution CAS, account lock, policy barrier, start quota reservation, and idempotent settlement; no separate dedup pool is created per platform.
+- The newly added five platforms' posters all accept an optional beforeSubmit. A legacy call that does not pass it keeps the original behavior; a controlled call fills the content first, finds the final control, and returns prepared/filled, and the fill function is forbidden from clicking on its own. MAIN-world filling is separated from ISOLATED-world final authorization, compatible with LinkedIn's shadow DOM/Quill.
+- beforeSubmit obtains this segment's preflight challenge, reads the fresh actor in that submission tab and reports it, then calls start to request a one-shot short permit. The lease, route/content revisions, and hash validation are kept, and a failed journal persistence means no submission.
+- The final submit command is bound to the extension itself, the top-level tab, the platform, and the specific page URL. The live actor is read again before consuming the permit; after receiving the confirmation the page checks validity, clock, document/button, the full body and title, and whether the cookie changed, then stops awaiting and clicks the native control. The Medium final step additionally locks the just-verified draft ID and preview URL so another draft cannot be published.
+- LinkedIn uses the browser fs_miniProfile namespace and checks the personal identity selected in the editor. Medium's sid, Dev.to's session cookie, Quora's device cookie, and historical display caches cannot each alone obtain VERIFIED; Dev.to additionally checks a fresh same-origin /dashboard login response against the current editing page, preventing an old page's identity from continuing to pass after another tab switches account. Polling without a login cookie does not open a pointless identity page; with a cookie, live verification is still required.
+- A result is CONFIRMED only when the permit has been consumed and evidence of its own new resource is obtained. An HN comment must use the comment's own item ID, and a LinkedIn comment needs a comment reference; a parent-post URL must not confirm a reply. HN's later segments stay anchored to the original root post and must not wrongly turn a third segment into a reply to the second just because the comment's own URL was recorded. When confirmation is impossible, the permit response is interrupted, or a restart happens after sending, UNKNOWN and the account lock/quota reservation are kept; a restart replays the persisted receipt and does not resend the platform request.
+- Quora's controlled read-back excludes URLs that existed before submission, and a comment must also match the person's own profile and body text; controlled publishing does not use the profile-navigation fallback that could mistake an old identical post for a new one. When evidence of a new resource cannot be obtained, it enters reconciliation.
+
+#### Identity, Compatibility, and Deployment
+
+The extension report adds linkedin.fs_miniProfile, medium.handle, quora.user_id, hackernews.handle, and devto.user_id. The shared identity service accepts only the platform's corresponding namespace and ID format and does not lowercase uniformly. Multiple terminals with the same verified namespace/ID reuse the same Integration and account coordination state.
+
+This expansion does not automatically merge a historical account in a different namespace, such as a LinkedIn OAuth sub, by the same handle. Old legacy identities, cross-namespace aliases, and existing duplicate Integrations are still handled by the protected verification and release audit of §4/§14; a new registration does not automatically establish project authorization or set rolloutReady to true. These conditions must not be skipped because the platform list grew.
+
+There is still only the ACCOUNT_BOUND_SENDING_ENABLED master switch, defaulting to false. When off, unmanaged business continues legacy sending; when on, all seven platforms enter the controlled protocol without automatic per-platform degradation. The existing API paths, legacy parameters, and default-off mechanism stay compatible; new REPLY settings are X's reply_to_tweet_id, Reddit's replyToId, and the other platforms' replyToId/replyUrl, where the latter is frozen from the existing opportunity's externalPostUrl and must not be assembled from an opaque ID alone.
+
+The §14.9 seven-platform base adaptation reused the extension schema of that time and added no database table/field or new switch; §14.10 subsequently added the session actorKey for multiple company actors on the same terminal. This round did not connect to the database or execute SQL or migrations. The existing expand migrations are still applied by the user or the deployment pipeline. Real PostgreSQL contention and actual submission, account switching, process exit, and late-receipt acceptance on logged-in browsers for the seven platforms still have to be completed at deployment; automated tests do not replace that acceptance.
+
+#### Final Verification of This Round
+
+Node 22.22.0. The main repository's complete non-frozen suite had **4088 passing, 0 failing, 96 skipped** (266 files passing, 4 skipped); the standalone extension's complete suite had **2570 passing, 0 failing, 0 skipped** (175 files passing). Backend, orchestrator, and extension TypeScript checks passed; the Chrome/Firefox builds into separate temporary directories passed, without overwriting the extension directory the user has loaded.
+
+Tests include seven platforms × POST/REPLY registration, OPTIONAL binding, preflight/start, quota HELD, and repeated settlement; the actual injected function on five platforms going prepared/filled → permit consumption → native click; no resend after an account switch and restart after authorization; Dev.to old-page identity invalidation; the LinkedIn sending persona; Quora old resources and tracking parameters; and HN's three-segment continuation keeping the root-post target while recording each comment's independent identity. The database uses a transactional in-memory stub and pages use DOM/browser-interface stubs; no claim is made of having run a real database or a logged-in end-to-end platform acceptance.
+
+Targeted V8 coverage: the backend controlled-platforms and shared identity service are 93.22% lines, 94.33% branches, 85.71% functions; the extension's three new page-submit/platform-identity/result modules are 98.99% lines, 84.68% branches, 100% functions. These are measurements of the specified modules, not whole-repository coverage.
+
+### 14.10 LinkedIn Company Page Sending (2026-10-16)
+
+#### Account and Terminal Model
+
+A LinkedIn personal member and a company page are different publishing actors. The company reuses the existing `linkedin-page` Integration and the numeric organization ID, with the namespace `linkedin.organization_id`; the administrator's fs_miniProfile, OAuth sub, or the company vanity handle does not substitute for the company ID. Business default binding still uses `platform=linkedin`, and POST and REPLY may each select the personal or the company Integration. An existing Post's `providerIdentifier=linkedin-page` is normalized to the linkedin transport platform in controlled routing, and the source provider in the database is not rewritten. A Company canonicalAccountKey still uses linkedin-page + the organization namespace + the numeric ID, and multiple administrators/terminals use the same account lock and quota.
+
+One member may manage multiple companies, so ExtensionNodeSession adds actorKey and its unique key becomes `(extensionNodeId, platform, actorKey)`. The empty string preserves the personal session semantics; each company occupies its own derived slot. Backend reporting still reuses POST `/integrations/extension-session`, adding no company account-save API and not forcing the account list to group by platform.
+
+Company report example:
+
+```json
+{
+  "platform": "linkedin",
+  "loggedIn": true,
+  "id": "1337",
+  "identityNamespace": "linkedin.organization_id",
+  "controllerId": "ACoActualMember",
+  "actorContext": "COMPANY_ADMIN",
+  "evidenceKind": "LIVE_PAGE_ACTOR",
+  "verificationStatus": "VERIFIED"
+}
+```
+
+The actual request must still carry reportSequence, checkedAt, probeId, identityObservedAt, and node authentication. actorKey is derived by the server, and results additionally return actorKey. A batch report allows different company slots on the same platform and rejects a duplicate within the same slot. A legacy request without the new fields still uses the original personal slot.
+
+#### Discovery, Claiming, and Submission
+
+- The extension collects candidates from numeric company admin links in the native feed and already-open company admin pages, up to 20; it reopens the native company admin page for a candidate and verifies the live logged-in member, the matching company admin path/navigation, and the native create-post control. An ordinary public company link, a cached display name, or a forged domain cannot grant a company session. When the admin page is redirected, permissions are unreadable, or the UI structure is unsupported, no executable identity is registered.
+- The controllerId read live must match the member read in this polling pass. A personal Integration that cannot be registered (for example an identity pending audit) does not prevent an existing company Integration from reporting independently. Each company is still constrained by the organization's account creation permission/count limit, project authorization, and the rolloutReady audit. A personal account switch/logout report invalidates this terminal's company sessions; without fresh verification an old session expires by TTL.
+- A task explicitly designating a company (Post explicit account, project default, or organization default) may be claimed by that company's fresh session. OPTIONAL first binding without preselection uses only the ordinary current session and does not arbitrarily pick a company from the company delegation directory; to send as a company, the company account must be explicitly selected or configured as default. Content whose source provider is linkedin-page is rejected at enqueue when there is no company route or it is misconfigured to a personal default, and platform normalization must not fall back to personal.
+- POST opens the target company's native admin publishing page and reuses the existing image, Quill/Tiptap filling, result capture, and segment continuation logic. REPLY opens the original post and uses the native identity selector to switch to the target company. The sending identity is read only from the actor/avatar control or header inside this native editor boundary, without scanning upward into the original post's article/feed/body, and the "replying to whom" link is not treated as the sender. It does not switch the browser's logged-in user and does not fall back to the administrator's personal send. The new companyId parameter is only for controlled calls; a legacy call that does not pass it keeps the original behavior.
+- The public native link of the company selected in the editor must resolve to a unique numeric company ID through the LinkedIn company app-link metadata of a fresh same-origin page; matching the company name/handle alone is not enough. The native selector supports options carrying an organization/company URN, a numeric company link, or a vanity company link resolved through live metadata; when the target cannot be clearly located the submission is blocked. The actual actor is read again after selection, at preflight reporting, and before consuming the permit.
+- COMPANY_ADMIN evidence is used only for claiming. A company proof carrying the preflightChallenge must be COMPOSER and match execution.targetAccount; the server start reads the fresh session for that company slot and performs the original quota HELD and one-shot permit CAS. The final click also compares the author-link snapshot, stopping immediately if the author changes while waiting to consume the permit. An uncertain result, a restart, or a late receipt continues to use the existing UNKNOWN and reconciliation mechanism without automatic resending.
+
+#### Historical Accounts, API, and Database Compatibility
+
+A historical OAuth company Integration may use the existing protected identity-verification API for a read-only company administrator ACL query, verify the original numeric company ID, and then normalize to the organization namespace. The original account ID, credentials, and project associations are kept; an existing conflict/in-flight identity is rejected by the original audit barrier. An intermediate page-selection state in OAuth is not mistaken for a selected company. OAuth posting is still off, and the new verification calls no write interface.
+
+The master switch is still only `ACCOUNT_BOUND_SENDING_ENABLED=false`, and the legacy send path is unchanged while it is off. When on, company sending must also obey project authorization, account audit, SendIntent content uniqueness, the account write lock, quota reservation, and idempotent settlement. The HTTP API is compatible with legacy clients; changing the database unique key requires coordinated deployment order, and an old backend binary is not guaranteed to keep performing the old two-column upsert.
+
+The new migration is only prepared: `libraries/nestjs-libraries/src/database/prisma/migrations/add-linkedin-company-actor-sessions.sql`. It backfills the empty actorKey on old sessions, creates the three-column unique index, and removes the two-column one; it must be applied after the existing extension-nodes migration. It is applied by the user or deployment pipeline after controlled entry points are paused and old controlled-write instances have exited, then the new backend and extension matching the schema are deployed together, and the master switch is restored after verifying account and company permissions. No migration, SQL, or database connection was executed. Prisma generate only updates local client types and does not upgrade the database.
+
+This phase's verification results are in the final record below; DOM/browser-interface stubs and in-memory transaction tests do not replace real acceptance on a logged-in LinkedIn with real administrators, company publishing/commenting, and real PostgreSQL contention. When the company selector or identity metadata changes, it stops safely and does not claim live acceptance for every LinkedIn interface version.
+
+#### Final Verification of This Phase
+
+Node 22.22.0. The main repository's complete non-frozen suite had **4098 passing, 0 failing, 96 skipped** (267 files passing, 4 skipped); the standalone extension's complete suite had **2596 passing, 0 failing, 0 skipped** (176 files passing). Backend, orchestrator, and extension TypeScript all passed; the Chrome/Firefox builds wrote to separate /tmp directories without overwriting the user's loaded extension build.
+
+New/extended test coverage: personal and multiple company slots on the same terminal, multiple administrator terminals reusing the same company, the complete company POST/REPLY service chain, two terminals competing to obtain only one execution record, start's first quota HELD and repeated settlement, COMPANY_ADMIN not usable as the final preflight, a company-source post not allowed to fall back to personal, OPTIONAL not arbitrarily choosing a company, read-only audit unification for a historical OAuth company, native company selection and vanity metadata resolution, unreadable/ambiguous/redirected/incognito cases, author change at permit consumption, and no resend after restart. The legacy credential-propagation branch when LinkedIn is disabled keeps regression coverage.
+
+Targeted V8 coverage: the new linkedin-company module is 100% lines, 94.33% branches, 100% functions; the extension's company/platform-identity/page-submit modules combined are 99.39% lines, 87.42% branches, 100% functions; the backend controlled-platforms/shared identity service is 99.17% lines, 95.10% branches, 100% functions. These are specified-module coverage, not whole-repository metrics. The tests connected to no real database and sent no real social content.
+
+### 14.11 Second Two-Repository Review and Corrections (2026-10-16)
+
+This round's manual comprehensive review found and fixed five classes of boundary defects. These corrections reuse the existing APIs, tables, and switches and add no migration.
+
+1. LinkedIn's live actor and final-click snapshot are both restricted to the native share/comment editor container, accepting account links only under the actor/avatar control or the header. When no readable identity exists it stops; the sender must not be inferred upward from the original post's author, other comments, or a replying-to link. Native containers in an open shadow root are supported.
+2. The extension fixes serverNow and the monotonic-clock anchor at the moment the protocol response is received, adding the real elapsed time after the anchor to a normal probe; the challenge response's anchor is recorded before entering the reporting queue, so queue time is not lost. identityObservedAt is fixed when the live read completes, and subsequent storage writes or reports do not refresh the old evidence; a batch company directory uses the conservative time at batch start and does not extend the verification validity because reports are sent one by one.
+3. Initializing a shared LinkedIn project quota also counts the legacy `linkedin` and `linkedin-page` publish/reply root records; the original bucket key and ledger are used, and a new count pool must not be created by changing the key to bypass historical quota. If an older version already initialized a LinkedIn project bucket with missing counts, deployment must review the history and ledger of that period and have the user/pipeline backfill; the code does not perform database corrections on its own or adjust the ledger without evidence.
+4. Besides already-CONFIRMED roots, an automatic REPLY's project send interval also reads AUTHORIZED and UNKNOWN roots on the same organization/project/platform, forming a temporary barrier at the possibly-submitted permit deadline plus the interval. That predicate read and this authorization/quota HELD are in the same Serializable transaction; different accounts cannot both bypass the project interval before the first receipt arrives. Other projects, continuation segments, and NOT_SUBMITTED records do not create a project root barrier.
+5. Once any LinkedIn personal/company actor is managed, the legacy due and the legacy automatic producer both block the linkedin and linkedin-page platform keys; even if the master switch is later turned off, the isolation of the managed account is kept. An unmanaged organization still follows the original LEGACY behavior.
+
+Real platform interface changes, real PostgreSQL SSI retry/unique-index contention, and the production historical ledger still have to be handled per release acceptance. Automated tests use DOM/browser-interface stubs and in-memory transactions and must not be equated with live acceptance on a logged-in platform. The database was not connected and no SQL or migration was executed.
+
+Final verification of this round: Node 22.22.0. The main repository's complete non-frozen suite had **4106 passing, 0 failing, 96 skipped** (267 files passing, 4 skipped); the standalone extension's complete suite had **2600 passing, 0 failing, 0 skipped** (176 files passing). 12 new regressions were added (8 backend, 4 extension); backend/orchestrator/extension TypeScript all passed, and Chrome/Firefox both built into separate /tmp directories. The two repositories' blank-diff checks passed.
+
+Extension page-submit/platform-identity/session targeted V8 coverage: 97.01% lines, 83.53% branches, 100% functions; the backend send-coordinator/send-quota services: 91.05% lines, 74.12% branches, 87.87% functions. These are actual measurements of the specified modules, not whole-repository coverage; the backend's legacy paths still have uncovered branches. No database was connected, no SQL/migration was executed, and no real social content was sent.
+
+### 14.12 Unpublished Node Protocol Unified on nodeId (2026-10-16; identifier generation superseded by §14.13)
+
+The node feature is not yet published, so the ID compatibility layer added for the development draft in the previous round is cancelled. Only nodeId is kept externally: the register body/response, list, account terminals, management requests, authentication header, and claim response all have consistent meaning. clientNodeId, installationId, and registrationId are removed, and the terminalId alias, optional lazy backfill, and legacy node-request adaptation are no longer kept. Already-published Post/Reply, the account list wrapper, node-free legacy session reporting, the default-off LEGACY path, and the original POST/PATCH method compatibility are still retained.
+
+nodeId is reused across AIsee accounts and authenticates together with the JWT and this user/organization's nodeToken. The database stores state uniquely by organization/user/nodeId, and the standard internal primary key is used for sessions and the SendExecution.extensionNodeId association and is not mixed up with nodeId externally. Copying the public nodeId cannot obtain an existing credential; another account with the same nodeId cannot read or continue the original execution even with the original lease. An account switch keeps independent credentials, report sequence, journal, and unknown protection; when the protocol is disabled, late reporting does not depend on shared identity storage being intact.
+
+The database only prepares: directly update the not-yet-published `add-extension-nodes.sql` (required nodeId, organization/user/nodeId unique key) and `add-send-coordination.sql` (internal extensionNodeId field). The previous round's redundant separate new identity-field migration is deleted, and no data conversion for a published old nodeId is introduced. The user/deployment pipeline applies the tidied migrations in the existing order and then deploys the matching backend and extension; unpublished draft test data is not automatically recovered. No database connection, SQL, or migration was executed.
+
+Final verification of this round (Node 22.22.0): the main repository's complete maintainable tests had 4114 passing, 0 failing, 96 existing skips (268 files passing, 4 skipped, excluding the frozen apps/extension); the standalone extension had 2616 passing, 0 failing, 0 skipped (177 files). Backend/orchestration/extension TypeScript and the Chrome/Firefox temporary-directory builds passed. Backend terminal authentication/execution/preflight coverage is 97.44% lines, 86.68% branches, 100% functions; extension node-identity/session is 97.24% lines, 88.27% branches, 100% functions. The final code hash matched the pre-test value.
+
+Regression coverage includes independent credentials, reports, and revocation for multiple users/organizations under the same nodeId, cross-account rejection even when another execution's lease is obtained; consistent nodeId across registration/authentication/claim, identical registration replay, worker restart and account-switch reuse, identity-storage corruption, and late reporting while disabled. No database connection, SQL, migration, or real social send was executed; real browser and PostgreSQL concurrency acceptance remain for the deployment environment.
+
+### 14.13 Local Machine/Profile Deterministic Identity and Uninstall-Reinstall Recovery (2026-10-16)
+
+After the user accepts the local program and first pairing, this phase replaces §14.12's random nodeId initialization; one public nodeId and the account isolation contract stay unchanged. The exact encoding of `nodeId = SHA256(machine stable identifier + browser profile identity)`, obtainable inputs, and change boundaries follow §4.2. A hardware serial that an ordinary extension cannot obtain is not disguised as implemented; Linux explicitly uses the system installation identifier, and the profile explicitly uses the canonical directory path confirmed by the user.
+
+Implemented:
+
+- The standalone extension's `native/aisee_node_host.py`: machine identifier reading, profile checks, deterministic hashing, short-term pairing/idempotent confirmation, active-replacement protection, a caller whitelist for the extension, a restricted JSON frame protocol, file locks, and persistence. `native/install.py` generates the current OS user-level launcher and Native Messaging manifest; it requires no administrator rights and does not install automatically. A browser outside the available default directories must be given an explicitly verified location.
+- `native-node.ts` and `node-identity.ts`: background RPC, hash format validation, stopping on identity conflict, native-first account-state persistence with sequence confirmation, and no more random public nodeId generation. Request IDs and credentials still use secure random values and must not be confused with the public identity.
+- `session.ts`: the full registration body is persisted before the request is sent, and a lost response is retried identically; after a reinstall the current scope's original credential/sequence is restored from the local backup, without borrowing a token across AIsee accounts. An account switch during a protocol request/registration stops it, and the registration response's user/organization must match the original scope. Default-off LEGACY and late reporting of old results while disabled stay compatible.
+- The extension's Options adds a local pairing panel showing the full profile path and nodeId, binding only after confirmation. nativeMessaging is an optional permission requested when the user clicks preview; new backend messages are accepted only from this extension's own Options page, rejecting websites, other extensions, and incognito calls, and bindingToken/nodeToken are not returned to the UI.
+- The backend DTO/service and the unexecuted `add-extension-nodes.sql` uniformly check the 64-character lowercase hex; the schema field remains String. No hardware input field was added to an already-published business API and no old wrapper was changed, and no data-conversion layer for the unpublished UUID nodeId draft was kept.
+
+**Deployment prerequisites and limits**: the Python 3.10+ local source program must be installed by the user, and the browser profile must be confirmed by the user; a signed one-click binary installer has not been produced. Arc's default Native Messaging discovery path has not been really verified and must be configured explicitly. The tests use temporary directories, simulated OS identifiers, browser messages, and DOM fixtures — not machine-fingerprint anti-counterfeiting or real Chrome/Arc/Firefox integration. The actual profile directory selection, Windows ACL, each OS's native invocation, upgrade and uninstall-reinstall, and PostgreSQL concurrency still have to be accepted in the target environment. Existing database preparation files are updated only, not executed; the database was not connected, no system host was installed, and no real social content was sent.
+
+Final verification (Node 22.22.0): the backend workspace's complete Vitest was **4114 passing, 0 failing, 96 existing skips** (268 files passing, 4 skipped, excluding the frozen directory); the standalone extension's complete Vitest was **2635 passing, 0 failing, 0 skipped** (179 files); the local Python complete unittest was **34 passing, 0 failing, 0 skipped**. Backend, orchestrator, and extension TypeScript checks passed; Chrome/Firefox both built into temporary directories, with nativeMessaging an optional, non-required permission in the output.
+
+This phase's coverage: the extension's native-node/node-identity/session/pairing-panel combined is 98.36% lines, 90.77% branches, 100% functions; the Python core host including branches is 92%, and the installer 93% (excluding test files). The tests cover deterministic inputs, pairing expiry/duplication/lost response, active-replacement protection, state corruption/permission/persistence failure, scope recovery, sequence rollback, incorrect write confirmation, account switching, registration-response user mismatch, Options page access restriction, and default LEGACY compatibility. Coverage is not equivalent to real browser or database acceptance. The verification logs are stored locally in `/tmp/aisee-native-node-20261016/`; the database was not connected, no SQL/migration was executed, no system host was installed, and no real social content was sent.
+

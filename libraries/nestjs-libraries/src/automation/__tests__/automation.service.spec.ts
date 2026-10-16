@@ -149,6 +149,25 @@ function makeService(over: {
 describe('AutomationService.getOverview', () => {
   beforeEach(() => vi.restoreAllMocks());
 
+  it('shows separate publishing/reply defaults and a cleared binding revision without enabling execution', async () => {
+    vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true');
+    try {
+      const { service } = makeService();
+      (service as any)._bindings = { list: vi.fn().mockResolvedValue([
+        { platform: 'x', action: 'POST', integrationId: 'post-account', revision: 4, accountDisabled: false },
+        { platform: 'x', action: 'REPLY', integrationId: 'reply-account', revision: 7, accountDisabled: true },
+        { platform: 'reddit', action: 'REPLY', integrationId: null, revision: 9, accountDisabled: true },
+      ]) };
+      (service as any)._extensionNodes = { accountViews: vi.fn().mockResolvedValue(new Map([['reply-account', { sendAvailability: 'AVAILABLE', terminals: [{ terminalId: 'online' }] }]])) };
+      const result = await service.getOverview(org, 'project', 'user');
+      expect(result.publishing.platforms.x).toMatchObject({ accountBinding: { integrationId: 'post-account', revision: 4 }, bindingRevision: 4 });
+      expect(result.replies.platforms.x).toMatchObject({ accountBinding: { integrationId: 'reply-account', revision: 7 }, sendAvailability: 'ACCOUNT_DISABLED' });
+      expect(result.replies.platforms.reddit).toMatchObject({ accountBinding: null, bindingRevision: 9 });
+      expect(result.publishing.enabled).toBe(false);
+      expect(result.replies.autoReplyEnabled).toBe(false);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
 
 
   it('distinguishes "never configured" from "everything turned off"', async () => {

@@ -48,6 +48,16 @@ model Organization {
   engageOpportunityStates EngageOpportunityState[]
   engageSentReplies       EngageSentReply[]
   operationPlans          OperationPlan[]
+  extensionNodes          ExtensionNode[]
+  sendBindings            ProjectSendBinding[]
+  organizationSendBindings OrganizationSendBinding[]
+  sendMutationReceipts    SendMutationReceipt[]
+  sendIntents             SendIntent[]
+  sendExecutions          SendExecution[]
+  accountWriteStates      AccountWriteState[]
+  sendQuotaBuckets        SendQuotaBucket[]
+  automaticSendOwners ProjectSendOwner[]
+
 }
 
 model Tags {
@@ -112,6 +122,12 @@ model User {
   organizations         UserOrganization[]
   sendSuccessEmails     Boolean            @default(true)
   sendFailureEmails     Boolean            @default(true)
+  extensionNodes        ExtensionNode[]
+  updatedSendBindings   ProjectSendBinding[]
+  updatedOrganizationSendBindings OrganizationSendBinding[]
+  sendMutationReceipts  SendMutationReceipt[]
+  sendPreference       UserSendPreference?
+  systemSendPolicyMutations SystemSendPolicyMutationReceipt[]
 
   @@unique([email, providerName])
   @@index([lastReadNotifications])
@@ -119,6 +135,8 @@ model User {
   @@index([account])
   @@index([lastOnline])
   @@index([pictureId])
+  automaticSendOwners ProjectSendOwner[]
+
 }
 
 model UsedCodes {
@@ -436,8 +454,15 @@ model Integration {
   dataTicks             DataTicks[]
   postReleases          PostRelease[]
   integrationProjects   IntegrationProject[]
+  // Known X/Reddit IDs are canonical; prepared SQL CHECKs retain unaudited legacy rows.
+  identityNamespace     String                 @default("legacy")
+  extensionNodeSessions ExtensionNodeSession[]
+  sendBindings          ProjectSendBinding[]
+  organizationSendBindings OrganizationSendBinding[]
 
-  @@unique([organizationId, internalId])
+
+  @@unique([organizationId, providerIdentifier, identityNamespace, internalId])
+  @@unique([id, organizationId])
   @@index([rootInternalId])
   @@index([organizationId])
   @@index([providerIdentifier])
@@ -448,6 +473,345 @@ model Integration {
   @@index([inBetweenSteps])
   @@index([refreshNeeded])
   @@index([disabled])
+}
+
+// nodeId is SHA-256 of a native machine anchor and canonical browser/profile identity.
+// It is shared across accounts; credentials and sessions are account-scoped.
+// id is an internal row key, never the public terminal identity.
+model ExtensionNode {
+  id                      String   @id @default(uuid())
+  organizationId          String
+  registeredByUserId      String
+  nodeId                  String
+  name                    String
+  browser                 String
+  credentialHash          String
+  credentialSalt          String
+  credentialVersion       Int      @default(1)
+  registrationRequestId   String
+  registrationRequestHash String
+  registrationExpiresAt   DateTime
+  status                  String   @default("ACTIVE")
+  revision                Int      @default(1)
+  lastReportSequence      Int      @default(0)
+  lastSeenAt              DateTime @default(now())
+  extensionVersion        String?
+  protocolVersion         String
+  capabilities            Json
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+  organization            Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  registeredBy            User @relation(fields: [registeredByUserId], references: [id], onDelete: Restrict)
+  sessions                ExtensionNodeSession[]
+  reports                 ExtensionNodeReportReceipt[]
+
+  @@unique([organizationId, registeredByUserId, nodeId])
+  @@unique([id, organizationId])
+  @@index([organizationId, registeredByUserId, status])
+}
+
+model ExtensionNodeSession {
+  id                    String   @id @default(uuid())
+  organizationId        String
+  extensionNodeId       String
+  platform              String
+  actorKey              String   @default("")
+  integrationId         String?
+  accountIdentity       Json
+  lastVerifiedIdentity  Json?
+  verificationStatus    String   @default("UNKNOWN")
+  sessionRevision       Int      @default(1)
+  reportSequence        Int
+  observedAt            DateTime?
+  receivedAt            DateTime @default(now())
+  verifiedAt            DateTime?
+  verificationExpiresAt DateTime?
+  evidenceKind          String
+  probeId               String?
+  identityObservedAt    DateTime?
+  extensionNode         ExtensionNode @relation(fields: [extensionNodeId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  integration           Integration? @relation(fields: [integrationId, organizationId], references: [id, organizationId], onDelete: Restrict)
+
+  @@unique([extensionNodeId, platform, actorKey], name: "extensionNodeId_platform")
+  @@index([organizationId, integrationId])
+}
+
+model ExtensionNodeReportReceipt {
+  id              String @id @default(uuid())
+  extensionNodeId String
+  sequence        Int
+  requestHash     String
+  result          Json
+  createdAt       DateTime @default(now())
+  extensionNode   ExtensionNode @relation(fields: [extensionNodeId], references: [id], onDelete: Restrict)
+
+  @@unique([extensionNodeId, sequence])
+}
+
+// Clearing a binding keeps its revision to prevent stale create requests.
+model OrganizationSendBinding {
+  id               String @id @default(uuid())
+  organizationId   String
+  platform         String
+  action           String
+  integrationId    String?
+  revision         Int @default(1)
+  updatedByUserId   String
+  updatedAt        DateTime @updatedAt
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  integration      Integration? @relation(fields: [integrationId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  updatedBy        User @relation(fields: [updatedByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, platform, action])
+  @@index([organizationId, integrationId])
+}
+
+model ProjectSendBinding {
+  id                String @id @default(uuid())
+  organizationId    String
+  projectId         String
+  platform          String
+  action            String
+  integrationId     String?
+  revision          Int @default(1)
+  updatedByUserId   String
+  updatedAt         DateTime @updatedAt
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  integration       Integration? @relation(fields: [integrationId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  updatedBy         User @relation(fields: [updatedByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, projectId, platform, action])
+  @@index([organizationId, integrationId])
+}
+
+model SendMutationReceipt {
+  id              String @id @default(uuid())
+  organizationId  String
+  userId          String
+  operation       String
+  requestId       String
+  requestHash     String
+  result          Json
+  createdAt       DateTime @default(now())
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  user            User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, userId, operation, requestId])
+}
+
+// One stored content unit owns execution across accounts and transport channels.
+model ProjectSendOwner {
+  id String @id @default(uuid())
+  organizationId String
+  projectId String
+  action String
+  userId String
+  revision Int @default(1)
+  updatedAt DateTime @updatedAt
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  @@unique([organizationId, projectId, action])
+}
+
+model SendIntent {
+  id                    String @id @default(uuid())
+  organizationId        String
+  contentUnitId         String
+  rootPostId            String
+  projectId             String
+  platform              String
+  action                String
+  sendOrigin            String
+  status                String @default("DRAFT")
+  integrationId         String?
+  canonicalAccountKey   String?
+  target                Json?
+  routeRevision         Int @default(0)
+  contentRevision       Int @default(1)
+  fencingVersion        Int @default(0)
+  activeExecutionId     String? @unique
+  policySnapshot        Json
+  context               Json?
+  hasConfirmedSegments  Boolean @default(false)
+  revision              Int @default(0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  organization          Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  rootPost              Post @relation("IntentRoot", fields: [rootPostId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  posts                 Post[] @relation("IntentPosts")
+  executions            SendExecution[] @relation("IntentExecutions")
+  activeExecution       SendExecution? @relation("ActiveIntentExecution", fields: [activeExecutionId, organizationId], references: [id, organizationId], onDelete: Restrict)
+
+  @@unique([id, organizationId])
+  @@unique([organizationId, contentUnitId])
+  @@unique([rootPostId, organizationId])
+  @@index([organizationId, projectId, status])
+}
+
+// API and extension executions share one active-execution constraint.
+model SendExecution {
+  id                    String @id @default(uuid())
+  organizationId        String
+  sendIntentId          String
+  projectId             String
+  platform              String
+  action                String
+  integrationId         String
+  canonicalAccountKey   String
+  target                Json
+  context               Json?
+  kind                  String
+  status                String @default("RESERVED")
+  requestKey            String
+  requestHash           String
+  executorKey           String
+  extensionNodeId       String?
+  nodeCredentialVersion Int?
+  sessionRevision       Int?
+  leaseTokenHash        String?
+  leaseExpiresAt        DateTime
+  fencingVersion        Int
+  routeRevision         Int
+  contentRevision       Int
+  payload               Json
+  gapMs                 Int @default(0)
+  startedAt             DateTime?
+  lastProgressAt        DateTime @default(now())
+  resolutionRevision    Int @default(0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  organization          Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  intent                SendIntent @relation("IntentExecutions", fields: [sendIntentId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  activeForIntents       SendIntent[] @relation("ActiveIntentExecution")
+  ownedAccountWrites    AccountWriteState[]
+  segments              SendSegment[]
+  quotaReservations     SendQuotaReservation[]
+  outcomeEvents         SendOutcomeEvent[]
+
+  @@unique([id, organizationId])
+  @@unique([organizationId, kind, requestKey])
+  @@index([organizationId, sendIntentId, status])
+  @@index([extensionNodeId, status])
+}
+
+model SendSegment {
+  id                      String @id @default(uuid())
+  organizationId          String
+  executionId             String
+  segmentIndex            Int
+  postId                  String
+  contentHash             String
+  status                  String @default("PENDING")
+  challengeHash           String?
+  challengeIssuedAt       DateTime?
+  challengeExpiresAt      DateTime?
+  evidenceSessionRevision Int?
+  evidenceObservedAt      DateTime?
+  probeId                 String?
+  permitHash              String?
+  submitBefore            DateTime?
+  authorizedAt            DateTime?
+  confirmedAt             DateTime?
+  result                  Json?
+  execution               SendExecution @relation(fields: [executionId, organizationId], references: [id, organizationId], onDelete: Restrict)
+
+  @@unique([executionId, segmentIndex])
+  @@index([organizationId, postId])
+}
+
+model AccountWriteState {
+  id                  String @id
+  organizationId      String
+  canonicalAccountKey String
+  integrationId       String
+  // Enabled only after legacy in-flight sends and identity aliases are audited.
+  rolloutReady        Boolean @default(false)
+  timezone            String @default("UTC")
+  dailyWriteLimit     Int?
+  identityIntegrationIds String[] @default([])
+  activeExecutionId   String?
+  nextWriteNotBefore  DateTime?
+  firstConfirmedAt    DateTime?
+  lastConfirmedAt     DateTime?
+  revision            Int @default(0)
+  organization        Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  activeExecution     SendExecution? @relation(fields: [activeExecutionId, organizationId], references: [id, organizationId], onDelete: Restrict)
+
+  @@unique([organizationId, canonicalAccountKey])
+  @@index([organizationId, integrationId])
+}
+
+model SendQuotaBucket {
+  id              String @id
+  organizationId  String
+  scope           String
+  dimension       String
+  windowStart     DateTime
+  windowEnd       DateTime
+  timezone        String
+  policyVersion   String
+  limit           Int
+  confirmedUnits  Int @default(0)
+  heldUnits       Int @default(0)
+  revision        Int @default(0)
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  reservations    SendQuotaReservation[]
+
+  @@unique([id, organizationId])
+  @@index([organizationId, windowStart])
+}
+
+model SendQuotaReservation {
+  id              String @id
+  organizationId  String
+  executionId     String
+  segmentIndex    Int
+  bucketId        String
+  units           Int
+  state           String @default("HELD")
+  policyVersion   String
+  createdAt       DateTime @default(now())
+  settledAt       DateTime?
+  execution       SendExecution @relation(fields: [executionId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  bucket          SendQuotaBucket @relation(fields: [bucketId, organizationId], references: [id, organizationId], onDelete: Restrict)
+
+  @@unique([executionId, segmentIndex, bucketId])
+  @@index([organizationId, state])
+}
+
+model SendOutcomeEvent {
+  id              String @id @default(uuid())
+  organizationId  String
+  executionId     String
+  segmentIndex    Int
+  eventId         String
+  requestHash     String
+  evidence        Json
+  result          Json
+  createdAt       DateTime @default(now())
+  execution       SendExecution @relation(fields: [executionId, organizationId], references: [id, organizationId], onDelete: Restrict)
+
+  @@unique([executionId, segmentIndex, eventId])
+}
+
+model UserSendPreference {
+  userId                    String @id
+  requirePreselectedAccount Boolean?
+  revision                  Int @default(1)
+  updatedAt                 DateTime @updatedAt
+  user                      User @relation(fields: [userId], references: [id], onDelete: Restrict)
+}
+
+model SystemSendPolicyMutationReceipt {
+  id          String @id @default(uuid())
+  userId      String
+  requestId   String
+  requestHash String
+  result      Json
+  createdAt   DateTime @default(now())
+  user        User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([userId, requestId])
 }
 
 // Per-project binding of a channel (Integration). A channel is org-level and can
@@ -569,6 +933,20 @@ model Post {
   // implicitly. Only meaningful for extension-published posts (Temporal claims
   // via releaseId alone and never sets this).
   claimedAt                  DateTime?
+  // Server-owned identity and revision snapshots for the coordinated sender.
+  sendTarget                 Json?
+  contentUnitId              String?
+  sendIntentId               String?
+  // Null preserves the meaning of legacy records until they are explicitly migrated.
+  accountSelectionMode       String?
+  bindingSource              String?
+  bindingSourceRevision      Int?
+  accountResolution          String?
+  routeRevision              Int                       @default(0)
+  contentRevision            Int                       @default(0)
+  sendBlockCode              String?
+  executionProtocol          String?
+  sendOrigin                 String?
   settings                   String?
   image                      String?
   submittedForOrderId        String?
@@ -650,8 +1028,12 @@ model Post {
   releases                   PostRelease[]
   engageSentReply            EngageSentReply?
   operationPlan              OperationPlan?            @relation(fields: [operationPlanId], references: [id])
+  sendIntent                 SendIntent? @relation("IntentPosts", fields: [sendIntentId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  ownedSendIntents            SendIntent[] @relation("IntentRoot")
 
   @@index([projectId])
+  @@unique([id, organizationId])
+  @@index([sendIntentId])
   @@index([group])
   @@index([deletedAt])
   @@index([publishDate])
@@ -722,6 +1104,8 @@ model OperationPlan {
   // baselineScore (from the source analysis total_score), targetScore
   // (LLM-estimated post-campaign score) }. Nullable for legacy rows.
   data                 Json?
+  executionRoutes      Json?
+  executionRevision    Int                 @default(0)
   sourceResultHash     String
   billingTransactionId String?
   creditAmount         String?

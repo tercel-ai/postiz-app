@@ -1,3 +1,4 @@
+import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
 import {
   X_FREE_MAX_WEIGHTED,
   X_SUBSCRIBED_MAX_WEIGHTED,
@@ -21,6 +22,7 @@ import {
   Min,
   MinLength,
   ValidateNested,
+  ValidateIf,
 } from 'class-validator';
 import { IsReplyPolicyMap } from '@gitroom/nestjs-libraries/engage/reply-policy.validator';
 import { Transform, Type } from 'class-transformer';
@@ -1444,8 +1446,10 @@ export class GenerateReferencePostDto {
 // ─── Reply Sending ────────────────────────────────────────────────────────────
 
 export class SendReplyDto {
+  @ValidateIf(value => value.integrationId !== undefined || !isAccountBoundSendingEnabled())
   @IsString()
-  integrationId: string; // our own X account (reply account)
+  @MinLength(1)
+  integrationId?: string; // Resolved at enqueue, or at first coordinated claim under OPTIONAL.
 
   @IsString()
   @MaxLength(4000)

@@ -1,3 +1,5 @@
+import { Optional } from '@nestjs/common';
+import { SendCoordinatorService } from '../../../extension/send-coordinator.service';
 import {
   forwardRef,
   HttpException,
@@ -81,7 +83,8 @@ export class IntegrationService {
     private _notificationService: NotificationService,
     @Inject(forwardRef(() => RefreshIntegrationService))
     private _refreshIntegrationService: RefreshIntegrationService,
-    private _temporalService: TemporalService
+    private _temporalService: TemporalService,
+    @Optional() private _sendCoordinator?: SendCoordinatorService
   ) {}
 
   async changeActiveCron(orgId: string) {
@@ -227,6 +230,16 @@ export class IntegrationService {
     return this._integrationRepository.checkPreviousConnections(org, id);
   }
 
+  verifyStableIdentity(org: string, user: string, integrationId: string) {
+    return this._integrationRepository.verifyStableIdentity(org,user,integrationId,async account=>{
+      const provider = this._integrationManager.getSocialIntegration(account.providerIdentifier) as SocialProvider & {
+        getSendActor?: (integration: Integration) => Promise<{id:string;idNamespace:string}>;
+      };
+      if (!provider.getSendActor) throw new Error('ACCOUNT_IDENTITY_VERIFICATION_UNAVAILABLE');
+      return provider.getSendActor(account);
+    });
+  }
+
   async createOrUpdateIntegration(
     additionalSettings:
       | {
@@ -251,7 +264,9 @@ export class IntegrationService {
     isBetweenSteps = false,
     refresh?: string,
     timezone?: number,
-    customInstanceDetails?: string
+    customInstanceDetails?: string,
+    identityNamespace = 'legacy',
+    creation?: { maxChannels: number | null }
   ) {
     const uploadedPicture = picture
       ? picture?.indexOf('imagedelivery.net') > -1
@@ -275,7 +290,9 @@ export class IntegrationService {
       isBetweenSteps,
       refresh,
       timezone,
-      customInstanceDetails
+      customInstanceDetails,
+      identityNamespace,
+      creation
     );
   }
 
@@ -656,7 +673,13 @@ export class IntegrationService {
         integration.providerIdentifier,
         accessToken,
         refreshToken,
-        expiresIn
+        expiresIn,
+        integration.profile ?? undefined,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        integration.identityNamespace ?? 'legacy'
       );
     }
   }
@@ -737,7 +760,9 @@ export class IntegrationService {
     const existingRecord =
       await this._integrationRepository.findIntegrationByInternalId(
         org,
-        pageInternalId
+        pageInternalId,
+        getIntegration.providerIdentifier,
+        getIntegration.identityNamespace ?? 'legacy'
       );
 
     if (existingRecord && existingRecord.id !== id) {
@@ -1042,6 +1067,7 @@ export class IntegrationService {
     if (!getIntegration || !originalIntegration) {
       return;
     }
+    await this._sendCoordinator?.assertLegacyAccount(data.orgId, getIntegration.id);
 
     const getAllInternalPlugs = this._integrationManager
       .getInternalPlugs(getIntegration.providerIdentifier)
@@ -1082,6 +1108,7 @@ export class IntegrationService {
       return true;
     }
 
+    await this._sendCoordinator?.assertLegacyAccount(getPlugById.integration.organizationId, getPlugById.integration.id);
     const integration = this._integrationManager.getSocialIntegration(
       getPlugById.integration.providerIdentifier
     );

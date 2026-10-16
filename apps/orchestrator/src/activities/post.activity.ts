@@ -1,3 +1,6 @@
+import { Optional } from '@nestjs/common';
+import { SendCoordinatorService } from '@gitroom/nestjs-libraries/extension/send-coordinator.service';
+import { currentSendContext } from '@gitroom/nestjs-libraries/extension/controlled-api-submit';
 import { Injectable } from '@nestjs/common';
 import {
   Activity,
@@ -60,7 +63,8 @@ export class PostActivity {
     private _temporalService: TemporalService,
     private _engageSentReply: PrismaRepository<'engageSentReply'>,
     private _engageOppState: PrismaRepository<'engageOpportunityState'>,
-    private _aiseeNotificationClient: AiseeNotificationClient
+    private _aiseeNotificationClient: AiseeNotificationClient,
+    @Optional() private _sendCoordinator?: SendCoordinatorService
   ) {}
 
   @ActivityMethod()
@@ -173,6 +177,11 @@ export class PostActivity {
     integration: Integration,
     posts: Post[]
   ) {
+    if (!currentSendContext()) {
+      if (posts.some(p => p.sendIntentId)) throw new Error('SEND_COORDINATOR_REQUIRED');
+      await this._sendCoordinator?.assertLegacyPosts(integration.organizationId, posts);
+      await this._sendCoordinator?.assertLegacyAccount(integration.organizationId, integration.id);
+    }
     const getIntegration = this._integrationManager.getSocialIntegration(
       integration.providerIdentifier
     );
@@ -214,7 +223,8 @@ export class PostActivity {
                 await this._postService.updateMedia(
                   p.id,
                   JSON.parse(p.image || '[]'),
-                  getIntegration?.convertToJPEG || false
+                  getIntegration?.convertToJPEG || false,
+                  !currentSendContext()
                 ),
                 (dropped) =>
                   console.warn(
@@ -230,6 +240,11 @@ export class PostActivity {
 
   @ActivityMethod()
   async postSocial(integration: Integration, posts: Post[]) {
+    if (!currentSendContext()) {
+      if (posts.some(p => p.sendIntentId)) throw new Error('SEND_COORDINATOR_REQUIRED');
+      await this._sendCoordinator?.assertLegacyPosts(integration.organizationId, posts);
+      await this._sendCoordinator?.assertLegacyAccount(integration.organizationId, integration.id);
+    }
     const getIntegration = this._integrationManager.getSocialIntegration(
       integration.providerIdentifier
     );
@@ -265,7 +280,8 @@ export class PostActivity {
                 await this._postService.updateMedia(
                   p.id,
                   JSON.parse(p.image || '[]'),
-                  getIntegration?.convertToJPEG || false
+                  getIntegration?.convertToJPEG || false,
+                  !currentSendContext()
                 ),
                 (dropped) =>
                   console.warn(
@@ -277,6 +293,22 @@ export class PostActivity {
           integration
         )
     );
+  }
+
+  @ActivityMethod()
+  async reserveCoordinatedSend(org: string, rootId: string, executorKey: string) {
+    // Retain the activity name for workflow history; no new OAuth writes are supported.
+    return { executionId: '', status: 'CAPABILITY_UNSUPPORTED' };
+  }
+
+  @ActivityMethod()
+  async sendCoordinatedSegment(org: string, executionId: string, index: number): Promise<{ status: string; waitUntil?: string }> {
+    const coordinator = this._sendCoordinator;
+    if (!coordinator) throw new Error('SEND_COORDINATOR_REQUIRED');
+    const data = await coordinator.apiContext(org, executionId, index);
+    if (data.segment.status === 'CONFIRMED') return { status: 'CONFIRMED' };
+    if (data.segment.status !== 'PENDING' || !['RESERVED', 'SENDING'].includes(data.execution.status)) return { status: 'RECONCILING' };
+    return { status: 'CAPABILITY_UNSUPPORTED' };
   }
 
   @ActivityMethod()
@@ -388,6 +420,7 @@ export class PostActivity {
     delay: number;
     information: any;
   }) {
+    await this._sendCoordinator?.assertLegacyAccount(data.orgId, data.integration);
     return this._integrationService.processInternalPlug(data);
   }
 
@@ -399,6 +432,7 @@ export class PostActivity {
     finisherText: string,
     releaseURL: string
   ) {
+    await this._sendCoordinator?.assertLegacyAccount(integration.organizationId, integration.id);
     const getIntegration = this._integrationManager.getSocialIntegration(
       integration.providerIdentifier
     );
