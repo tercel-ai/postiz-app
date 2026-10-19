@@ -1,5 +1,7 @@
 # Extension Post-Publish Protocol (batch + thread + cancel)
 
+For ACCOUNT_BOUND_V1 web integration, use [AIsee app multi-node integration](../../aisee-app/docs/aisee-app-multi-node-integration.md). Its web client enqueues through business APIs; authenticated nodes own claim, preflight, one-shot permission and settlement. The legacy queue payloads below must not be used to bypass controlled sending.
+
 > **⚠️ Updated model — the DB `QUEUE` state is the source of truth.**
 > `aisee:post-publish` is now a **pure sync trigger**: the page no longer hands
 > the extension the posts to publish. Instead the page (1) commits the posts to

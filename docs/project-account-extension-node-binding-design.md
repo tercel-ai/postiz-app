@@ -2,7 +2,7 @@
 
 Status: Code and tests exist for configuration, send coordination, controlled submission through the standalone extension on seven platforms, automatic producers, OPTIONAL first-claim binding, platform identity resolution, and initial native-host/profile pairing. Database migrations and live-platform acceptance have not been performed; the complete flow is not live.
 
-Created: 2026-10-13. Updated: 2026-10-16.
+Created: 2026-10-13. Updated: 2026-10-19.
 
 Scope: Operation Plan, Post, Engage Reply, and Automation in postiz-app, plus the standalone repository `../aisee-browser-extension`. The frozen directory `apps/extension/` is excluded and has not been read or modified.
 
@@ -11,6 +11,8 @@ The sole deployment master switch is `ACCOUNT_BOUND_SENDING_ENABLED`, defaulting
 Sending scope for this release: **New controlled Post/Reply tasks execute only through the standalone extension; OAuth API publishing is unsupported.** OAuth connection/refresh retains identity and credential compatibility and may support read-only identity verification; it grants no sending capability. API execution fields, ledgers, and cross-channel constraints retained below protect historical facts and must not enable new OAuth platform writes. New enqueue requests accept the legacy publishMethod parameter and return the actual EXTENSION route; existing API Intents do not automatically change execution channels.
 
 This document distinguishes three kinds of information: the **target contract** defines required behavior; **current code** describes existing capabilities; **implementation gaps** are collected in §14. Configuration and planning changes based on this version began on 2026-10-15. See §14 for their scope and verification records; historical test results do not imply that the full target has been implemented.
+
+For the agreed aisee-app frontend scope, current HTTP request/response contracts, concrete file changes and remaining API dependencies, use [AIsee app multi-node integration](../../aisee-app/docs/aisee-app-multi-node-integration.md). The frontend does not add an inheritance selector or a user opt-in switch; organization-default settings UI is deferred.
 
 ## 1. Core Decisions and Reading Guide
 

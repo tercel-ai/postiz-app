@@ -1,5 +1,7 @@
 # Automation API
 
+For ACCOUNT_BOUND_V1 default-account preview and concrete aisee-app changes, use [AIsee app multi-node integration](../../aisee-app/docs/aisee-app-multi-node-integration.md). Default accounts use the separate project sending-accounts resource. Controlled AUTOMATION work re-checks its live switches at claim/authorization; the legacy statements below that switches only gate enqueue do not apply to controlled automatic sends. Current plan activation uses this project's publishing endpoint with commit, not the historical `/posts/schedule { planId }` form.
+
 A project's **Automation** surface: scheduled publishing (turn an operation
 plan's drafts into queued posts) and managed replies (Engage). One project-scoped
 namespace, three endpoints.

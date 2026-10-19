@@ -1,5 +1,7 @@
 # Posts API Reference
 
+For ACCOUNT_BOUND_V1 creation, project defaults, stable request identity and concrete aisee-app changes, use [AIsee app multi-node integration](../../aisee-app/docs/aisee-app-multi-node-integration.md). Legacy sending descriptions below do not replace that controlled contract. Current plan activation uses the project Automation publishing endpoint; the explicit `/posts/schedule` DTO accepts posts, not the historical planId form.
+
 **Base Path**: `/posts`
 **Source**: [apps/backend/src/api/routes/posts.controller.ts](../apps/backend/src/api/routes/posts.controller.ts)
 **Auth**: All endpoints require a valid session cookie. Every request is scoped to

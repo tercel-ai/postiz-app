@@ -1,5 +1,7 @@
 # Engage Module — Frontend API Reference
 
+For ACCOUNT_BOUND_V1 account selection, current enqueue bodies, the X-only legacy account-list limitation and remaining frontend/backend dependencies, use [AIsee app multi-node integration](../../../aisee-app/docs/aisee-app-multi-node-integration.md). Backend business paths are `/engage/...`; the existing aisee-app HTTP client handles its configured proxy prefix. Keep the legacy manual confirmation and link-backfill flows separate from controlled submission.
+
 **Version**: 1.0  
 **Date**: 2026-07-16
 **Base Path**: `/api/engage`  

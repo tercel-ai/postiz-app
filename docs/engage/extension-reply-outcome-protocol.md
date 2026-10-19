@@ -1,5 +1,7 @@
 # Extension Reply Outcome Protocol (three repos)
 
+For ACCOUNT_BOUND_V1, use [AIsee app multi-node integration](../../../aisee-app/docs/aisee-app-multi-node-integration.md) for current account selection, enqueue, ordinary-user state limitations and concrete frontend changes. The legacy sequence diagrams below do not include controlled preflight/start permits and must not be copied as the complete new submission flow. Existing manual confirmation, link backfill and legacy behavior remain supported.
+
 How a reply posted **in the user's own browser** reports what happened, across
 `aisee-app` (the page), `aisee-browser-extension` (the poster) and `postiz-app`
 (the record) — and the code `aisee-app` still has to adopt.

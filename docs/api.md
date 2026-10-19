@@ -20,6 +20,7 @@ Modules with a dedicated, parameter-level API reference:
 | Posts | [posts-api.md](./posts-api.md) | Full `/posts/*` reference (create/list/metrics/tags/extension) |
 | Posts — publish body | [post-publish-api.md](./post-publish-api.md) | Deep `POST /posts` body: per-provider `settings`, media, threads |
 | Posts — list | [posts-list-module.md](./posts-list-module.md) | `GET /posts/list` filter/sort/pagination semantics |
+| AIsee multi-node sending | [aisee-app-multi-node-integration.md](../../aisee-app/docs/aisee-app-multi-node-integration.md) | Protocol negotiation, account/node projections, project defaults, Post/Reply contracts, concrete aisee-app changes and backend dependencies |
 | Dashboard | [dashboard-api.md](./dashboard-api.md) | Full `/dashboard/*` reference |
 | Dashboard — concepts | [dashboard-module.md](./dashboard-module.md) | Metric definitions, scope, accuracy caveats |
 | Analytics / Account profile | [account-profile-module.md](./account-profile-module.md) | `/analytics/*` account & per-post performance |
@@ -152,6 +153,35 @@ Modules with a dedicated, parameter-level API reference:
 | POST | `/posts/publish-due` |
 | POST | `/posts/sync-metrics` |
 
+### Account defaults and controlled sending
+
+📖 **[AIsee app multi-node integration](../../aisee-app/docs/aisee-app-multi-node-integration.md)** — current frontend scope, request/response examples, source references, file-level changes and API gaps. Organization defaults remain independently optional; their frontend settings UI is outside the current scope.
+
+| Method | Path | Controller |
+| --- | --- | --- |
+| GET | `/extension/send-protocol` | [send-executions.controller.ts](../apps/backend/src/api/routes/send-executions.controller.ts) |
+| GET | `/sending-accounts` | [sending-accounts.controller.ts](../apps/backend/src/api/routes/sending-accounts.controller.ts) |
+| POST | `/sending-accounts/save` | Same |
+| GET | `/projects/:projectId/sending-accounts` | Same |
+| POST | `/projects/:projectId/sending-accounts/save` | Same |
+| GET, POST | `/user/send-preferences` | [send-preferences.controller.ts](../apps/backend/src/api/routes/send-preferences.controller.ts) |
+| POST | `/sending/intents` | [send-executions.controller.ts](../apps/backend/src/api/routes/send-executions.controller.ts) |
+| POST | `/sending/intents/reply` | Same |
+| GET | `/extension/nodes` | [extension-nodes.controller.ts](../apps/backend/src/api/routes/extension-nodes.controller.ts) |
+| POST | `/extension/nodes/register` | Same; extension-owned registration |
+| POST | `/extension/nodes/save` | Same; versioned rename/revocation |
+| POST | `/extension/send-attempts/claim` | [send-executions.controller.ts](../apps/backend/src/api/routes/send-executions.controller.ts); extension-owned |
+| GET | `/extension/send-attempts/:id` | Same; node/lease authentication |
+| POST | `/extension/send-attempts/:id/renew` | Same; extension-owned |
+| POST | `/extension/send-attempts/:id/segments/:index/preflight` | Same; extension-owned |
+| POST | `/extension/send-attempts/:id/segments/:index/start` | Same; extension-owned |
+| POST | `/extension/send-attempts/:id/segments/:index/outcome` | Same; extension-owned |
+| POST | `/extension/send-attempts/:id/segments/:index/stop-confirmation` | Same; extension-owned |
+| GET | `/sending/executions/:id` | Same; super-admin reconciliation view |
+| POST | `/sending/executions/:id/segments/:index/reconcile` | Same; super-admin reconciliation mutation |
+
+Ordinary web clients use business creation/enqueue APIs and do not obtain node credentials, execution leases or submission permits. A normal-user controlled-status summary is still a backend integration dependency, not an existing `/sending/intents/:id` endpoint.
+
 ### [autopost.controller.ts](../apps/backend/src/api/routes/autopost.controller.ts) — `/autopost`
 📝 No dedicated API reference yet.
 | Method | Path |
@@ -224,7 +254,7 @@ Modules with a dedicated, parameter-level API reference:
 | PATCH | `/engage/tracked-accounts/:id` |
 | DELETE | `/engage/tracked-accounts/:id` |
 | GET | `/engage/reply-accounts` |
-| PATCH | `/engage/reply-accounts/:integrationId` |
+| POST | `/engage/reply-accounts/:integrationId` |
 | POST | `/engage/scan` |
 | POST | `/engage/refresh-on-visit` |
 | POST | `/engage/sent/metrics/refresh` |

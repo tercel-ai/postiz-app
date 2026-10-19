@@ -1,5 +1,7 @@
 # Post lifecycle: DRAFT → QUEUE → PUBLISHED
 
+The switch/queue chain below describes the legacy path. For ACCOUNT_BOUND_V1 use [AIsee app multi-node integration](../../aisee-app/docs/aisee-app-multi-node-integration.md): controlled AUTOMATION re-checks live switches at claim/authorization, while MANUAL work remains a separate lane. Account binding, node permission and uncertain-outcome protection continue after enqueue.
+
 Every gate a plan post passes through between "the generator wrote it" and "the
 platform has it", in the order they are evaluated, with the code that owns each
 one.
