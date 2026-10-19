@@ -1,6 +1,7 @@
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import { isLegacyExecution, legacyExecutionWhere } from '../../../extension/legacy-execution';
-import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import { PrismaRepository, PrismaTransaction } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import { sendTransaction } from '../../../extension/send-coordination.utils';
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { Post as PostBody } from '@gitroom/nestjs-libraries/dtos/posts/create.post.dto';
 import { APPROVED_SUBMIT_FOR_ORDER, Post, Prisma, PublishMethod, State } from '@prisma/client';
@@ -148,7 +149,8 @@ export class PostsRepository {
     private _comments: PrismaRepository<'comments'>,
     private _tags: PrismaRepository<'tags'>,
     private _tagsPosts: PrismaRepository<'tagsPosts'>,
-    private _errors: PrismaRepository<'errors'>
+    private _errors: PrismaRepository<'errors'>,
+    private _tx?: PrismaTransaction
   ) { }
 
   searchForMissingThreeHoursPosts() {
@@ -1930,14 +1932,12 @@ export class PostsRepository {
    * duplicate) are each wrong here for the same reasons they are on the
    * EngageSentReply side.
    *
-   * `where: { id }` only — no organizationId — matching changeState just below:
-   * callers are expected to have already org-scoped the read that led here
-   * (posts.service.ts's markExtensionPostRemoved does, via getPostById(id,
-   * org)), so this write does not re-check what the caller already verified.
+   * Callers scope the initial read by organization. The guarded write also
+   * refuses controlled content if enqueue races that read.
    */
   async markPostRemoved(id: string, reason: string, releaseURL?: string | null) {
     return this._post.model.post.update({
-      where: { id },
+      where: { id, sendIntentId: null, AND: [legacyExecutionWhere()] },
       data: {
         removedAt: new Date(),
         removedReason: reason,
@@ -2128,14 +2128,37 @@ export class PostsRepository {
     inter?: number,
     source?: PostSource,
     projectId?: string,
-    publishMethod?: PublishMethod
+    publishMethod?: PublishMethod,
+    tx?: Prisma.TransactionClient
   ) {
+    if ((body.accountSelectionMode === 'INHERIT' && body.integration?.id) ||
+        (body.accountSelectionMode === 'EXPLICIT' && !body.integration?.id))
+      throw new BadRequestException('SEND_ACCOUNT_SELECTION_CONFLICT');
+    const clearSelection = body.accountSelectionMode === 'INHERIT' && body.value.some((value) => !!value.id);
+    if (clearSelection && (!Number.isSafeInteger(body.expectedRouteRevision) ||
+        body.expectedRouteRevision! < 0 || body.expectedRouteRevision! > 2147483646))
+      throw new BadRequestException('SEND_ROUTE_REVISION_REQUIRED');
+    if (clearSelection && !tx) {
+      if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
+      return sendTransaction(this._tx.model, (client) => this.createOrUpdatePost(
+        state, orgId, date, body, tags, inter, source, projectId, publishMethod, client
+      ));
+    }
     const posts: Post[] = [];
     // Reuse existing group when editing, new UUID only for fresh posts.
     // This keeps published clones in the same group as the original.
     const uuid = body.group || uuidv4();
 
     for (const value of body.value) {
+      const id = value.id || uuidv4();
+      if (clearSelection && value.id) {
+        const existing = await tx!.post.findFirst({ where: { id, organizationId: orgId } });
+        if (existing && (existing.state !== 'DRAFT' || existing.sendIntentId || existing.releaseId ||
+            existing.routeRevision !== body.expectedRouteRevision))
+          throw new ConflictException('SEND_DRAFT_ROUTE_CHANGED');
+        if (!existing && body.expectedRouteRevision !== 0)
+          throw new ConflictException('SEND_DRAFT_ROUTE_CHANGED');
+      }
       // settings is written wholesale, and for a post with NO integration
       // `providerIdentifier` (persisted below) is the only record of its
       // platform (operation-plan posts, published by the extension) — erasing it
@@ -2238,15 +2261,22 @@ export class PostsRepository {
       });
 
       posts.push(
-        await this._post.model.post.upsert({
+        await (tx?.post ?? this._post.model.post).upsert({
           where: {
-            id: value.id || uuidv4(),
+            id,
             organizationId: orgId,
-            AND: [legacyExecutionWhere()],
+            ...(clearSelection ? {
+              state: 'DRAFT', sendIntentId: null, releaseId: null, routeRevision: body.expectedRouteRevision,
+            } : { sendIntentId: null, AND: [legacyExecutionWhere()] }),
           },
-          create: { ...updateData('create') },
+          create: { id, ...updateData('create') },
           update: {
             ...updateData('update'),
+            ...(clearSelection ? {
+              accountSelectionMode: 'INHERIT', integration: { disconnect: true },
+              sendTarget: Prisma.DbNull, bindingSource: null, bindingSourceRevision: null,
+              accountResolution: 'DRAFT', routeRevision: { increment: 1 },
+            } : {}),
             lastMessage: {
               disconnect: true,
             },
@@ -2258,7 +2288,7 @@ export class PostsRepository {
       );
 
       if (posts.length === 1) {
-        await this._tagsPosts.model.tagsPosts.deleteMany({
+        await (tx?.tagsPosts ?? this._tagsPosts.model.tagsPosts).deleteMany({
           where: {
             post: {
               id: posts[0].id,
@@ -2267,7 +2297,7 @@ export class PostsRepository {
         });
 
         if (tags.length) {
-          const tagsList = await this._tags.model.tags.findMany({
+          const tagsList = await (tx?.tags ?? this._tags.model.tags).findMany({
             where: {
               orgId: orgId,
               name: {
@@ -2277,7 +2307,7 @@ export class PostsRepository {
           });
 
           if (tagsList.length) {
-            await this._post.model.post.update({
+            await (tx?.post ?? this._post.model.post).update({
               where: {
                 id: posts[posts.length - 1].id,
               },
@@ -2298,7 +2328,7 @@ export class PostsRepository {
 
     const previousPost = body.group
       ? (
-        await this._post.model.post.findFirst({
+        await (tx?.post ?? this._post.model.post).findFirst({
           where: {
             group: body.group,
             deletedAt: null,

@@ -1,6 +1,7 @@
 import { controlledReplySettings } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
 import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
 import { AutomaticSendProducerService } from '../extension/automatic-send-producer.service';
+import { isLegacyExecution } from '../extension/legacy-execution';
 import { AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
 import {
   BadRequestException,
@@ -2502,6 +2503,8 @@ export class EngageService implements OnApplicationBootstrap {
       sentReplyId
     );
     if (!ctx) throw new NotFoundException('Sent reply not found');
+    if (ctx.sendIntentId || !isLegacyExecution(ctx.executionProtocol))
+      throw new BadRequestException('ACCOUNT_BOUND_PROTOCOL_REQUIRED');
 
     // 'removed' (a tombstone was left) and 'gone' (not publicly visible at all)
     // are the extension's two verdicts. Anything else is stored as 'removed' —

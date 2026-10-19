@@ -39,6 +39,7 @@ export interface SendOutcome {
   url?: string;
   stopped?: boolean;
   evidence?: string;
+  removal?: 'removed' | 'gone';
 }
 export interface EnqueueSend {
   userId: string;
@@ -69,6 +70,80 @@ export class SendCoordinatorService {
   enabled() {
     if (!isAccountBoundSendingEnabled())
       throw new ServiceUnavailableException('SEND_COORDINATION_NOT_ENABLED');
+  }
+
+  verifyPolicyIn(tx: Prisma.TransactionClient) {
+    return this.policies.getSystem(tx);
+  }
+
+  async claimProjectActive(org: string, project: string) {
+    try {
+      await this.projects.assertProjectActive(org, project);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async claimableIn(
+    tx: Prisma.TransactionClient,
+    org: string,
+    post: import('@prisma/client').Post,
+    session: import('@prisma/client').ExtensionNodeSession,
+    action: 'POST' | 'REPLY',
+    now: Date
+  ) {
+    const intent = post.sendIntentId
+      ? await tx.sendIntent.findUnique({ where: { id: post.sendIntentId } }) : null;
+    if (!intent || intent.organizationId !== org || intent.rootPostId !== post.id ||
+        intent.projectId !== post.projectId || intent.action !== action ||
+        intent.platform !== canonicalControlledPlatform(post.providerIdentifier!) ||
+        intent.routeRevision !== post.routeRevision || intent.contentRevision !== post.contentRevision ||
+        !['QUEUED', 'RESERVED'].includes(intent.status) || intent.hasConfirmedSegments ||
+        !session.integrationId || session.verificationStatus !== 'VERIFIED' ||
+        !session.verificationExpiresAt || session.verificationExpiresAt <= now)
+      return false;
+    const owner = (intent.policySnapshot as { policyOwnerUserId?: string }).policyOwnerUserId;
+    const member = owner ? await tx.userOrganization.findUnique({
+      where: { userId_organizationId: { userId: owner, organizationId: org } },
+    }) : null;
+    if (!member || member.disabled) return false;
+    const integration = await tx.integration.findFirst({ where: {
+      id: session.integrationId, organizationId: org, disabled: false, deletedAt: null,
+    } });
+    const relation = await tx.integrationProject.findFirst({ where: {
+      organizationId: org, projectId: intent.projectId, integrationId: session.integrationId, disabled: false,
+    } });
+    const actor = session.accountIdentity as { id?: string; namespace?: string } | null;
+    if (!integration || integration.inBetweenSteps || !relation ||
+        (action === 'REPLY' && relation.engageEnabled !== true) ||
+        canonicalControlledPlatform(integration.providerIdentifier) !== intent.platform ||
+        !integration.identityNamespace || integration.identityNamespace === 'legacy' ||
+        !actor?.id || !actor.namespace || !matchesSendActor({
+          id: integration.internalId, idNamespace: integration.identityNamespace,
+        }, { id: actor.id, idNamespace: actor.namespace })) return false;
+    if (intent.integrationId && (intent.integrationId !== session.integrationId ||
+        post.integrationId !== intent.integrationId || !intent.target ||
+        !matchesSendActor(intent.target as unknown as SendActor, { id: actor.id, idNamespace: actor.namespace })))
+      return false;
+    const account = await tx.accountWriteState.findFirst({ where: {
+      organizationId: org, integrationId: session.integrationId,
+      ...(intent.canonicalAccountKey ? { canonicalAccountKey: intent.canonicalAccountKey } : {}),
+    } });
+    if (!account?.rolloutReady || account.activeExecutionId ||
+        (account.nextWriteNotBefore && account.nextWriteNotBefore > now)) return false;
+    if (intent.activeExecutionId) {
+      const previous = await tx.sendExecution.findUnique({ where: { id: intent.activeExecutionId } });
+      if (!previous || previous.status !== 'RESERVED' || previous.leaseExpiresAt > now) return false;
+    }
+    if (intent.sendOrigin === 'AUTOMATION') {
+      try { await this.quotas.resolve(tx, intent, account, 0, now); }
+      catch (error) {
+        if (error instanceof ForbiddenException || error instanceof BadRequestException) return false;
+        throw error;
+      }
+    }
+    return true;
   }
 
   private async chain(
@@ -607,11 +682,15 @@ export class SendCoordinatorService {
     org: string,
     image: string | null
   ) {
-    const items = JSON.parse(image || '[]') as Array<{
+    let items: Array<{
       id?: string;
       path?: string;
       url?: string;
     }>;
+    try { items = JSON.parse(image || '[]'); }
+    catch { reject('CONTROLLED_MEDIA_NOT_RESOLVED'); }
+    if (!Array.isArray(items) || items.some(item => !item || typeof item !== 'object'))
+      reject('CONTROLLED_MEDIA_NOT_RESOLVED');
     return Promise.all(
       items.map(async (item) => {
         const media = item.id
@@ -774,6 +853,7 @@ export class SendCoordinatorService {
     observed: SendActor,
     now: Date
   ) {
+    await this.verifyPolicyIn(tx);
     const org = execution.organizationId;
     const account = await tx.accountWriteState.findUnique({
       where: {
@@ -1042,6 +1122,31 @@ export class SendCoordinatorService {
     if (outcome.status === 'confirmed' && !outcome.platformId?.trim())
       throw new BadRequestException('PLATFORM_RESULT_REQUIRED');
     const previousResult = segment.result as { platformId?: string } | null;
+    if (outcome.removal !== undefined) {
+      if (!['removed', 'gone'].includes(outcome.removal) || outcome.status !== 'confirmed' ||
+          segment.status !== 'CONFIRMED' || previousResult?.platformId !== outcome.platformId ||
+          !outcome.evidence?.trim())
+        reject('CONFIRMED_REMOVAL_EVIDENCE_REQUIRED');
+      const published = await tx.post.findFirst({ where: {
+        organizationId: org, id: segment.postId, sendIntentId: intent.id, releaseId: outcome.platformId,
+      } });
+      if (!published) reject('CONFIRMED_REMOVAL_EVIDENCE_REQUIRED');
+      // A removal appends a fact to a confirmed submission. It never settles quota again.
+      await tx.post.updateMany({ where: {
+        organizationId: org, id: segment.postId, sendIntentId: intent.id, removedAt: null,
+      }, data: { removedAt: now, removedReason: outcome.removal } });
+      await tx.engageSentReply.updateMany({ where: {
+        organizationId: org, postId: segment.postId, removedAt: null,
+      }, data: { removedAt: now, removedReason: outcome.removal } });
+      if (outcome.url) await tx.post.updateMany({ where: {
+        organizationId: org, id: segment.postId, sendIntentId: intent.id, releaseURL: null,
+      }, data: { releaseURL: outcome.url } });
+      const result: { status: string; removal: string; conflict?: boolean } = { status: 'CONFIRMED', removal: outcome.removal };
+      await tx.sendOutcomeEvent.create({ data: {
+        organizationId: org, ...key, requestHash: hash, evidence: sendJson(outcome), result,
+      } });
+      return result;
+    }
     let conflict =
       segment.status === 'CONFIRMED' &&
       outcome.status === 'confirmed' &&
@@ -1061,14 +1166,23 @@ export class SendCoordinatorService {
         where: { id: intent.id },
         data: { status: 'RECONCILING', revision: { increment: 1 } },
       });
-      const owner = intent.activeExecutionId ?? execution.id;
-      await tx.sendExecution.update({
-        where: { id: owner },
-        data: { status: 'RECONCILING', lastProgressAt: now },
-      });
+      const owner = account.activeExecutionId ?? intent.activeExecutionId ?? execution.id;
+      // Keep both the content owner and any other in-flight account owner frozen.
+      for (const id of new Set([execution.id, owner, intent.activeExecutionId ?? execution.id])) {
+        const affected = await tx.sendExecution.update({
+          where: { id },
+          data: { status: 'RECONCILING', lastProgressAt: now },
+        });
+        if (affected.sendIntentId !== intent.id)
+          await tx.sendIntent.update({
+            where: { id: affected.sendIntentId },
+            data: { status: 'RECONCILING', revision: { increment: 1 } },
+          });
+      }
       await tx.accountWriteState.update({
         where: { id: account.id },
-        data: { activeExecutionId: owner },
+        // A later receipt may clear an owner, but only a fresh deployment audit can lift quarantine.
+        data: { activeExecutionId: owner, rolloutReady: false },
       });
       if (segment.status === 'NOT_SUBMITTED') {
         await this.quotas.correctLateConfirmation(
@@ -1087,7 +1201,7 @@ export class SendCoordinatorService {
           },
         });
         await tx.post.updateMany({
-          where: { id: segment.postId, organizationId: org },
+          where: { id: segment.postId, organizationId: org, releaseId: null },
           data: {
             state: 'PUBLISHED',
             releaseId: outcome.platformId,
@@ -1153,7 +1267,7 @@ export class SendCoordinatorService {
           data: { activeExecutionId: null },
         });
         await tx.post.updateMany({
-          where: { organizationId: org, id: segment.postId },
+          where: { organizationId: org, id: segment.postId, releaseId: null },
           data: { state: 'ERROR', error: 'SEND_DEFINITELY_NOT_SUBMITTED' },
         });
       } else if (outcome.status === 'unknown') {
@@ -1180,7 +1294,7 @@ export class SendCoordinatorService {
           },
         });
         await tx.post.updateMany({
-          where: { organizationId: org, id: segment.postId },
+          where: { organizationId: org, id: segment.postId, releaseId: null },
           data: {
             state: 'PUBLISHED',
             releaseId: outcome.platformId,
@@ -1256,7 +1370,7 @@ export class SendCoordinatorService {
       outcome.url
     ) {
       await tx.post.updateMany({
-        where: { organizationId: org, id: segment.postId, releaseURL: null },
+        where: { organizationId: org, id: segment.postId, releaseId: outcome.platformId, releaseURL: null },
         data: { releaseURL: outcome.url },
       });
     }

@@ -1,4 +1,4 @@
-import { canonicalControlledPlatform } from './controlled-platforms';
+import { claimControlledSend } from './send-claim';
 import { hashSecret, sessionActorKey } from './extension-node.protocol';
 import { StopSendDto } from './send-execution.dto';
 import {
@@ -8,17 +8,16 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, SendExecution } from '@prisma/client';
-import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../database/prisma/prisma.service';
 import { ExtensionNodeService } from './extension-node.service';
 import {
   SendCoordinatorService,
-  SendActor,
   SendOutcome,
 } from './send-coordinator.service';
 import {
   sendHash,
   sendLease,
+  sendPreflightChallenge,
   sendTransaction,
 } from './send-coordination.utils';
 
@@ -40,194 +39,8 @@ export class SendExecutionService {
     auth: NodeAuthentication,
     body: { requestId: string; action: 'POST' | 'REPLY'; rootPostId?: string }
   ) {
-    this.sends.enabled();
-    if (
-      !body.requestId?.trim() ||
-      body.requestId.length > 128 ||
-      !['POST', 'REPLY'].includes(body.action)
-    )
-      throw new BadRequestException('INVALID_SEND_CLAIM');
-    return sendTransaction(this.db, async (tx) => {
-      const node = await this.nodes.authenticateIn(
-        tx,
-        auth.org,
-        auth.user,
-        auth.nodeId,
-        auth.token
-      );
-      const receiptKey = {
-        organizationId: auth.org,
-        userId: auth.user,
-        operation: `node-send-claim:${node.id}`,
-        requestId: body.requestId,
-      };
-      const receipt = await tx.sendMutationReceipt.findUnique({
-        where: { organizationId_userId_operation_requestId: receiptKey },
-      });
-      const fingerprint = sendHash(body);
-      if (receipt) {
-        if (receipt.requestHash !== fingerprint)
-          throw new ConflictException('CLAIM_REQUEST_CONFLICT');
-        const recorded = receipt.result as { executionId: string | null };
-        if (!recorded.executionId) return { items: [] };
-        const original = await this.sends.execution(
-          tx,
-          auth.org,
-          recorded.executionId
-        );
-        if (
-          original.status !== 'RESERVED' ||
-          original.leaseExpiresAt <= new Date() ||
-          original.nodeCredentialVersion !== node.credentialVersion
-        )
-          return {
-            items: [],
-            executionId: original.id,
-            status: original.status,
-          };
-        return { items: [this.claimResponse(original, node.nodeId)] };
-      }
-      const executorKey = `${node.id}:${body.requestId}`;
-      const prior = await tx.sendExecution.findFirst({
-        where: { organizationId: auth.org, kind: 'EXTENSION', executorKey },
-      });
-      if (prior) {
-        if (prior.requestHash !== sendHash(body))
-          throw new ConflictException('CLAIM_REQUEST_CONFLICT');
-        if (
-          prior.status !== 'RESERVED' ||
-          prior.leaseExpiresAt <= new Date() ||
-          prior.nodeCredentialVersion !== node.credentialVersion
-        )
-          return { items: [], executionId: prior.id, status: prior.status };
-        return { items: [this.claimResponse(prior, node.nodeId)] };
-      }
-      const sessions = await tx.extensionNodeSession.findMany({
-        where: {
-          extensionNodeId: node.id,
-          organizationId: auth.org,
-          verificationStatus: 'VERIFIED',
-          verificationExpiresAt: { gt: new Date() },
-          integrationId: { not: null },
-        },
-      });
-      const candidates = await tx.post.findMany({
-        where: {
-          organizationId: auth.org,
-          ...(body.rootPostId ? { id: body.rootPostId } : {}),
-          state: 'QUEUE',
-          OR: [
-            {
-              integrationId: {
-                in: sessions.map((session) => session.integrationId!),
-              },
-            },
-            {
-              integrationId: null,
-              accountSelectionMode: 'CURRENT_SESSION',
-              accountResolution: { not: 'PRESELECTION_REQUIRED' },
-            },
-          ],
-          parentPostId: null,
-          deletedAt: null,
-          executionProtocol: 'ACCOUNT_BOUND_V1',
-          publishMethod: 'EXTENSION',
-          publishDate: { lte: new Date() },
-          sendIntent: {
-            action: body.action,
-            status: { in: ['QUEUED', 'RESERVED'] },
-          },
-        },
-        orderBy: { publishDate: 'asc' },
-        take: 25,
-      });
-      for (const post of candidates) {
-        const session = sessions.find(
-          (s) =>
-            s.platform === canonicalControlledPlatform(post.providerIdentifier!) &&
-            (post.integrationId ? s.integrationId === post.integrationId : !s.actorKey)
-        );
-        const capability = (node.capabilities as any)?.[
-          canonicalControlledPlatform(post.providerIdentifier!)
-        ];
-        if (
-          !session ||
-          !capability?.strictAccountVerification ||
-          capability[body.action === 'POST' ? 'post' : 'reply'] !== true
-        )
-          continue;
-        const existing = !post.integrationId
-          ? await this.sends.bindCurrentActorIn(
-              tx,
-              auth.org,
-              post.id,
-              session,
-              new Date()
-            )
-          : await tx.sendIntent.findUniqueOrThrow({
-              where: { id: post.sendIntentId! },
-            });
-        if (!existing?.integrationId || !existing.canonicalAccountKey) continue;
-        if (existing.activeExecutionId) {
-          const owner = await tx.sendExecution.findUniqueOrThrow({
-            where: { id: existing.activeExecutionId },
-          });
-          if (owner.status !== 'RESERVED' || owner.leaseExpiresAt > new Date())
-            continue;
-        }
-        const account = await tx.accountWriteState.findUnique({
-          where: {
-            organizationId_canonicalAccountKey: {
-              organizationId: auth.org,
-              canonicalAccountKey: existing.canonicalAccountKey!,
-            },
-          },
-        });
-        if (
-          !account?.rolloutReady ||
-          account.activeExecutionId ||
-          (account.nextWriteNotBefore &&
-            account.nextWriteNotBefore > new Date())
-        )
-          continue;
-        let execution = await this.sends.reserveIn(
-          tx,
-          auth.org,
-          post.id,
-          'EXTENSION',
-          executorKey,
-          {
-            extensionNodeId: node.id,
-            nodeCredentialVersion: node.credentialVersion,
-            sessionRevision: session.sessionRevision,
-          },
-          new Date()
-        );
-        execution = await tx.sendExecution.update({
-          where: { id: execution.id },
-          data: {
-            leaseTokenHash: hashSecret(sendLease(execution)),
-            requestHash: sendHash(body),
-          },
-        });
-        await tx.sendMutationReceipt.create({
-          data: {
-            ...receiptKey,
-            requestHash: fingerprint,
-            result: { executionId: execution.id },
-          },
-        });
-        return { items: [this.claimResponse(execution, node.nodeId)] };
-      }
-      await tx.sendMutationReceipt.create({
-        data: {
-          ...receiptKey,
-          requestHash: fingerprint,
-          result: { executionId: null },
-        },
-      });
-      return { items: [] };
-    });
+    return claimControlledSend(this.db, this.nodes, this.sends, auth, body,
+      (execution, nodeId) => this.claimResponse(execution, nodeId));
   }
 
   private claimResponse(execution: SendExecution, nodeId: string) {
@@ -341,8 +154,14 @@ export class SendExecutionService {
         !['RESERVED', 'SENDING'].includes(execution.status)
       )
         throw new ConflictException('STALE_SEND_EXECUTION');
-      const challenge = randomBytes(32).toString('base64url');
       const now = new Date();
+      if (segment.challengeIssuedAt && segment.challengeExpiresAt && segment.challengeExpiresAt > now) {
+        const challenge = sendPreflightChallenge(execution, index, segment.challengeIssuedAt);
+        if (segment.challengeHash !== sendHash(challenge))
+          throw new ConflictException('PREFLIGHT_CHALLENGE_RECOVERY_REQUIRED');
+        return { challenge, expiresAt: segment.challengeExpiresAt.toISOString(), serverNow: now.toISOString() };
+      }
+      const challenge = sendPreflightChallenge(execution, index, now);
       await tx.sendSegment.update({
         where: { id: segment.id },
         data: {

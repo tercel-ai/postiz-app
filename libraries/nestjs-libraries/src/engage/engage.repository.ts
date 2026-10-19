@@ -1,3 +1,4 @@
+import { legacyExecutionWhere } from '../extension/legacy-execution';
 import {
   BadRequestException,
   ConflictException,
@@ -6760,7 +6761,7 @@ export class EngageRepository {
         // needs to know whether a removal report is NEW has to read it here,
         // before the write — see markExtensionReplyRemoved.
         removedAt: true,
-        post: { select: { state: true, releaseURL: true } },
+        post: { select: { state: true, releaseURL: true, sendIntentId: true, executionProtocol: true } },
         opportunity: { select: { platform: true } },
       },
     });
@@ -6774,6 +6775,8 @@ export class EngageRepository {
       state: reply.post?.state ?? null,
       releaseURL: reply.post?.releaseURL ?? null,
       platform: reply.opportunity?.platform ?? null,
+      sendIntentId: reply.post?.sendIntentId ?? null,
+      executionProtocol: reply.post?.executionProtocol ?? null,
     };
   }
 
@@ -6820,19 +6823,20 @@ export class EngageRepository {
     });
     if (!reply) throw new NotFoundException('Sent reply not found');
 
-    await this._sentReply.model.engageSentReply.update({
-      where: { id: reply.id },
-      data: { removedAt: new Date(), removedReason: reason },
-    });
-
+    // Guard the Post before recording any legacy reply fact, including during enqueue races.
     await this._post.model.post.update({
-      where: { sendIntentId: null, id: reply.postId },
+      where: { organizationId, sendIntentId: null, id: reply.postId, AND: [legacyExecutionWhere()] },
       data: {
         state: 'PUBLISHED',
         // Only when the extension captured one — never overwrite a stored URL
         // with an empty string.
         ...(url ? { releaseURL: url } : {}),
       },
+    });
+
+    await this._sentReply.model.engageSentReply.update({
+      where: { id: reply.id },
+      data: { removedAt: new Date(), removedReason: reason },
     });
 
     // Best-effort, and last: the removal is recorded either way. updateMany

@@ -282,6 +282,79 @@ describe('independent sending account resources', () => {
     ).rejects.toThrow('ACCOUNT_NOT_ASSIGNED');
   });
 
+  it.each(['POST', 'REPLY'] as const)(
+    'supports explicit then project %s selection without configuring any organization default',
+    async (action) => {
+      const { service, db } = setup();
+      const project = { platform: 'x', action, integrationId: 'x1', revision: 3 };
+      db.projectSendBinding.findUnique.mockResolvedValue(project);
+      db.projectSendBinding.findMany.mockResolvedValue([project]);
+      db.integrationProject.findFirst.mockImplementation(async ({ where }) => ({
+        disabled: false,
+        engageEnabled: true,
+        integration: {
+          ...actor,
+          id: where.integrationId,
+          internalId: where.integrationId === 'explicit-account' ? '456' : '123',
+        },
+      }));
+
+      expect(await service.resolve('org', 'project', 'x', action, 'explicit-account')).toMatchObject({
+        integrationId: 'explicit-account', bindingSource: 'EXPLICIT',
+        targetAccount: { id: '456' },
+      });
+      expect(await service.resolve('org', 'project', 'x', action)).toMatchObject({
+        integrationId: 'x1', bindingSource: 'PROJECT', bindingRevision: 3,
+        targetAccount: { id: '123' },
+      });
+      const defaults = await service.getDefaults('org', 'user', 'project');
+      expect(defaults.accounts.x[action]).toMatchObject({
+        configured: { integrationId: 'x1', revision: 3 },
+        organization: { integrationId: null, revision: 0 },
+        effectiveIntegrationId: 'x1', source: 'PROJECT', blockCode: null,
+      });
+      expect(db.organizationSendBinding.findUnique).not.toHaveBeenCalled();
+      expect(db.organizationSendBinding.create).not.toHaveBeenCalled();
+      expect(db.organizationSendBinding.updateMany).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    ['POST', null],
+    ['REPLY', null],
+    ['POST', { integrationId: null, revision: 4 }],
+    ['REPLY', { integrationId: null, revision: 4 }],
+  ] as const)(
+    'keeps organization defaults optional for %s with an absent or cleared global binding: %j',
+    async (action, global) => {
+      const { service, db } = setup();
+      db.organizationSendBinding.findUnique.mockResolvedValue(global);
+      db.organizationSendBinding.findMany.mockResolvedValue(
+        global ? [{ platform: 'x', action, ...global }] : []
+      );
+      db.projectSendBinding.findUnique.mockResolvedValue({ integrationId: 'x1', revision: 2 });
+      expect(await service.resolveForEnqueueInTransaction(
+        db as any, 'org', 'project', 'x', action, undefined, false
+      )).toMatchObject({ integrationId: 'x1', bindingSource: 'PROJECT' });
+
+      db.projectSendBinding.findUnique.mockResolvedValue(null);
+      await expect(service.resolveForEnqueueInTransaction(
+        db as any, 'org', 'project', 'x', action, undefined, false
+      )).rejects.toThrow('SEND_BINDING_REQUIRED');
+      expect(await service.resolveForEnqueueInTransaction(
+        db as any, 'org', 'project', 'x', action, undefined, true
+      )).toBeNull();
+      const defaults = await service.getDefaults('org', 'user', 'project');
+      expect(defaults.accounts.x[action]).toMatchObject({
+        organization: { integrationId: null, revision: global?.revision ?? 0 },
+        effectiveIntegrationId: null, source: 'UNBOUND', blockCode: 'SEND_BINDING_REQUIRED',
+      });
+      expect(db.integration.findFirst).not.toHaveBeenCalled();
+      expect(db.organizationSendBinding.create).not.toHaveBeenCalled();
+      expect(db.organizationSendBinding.updateMany).not.toHaveBeenCalled();
+    }
+  );
+
   it('reports configured and effective values consistently without N+1 actor queries', async () => {
     const { service, db, projects } = setup();
     db.organizationSendBinding.findMany.mockResolvedValue([

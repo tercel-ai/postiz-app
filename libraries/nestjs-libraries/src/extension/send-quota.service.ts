@@ -387,7 +387,7 @@ export class SendQuotaService {
     const rows = await tx.sendSegment.findMany({
       where: {
         ...segmentWhere,
-        status: { in: ['CONFIRMED', 'AUTHORIZED', 'UNKNOWN'] },
+        status: { in: ['CONFIRMED', 'AUTHORIZED', 'UNKNOWN', 'NOT_SUBMITTED'] },
       },
       include: { execution: { include: { intent: true } } },
     });
@@ -478,12 +478,13 @@ export class SendQuotaService {
     return {
       confirmedUnits:
         legacyCount + relevant.filter((r) => r.status === 'CONFIRMED').length,
-      heldUnits: relevant.filter((r) => r.status !== 'CONFIRMED').length,
+      heldUnits: relevant.filter((r) => ['AUTHORIZED', 'UNKNOWN'].includes(r.status)).length,
       holds: relevant
-        .filter((r) => r.status !== 'CONFIRMED')
+        .filter((r) => ['AUTHORIZED', 'UNKNOWN', 'NOT_SUBMITTED'].includes(r.status))
         .map((r) => ({
           executionId: r.executionId,
           segmentIndex: r.segmentIndex,
+          state: r.status === 'NOT_SUBMITTED' ? 'RELEASED' : 'HELD',
         })),
     };
   }
@@ -536,7 +537,7 @@ export class SendQuotaService {
             ...baseline,
           },
         });
-        // Every inherited hold needs a ledger entry so its original execution can settle it.
+        // Released attempts also need a ledger entry for contradictory late confirmations.
         for (const hold of holds)
           await tx.sendQuotaReservation.create({
             data: {
@@ -545,7 +546,6 @@ export class SendQuotaService {
               ...hold,
               bucketId: bucket.id,
               units: 1,
-              state: 'HELD',
               policyVersion: budget.policyVersion,
             },
           });
@@ -607,17 +607,22 @@ export class SendQuotaService {
       orderBy: { bucketId: 'asc' },
     });
     for (const row of rows) {
-      await tx.sendQuotaBucket.update({
-        where: { id: row.bucketId },
+      const bucket = await tx.sendQuotaBucket.findUnique({ where: { id: row.bucketId } });
+      if (!bucket || bucket.organizationId !== org)
+        throw new ConflictException('QUOTA_LEDGER_INCONSISTENT');
+      const saved = await tx.sendQuotaBucket.updateMany({
+        where: { id: bucket.id, organizationId: org, revision: bucket.revision },
         data: {
           confirmedUnits: { increment: row.units },
           revision: { increment: 1 },
         },
       });
-      await tx.sendQuotaReservation.update({
-        where: { id: row.id },
+      if (saved.count !== 1) throw new ConflictException('SEND_QUOTA_CHANGED');
+      const settled = await tx.sendQuotaReservation.updateMany({
+        where: { id: row.id, organizationId: org, state: 'RELEASED' },
         data: { state: 'COMMITTED', settledAt: now },
       });
+      if (settled.count !== 1) throw new ConflictException('QUOTA_SETTLEMENT_CHANGED');
     }
   }
 

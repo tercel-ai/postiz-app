@@ -504,6 +504,7 @@ model ExtensionNode {
   registeredBy            User @relation(fields: [registeredByUserId], references: [id], onDelete: Restrict)
   sessions                ExtensionNodeSession[]
   reports                 ExtensionNodeReportReceipt[]
+  claimCursors            SendClaimCursor[]
 
   @@unique([organizationId, registeredByUserId, nodeId])
   @@unique([id, organizationId])
@@ -597,6 +598,20 @@ model SendMutationReceipt {
   user            User @relation(fields: [userId], references: [id], onDelete: Restrict)
 
   @@unique([organizationId, userId, operation, requestId])
+}
+
+// Poll progress grants no execution or quota rights; receipts remain immutable.
+model SendClaimCursor {
+  extensionNodeId String
+  organizationId  String
+  action          String
+  afterPublishDate DateTime?
+  afterPostId     String?
+  cycleStartedAt  DateTime @default(now())
+  revision        Int @default(0)
+  extensionNode   ExtensionNode @relation(fields: [extensionNodeId, organizationId], references: [id, organizationId], onDelete: Restrict)
+
+  @@id([extensionNodeId, action])
 }
 
 // One stored content unit owns execution across accounts and transport channels.

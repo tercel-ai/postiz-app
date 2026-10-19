@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PostsRepository } from '../posts.repository';
+import { legacyExecutionWhere } from '../../../../extension/legacy-execution';
 
 // markPostRemoved is the single write this whole path makes: `state` is
 // deliberately left untouched (PUBLISHED stays PUBLISHED — see the field's
@@ -24,7 +25,7 @@ describe('PostsRepository.markPostRemoved', () => {
     await repo.markPostRemoved('p1', 'removed', null);
 
     expect(update).toHaveBeenCalledWith({
-      where: { id: 'p1' },
+      where: { id: 'p1', sendIntentId: null, AND: [legacyExecutionWhere()] },
       data: { removedAt: expect.any(Date), removedReason: 'removed' },
     });
   });
@@ -40,7 +41,7 @@ describe('PostsRepository.markPostRemoved', () => {
     );
 
     expect(update).toHaveBeenCalledWith({
-      where: { id: 'p1' },
+      where: { id: 'p1', sendIntentId: null, AND: [legacyExecutionWhere()] },
       data: {
         removedAt: expect.any(Date),
         removedReason: 'gone',
@@ -56,20 +57,17 @@ describe('PostsRepository.markPostRemoved', () => {
     await repo.markPostRemoved('p1', 'removed', '');
 
     expect(update).toHaveBeenCalledWith({
-      where: { id: 'p1' },
+      where: { id: 'p1', sendIntentId: null, AND: [legacyExecutionWhere()] },
       data: { removedAt: expect.any(Date), removedReason: 'removed' },
     });
   });
 
-  it('scopes the write to id only, no organizationId re-check', async () => {
-    // Mirrors changeState just above it: the caller (markExtensionPostRemoved,
-    // via getPostById(id, org)) is expected to have already org-scoped the
-    // read that led here.
+  it('guards against a concurrent controlled enqueue at the write boundary', async () => {
     const update = vi.fn().mockResolvedValue({});
     const repo = createRepo({ update });
 
     await repo.markPostRemoved('p1', 'removed', null);
 
-    expect(update.mock.calls[0][0].where).toEqual({ id: 'p1' });
+    expect(update.mock.calls[0][0].where).toEqual({ id: 'p1', sendIntentId: null, AND: [legacyExecutionWhere()] });
   });
 });

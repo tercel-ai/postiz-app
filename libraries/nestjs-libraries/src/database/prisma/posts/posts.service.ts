@@ -3,6 +3,7 @@ import { v5 as sendUuid } from 'uuid';
 import { sendHash } from '../../../extension/send-coordination.utils';
 import { SendCoordinatorService, EnqueueSend } from '../../../extension/send-coordinator.service';
 import { isLegacyExecution } from '../../../extension/legacy-execution';
+import { canonicalControlledPlatform, CONTROLLED_SEND_PLATFORMS } from '../../../extension/controlled-platforms';
 import {
   BadRequestException,
   Injectable,
@@ -603,6 +604,8 @@ export class PostsService {
   ): Promise<{ ok: boolean; reason?: string }> {
     const post = await this._postRepository.getPostById(id, orgId);
     if (!post) return { ok: false, reason: 'not-found' };
+    if (post.sendIntentId || !isLegacyExecution(post.executionProtocol))
+      return { ok: false, reason: 'account-bound-protocol-required' };
     // 'removed' (a tombstone was left) and 'gone' (not publicly visible at
     // all) are the extension's two verdicts. Defence in depth, matching
     // engage's markExtensionReplyRemoved: the DTO's @IsIn already refuses
@@ -1470,6 +1473,13 @@ export class PostsService {
           ...(first.integrationId
             ? { integration: { id: first.integrationId } }
             : {}),
+          ...(first.accountSelectionMode === 'EXPLICIT' ||
+              (first.accountSelectionMode === 'INHERIT' && !first.integrationId)
+            ? { accountSelectionMode: first.accountSelectionMode }
+            : {}),
+          ...(Number.isSafeInteger(first.routeRevision)
+            ? { expectedRouteRevision: first.routeRevision }
+            : {}),
           ...(first.providerIdentifier
             ? { providerIdentifier: first.providerIdentifier }
             : {}),
@@ -1935,6 +1945,8 @@ export class PostsService {
           ? await this._sendCoordinator!.prepareCreation(orgId, userId!, body.requestId, post.itemKey ?? String(itemIndex), sendHash({ post, type: body.type, date: body.date, projectId: body.projectId, source: body.source, inter: body.inter, tags: body.tags, shortLink: body.shortLink }), originalId)
           : originalId || sendUuid(sendContext!.contentUnitId!, sendUuid.URL);
         const original = await this._postRepository.getPostById(rootId, orgId);
+        if (!original && post.accountSelectionMode === 'INHERIT' && post.expectedRouteRevision === undefined)
+          post.expectedRouteRevision = 0;
         if (original?.sendIntentId) {
           if (!body.requestId && !sendContext?.contentUnitId) throw new BadRequestException('SEND_INTENT_IMMUTABLE');
           if (original.state === 'QUEUE' && original.publishMethod === 'API') await this.startWorkflow(getSocialTaskQueue(original.providerIdentifier!), rootId, orgId);
@@ -2790,6 +2802,14 @@ export class PostsService {
     ];
     return uniquePlatforms.map((platform) => {
       const hasBoundIntegration = boundPlatforms.has(platform);
+      if (isAccountBoundSendingEnabled()) {
+        const extensionCapable = (CONTROLLED_SEND_PLATFORMS as readonly string[])
+          .includes(canonicalControlledPlatform(platform));
+        return { platform, extensionCapable, apiCapable: false, hasBoundIntegration,
+          methods: extensionCapable ? ['extension' as PublishMethod] : [],
+          defaultMethod: extensionCapable ? 'extension' as PublishMethod : null,
+          ...(!extensionCapable ? { reason: 'CONTROLLED_PLATFORM_UNSUPPORTED' } : {}) };
+      }
       const extensionCapable = isExtensionPublishablePlatform(platform);
       const apiCapable = hasBoundIntegration && !isExtensionOnlyProvider(platform);
       const methods: PublishMethod[] = [];

@@ -302,10 +302,10 @@ describe('node-scoped session reports', () => {
       platforms: [],
     } as any);
     expect(db.extensionNodeSession.upsert).not.toHaveBeenCalled();
-    expect(db.extensionNodeReportReceipt.create).not.toHaveBeenCalled();
+    expect(db.extensionNodeReportReceipt.create).toHaveBeenCalledTimes(1);
     expect(
       db.extensionNode.updateMany.mock.calls[0][0].data
-    ).not.toHaveProperty('lastReportSequence');
+    ).toHaveProperty('lastReportSequence', 1);
   });
 
   it('updates upgraded plugin capabilities without rotating credentials or extending identity verification', async () => {

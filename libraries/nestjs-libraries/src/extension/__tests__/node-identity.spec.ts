@@ -97,6 +97,22 @@ describe('one public node identity with account-scoped state', () => {
       expect(validateSync(plainToInstance(RegisterExtensionNodeDto, { ...request, nodeId: invalid })).some(e => e.property === 'nodeId')).toBe(true);
     expect(validateSync(plainToInstance(RegisterExtensionNodeDto, request))).toHaveLength(0);
   });
+  it('applies monotonic sequence and idempotency rules to empty heartbeats', async () => {
+    const f = fixture();
+    const credentials = await f.register('alice');
+    const body = { reportSequence: 2, checkedAt: new Date().toISOString(), platforms: [] };
+    expect(await f.service.report('org', 'alice', nodeId, credentials.nodeToken, body)).toEqual({ results: [] });
+    const node = f.db.rows('extensionNode')[0];
+    expect(node.lastReportSequence).toBe(2);
+    const seen = node.lastSeenAt;
+    node.lastSeenAt = new Date(0);
+    expect(await f.service.report('org', 'alice', nodeId, credentials.nodeToken, body)).toEqual({ results: [] });
+    expect(node.lastSeenAt).toEqual(new Date(0));
+    await expect(f.service.report('org', 'alice', nodeId, credentials.nodeToken, { ...body, extensionVersion: 'changed' })).rejects.toThrow('REPORT_SEQUENCE_CONFLICT');
+    await expect(f.service.report('org', 'alice', nodeId, credentials.nodeToken, { ...body, reportSequence: 1 })).rejects.toThrow('REPORT_OUT_OF_ORDER');
+    expect(f.db.rows('extensionNodeReportReceipt')).toHaveLength(1);
+    expect(seen).toBeInstanceOf(Date);
+  });
   it('rejects another account execution even when nodeId and the leaked lease are identical', async () => {
     const f = setupSend();
     f.db.seed('userOrganization', { organizationId: 'org', userId: 'bob', disabled: false });
@@ -105,7 +121,7 @@ describe('one public node identity with account-scoped state', () => {
     const a = await nodes.register('org', 'user', { ...request, capabilities } as any);
     const b = await nodes.register('org', 'bob', { ...request, capabilities } as any);
     const ar = await nodes.authenticate('org', 'user', nodeId, a.nodeToken);
-    f.db.seed('extensionNodeSession', { extensionNodeId: ar.id, organizationId: 'org', platform: 'x', integrationId: 'account', verificationStatus: 'VERIFIED', verificationExpiresAt: new Date(Date.now() + 300000), sessionRevision: 1 });
+    f.db.seed('extensionNodeSession', { extensionNodeId: ar.id, organizationId: 'org', platform: 'x', integrationId: 'account', verificationStatus: 'VERIFIED', verificationExpiresAt: new Date(Date.now() + 300000), sessionRevision: 1, accountIdentity: { id: '123', namespace: 'x.rest_id' } });
     await f.create('root', 'EXTENSION');
     const executions = new SendExecutionService(f.db as any, nodes, f.service);
     const auth = { org: 'org', user: 'user', nodeId, token: a.nodeToken };

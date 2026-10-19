@@ -22,6 +22,24 @@ function budget(extra: Partial<SendBudget> = {}): SendBudget {
   };
 }
 describe('quota reservation ledger', () => {
+  it('corrects a late confirmation in budgets created after the original release exactly once', async () => {
+    const db = memorySendDatabase();
+    const q = new SendQuotaService();
+    db.seed('sendExecution', {
+      id: 'old', organizationId: 'org', projectId: 'project', platform: 'x', action: 'REPLY',
+    });
+    db.seed('sendSegment', {
+      executionId: 'old', organizationId: 'org', segmentIndex: 0,
+      authorizedAt: now, status: 'NOT_SUBMITTED',
+    });
+    await db.$transaction((tx: any) => q.reserve(tx, 'org', 'new', 0, [budget({ limit: 2 })], now));
+    expect(db.rows('sendQuotaBucket')[0]).toMatchObject({ confirmedUnits: 0, heldUnits: 1 });
+    await db.$transaction((tx: any) => q.correctLateConfirmation(tx, 'org', 'old', 0, now));
+    await db.$transaction((tx: any) => q.correctLateConfirmation(tx, 'org', 'old', 0, now));
+    expect(db.rows('sendQuotaBucket')[0]).toMatchObject({ confirmedUnits: 1, heldUnits: 1 });
+    await expect(db.$transaction((tx: any) => q.reserve(tx, 'org', 'third', 0, [budget({ limit: 2 })], now)))
+      .rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+  });
   it('rolls back every budget when the final shared budget is exhausted', async () => {
     const db = memorySendDatabase();
     const q = new SendQuotaService();

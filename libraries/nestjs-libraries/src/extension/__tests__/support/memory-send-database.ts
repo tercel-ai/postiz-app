@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-// Deterministic transaction harness. PostgreSQL isolation is validated separately.
+// Deterministic transaction harness; it does not model PostgreSQL SSI or unique-index contention.
 export function memorySendDatabase() {
   let tables: Record<string, any[]> = {};
   let tail = Promise.resolve();
@@ -76,6 +76,11 @@ export function memorySendDatabase() {
   function update(row: any, data: any) {
     for (const [key, value] of Object.entries(data)) {
       if (value === undefined) continue;
+      if (key === 'integration' && (value as any)?.disconnect === true) {
+        row.integrationId = null;
+        row.integration = null;
+        continue;
+      }
       row[key] =
         value && typeof value === 'object' && 'increment' in value
           ? (row[key] ?? 0) + (value as any).increment
@@ -148,8 +153,22 @@ export function memorySendDatabase() {
             return row;
           },
           findMany: async (args: any = {}) =>
-            find(args).map((row) => output(row, args)),
+            find(args).sort((a, b) => {
+              const order = args.orderBy ? (Array.isArray(args.orderBy) ? args.orderBy : [args.orderBy]) : [];
+              for (const item of order) {
+                const [key, direction] = Object.entries(item)[0];
+                if (a[key] > b[key]) return direction === 'desc' ? -1 : 1;
+                if (a[key] < b[key]) return direction === 'desc' ? 1 : -1;
+              }
+              return 0;
+            }).slice(args.skip ?? 0, args.take === undefined ? undefined : (args.skip ?? 0) + args.take)
+              .map((row) => output(row, args)),
           count: async (args: any) => find(args).length,
+          deleteMany: async (args: any) => {
+            const removed = find(args);
+            tables[name] = rows(name).filter(row => !removed.includes(row));
+            return { count: removed.length };
+          },
           create: async ({ data }: any) => {
             const row = {
               ...defaults(),
@@ -174,6 +193,8 @@ export function memorySendDatabase() {
           upsert: async ({ where, create, update: data }: any) => {
             const row = find({ where })[0];
             if (row) return update(row, data);
+            if (name === 'post' && create.id && rows(name).some(row => row.id === create.id))
+              throw Object.assign(new Error('Unique post identity conflict'), { code: 'P2002' });
             const next = { ...defaults(), ...structuredClone(create) };
             rows(name).push(next);
             return output(next);

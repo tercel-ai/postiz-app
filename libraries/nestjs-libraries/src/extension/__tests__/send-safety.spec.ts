@@ -186,7 +186,7 @@ describe('execution safety across channels and recoveries', () => {
     expect(db.rows('sendOutcomeEvent')).toHaveLength(2);
     await expect(
       service.authorizeApiSegment('org', current.id, 0, actor, later)
-    ).rejects.toThrow('STALE_SEND_EXECUTION');
+    ).rejects.toThrow('ACCOUNT_COORDINATION_AUDIT_REQUIRED');
   });
   it('rejects request reuse with different result facts without rolling back the original', async () => {
     const { service, create, db } = setupSend();
@@ -210,6 +210,69 @@ describe('execution safety across channels and recoveries', () => {
       )
     ).rejects.toThrow('SEND_OUTCOME_EVENT_CONFLICT');
     expect(db.rows('sendIntent')[0].status).toBe('SUCCEEDED');
+  });
+  it.each(['root', 'second'])('keeps the account quarantined when the new owner %s settles after a conflict', async (root) => {
+    const { service, create, db, quotas } = setupSend();
+    quotas.resolve.mockResolvedValue({ gapMs: 0, budgets: [] });
+    await create();
+    await create('second');
+    await create('third');
+    const old = await service.reserveApi('org', 'root', 'old', now);
+    await service.authorizeApiSegment('org', old.id, 0, actor, now);
+    const later = new Date(now.getTime() + 31_000);
+    await service.apiOutcome('org', old.id, 0, {
+      status: 'definitely_not_submitted', eventId: 'stop-old', stopped: true, evidence: 'executor stopped',
+    }, later);
+    if (root === 'root') await service.retry('org', 'root', 'user', later);
+    const owner = await service.reserveApi('org', root, 'owner', later);
+    await service.authorizeApiSegment('org', owner.id, 0, actor, later);
+    await expect(service.apiOutcome('org', old.id, 0, {
+      status: 'confirmed', eventId: 'contradiction', platformId: 'old-result',
+    }, later)).rejects.toThrow('SEND_OUTCOME_CONFLICT');
+    expect(db.rows('accountWriteState')[0]).toMatchObject({
+      activeExecutionId: owner.id, rolloutReady: false,
+    });
+    expect(db.rows('sendExecution').find((e: any) => e.id === owner.id)?.status).toBe('RECONCILING');
+    await service.apiOutcome('org', owner.id, 0, {
+      status: 'confirmed', eventId: 'owner-result', platformId: 'new-result',
+    }, later);
+    expect(db.rows('post').find((p: any) => p.id === 'root')?.releaseId).toBe('old-result');
+    if (root === 'root') {
+      await service.apiOutcome('org', owner.id, 0, {
+        status: 'confirmed', eventId: 'other-url', platformId: 'new-result', url: 'https://x.com/new-result',
+      }, later);
+      await expect(service.apiOutcome('org', owner.id, 0, {
+        status: 'confirmed', eventId: 'other-removal', platformId: 'new-result', removal: 'gone', evidence: 'other resource gone',
+      }, later)).rejects.toThrow('CONFIRMED_REMOVAL_EVIDENCE_REQUIRED');
+      expect(db.rows('post').find((p: any) => p.id === root)?.releaseURL).toBeNull();
+    }
+    const third = await service.reserveApi('org', 'third', 'third', later);
+    await expect(service.authorizeApiSegment('org', third.id, 0, actor, later))
+      .rejects.toThrow('ACCOUNT_COORDINATION_AUDIT_REQUIRED');
+    expect(db.rows('accountWriteState')[0].rolloutReady).toBe(false);
+  });
+  it('preserves a completed retry when an older contradictory success arrives afterwards', async () => {
+    const { service, create, db } = setupSend();
+    await create();
+    const old = await service.reserveApi('org', 'root', 'old', now);
+    await service.authorizeApiSegment('org', old.id, 0, actor, now);
+    const later = new Date(now.getTime() + 31_000);
+    await service.apiOutcome('org', old.id, 0, {
+      status: 'definitely_not_submitted', eventId: 'stop', stopped: true, evidence: 'executor stopped',
+    }, later);
+    await service.retry('org', 'root', 'user', later);
+    const current = await service.reserveApi('org', 'root', 'current', later);
+    await service.authorizeApiSegment('org', current.id, 0, actor, later);
+    await service.apiOutcome('org', current.id, 0, {
+      status: 'confirmed', eventId: 'completed', platformId: 'current-result', url: 'https://x.com/current-result',
+    }, later);
+    const contradictory = { status: 'confirmed' as const, eventId: 'contradictory', platformId: 'old-result' };
+    for (let replay = 0; replay < 2; replay++)
+      await expect(service.apiOutcome('org', old.id, 0, contradictory, later)).rejects.toThrow('SEND_OUTCOME_CONFLICT');
+    expect(db.rows('post')[0]).toMatchObject({ releaseId: 'current-result', releaseURL: 'https://x.com/current-result' });
+    expect(db.rows('accountWriteState')[0].rolloutReady).toBe(false);
+    expect(db.rows('sendQuotaBucket')[0]).toMatchObject({ heldUnits: 0, confirmedUnits: 2 });
+    expect(db.rows('sendQuotaReservation').map((r: any) => r.state)).toEqual(['COMMITTED', 'COMMITTED']);
   });
   it('shares a canonical actor key across OAuth and plugin integration aliases', () => {
     expect(

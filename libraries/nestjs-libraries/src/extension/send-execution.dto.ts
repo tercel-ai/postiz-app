@@ -23,6 +23,7 @@ export class SendOutcomeDto {
   @IsOptional() @IsString() @MaxLength(2048) url?: string;
   @IsOptional() @IsBoolean() stopped?: boolean;
   @IsOptional() @IsString() @MaxLength(4096) evidence?: string;
+  @IsOptional() @IsIn(['removed', 'gone']) removal?: 'removed' | 'gone';
 }
 export class EnqueueSendDto {
   @IsUUID() rootPostId: string;

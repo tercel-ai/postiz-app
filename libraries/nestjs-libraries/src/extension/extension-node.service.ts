@@ -336,25 +336,6 @@ export class ExtensionNodeService {
                 : {}),
             }
           : {};
-      if (!body.platforms.length) {
-        const updated = await tx.extensionNode.updateMany({
-          where: {
-            id: node.id,
-            status: 'ACTIVE',
-            lastReportSequence: node.lastReportSequence,
-          },
-          data: {
-            lastSeenAt: now,
-            ...metadata,
-            ...(Object.keys(metadata).length
-              ? { lastReportSequence: body.reportSequence }
-              : {}),
-          },
-        });
-        if (updated.count !== 1)
-          throw new ConflictException('NODE_STATE_CHANGED');
-        return { results: [] };
-      }
       const sequence = body.reportSequence!;
       const receipt = await tx.extensionNodeReportReceipt.findUnique({
         where: {
@@ -368,13 +349,13 @@ export class ExtensionNodeService {
       }
       if (sequence <= node.lastReportSequence)
         throw new ConflictException('REPORT_OUT_OF_ORDER');
-      const accounts = await tx.integration.findMany({
+      const accounts = body.platforms.length ? await tx.integration.findMany({
         where: {
           organizationId: org,
           providerIdentifier: { in: [...new Set(body.platforms.map(observationProvider))] },
           deletedAt: null,
         },
-      });
+      }) : [];
       const results = [];
       for (const entry of body.platforms) {
         const actorKey = sessionActorKey({ id: entry.id, namespace: entry.identityNamespace });

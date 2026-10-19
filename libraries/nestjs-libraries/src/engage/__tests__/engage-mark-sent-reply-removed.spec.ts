@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { NotFoundException } from '@nestjs/common';
 import { EngageRepository } from '../engage.repository';
+import { legacyExecutionWhere } from '../../extension/legacy-execution';
 
 // markSentReplyRemoved is the commit-time ALTERNATIVE to publishExtensionReply:
 // the extension posted successfully, a logged-out check found the platform had
@@ -98,7 +99,7 @@ describe('EngageRepository.markSentReplyRemoved', () => {
     await repo.markSentReplyRemoved('org-1', 'r1', 'removed', null);
 
     expect(postUpdate).toHaveBeenCalledWith({
-      where: { id: 'p1', sendIntentId: null },
+      where: { id: 'p1', organizationId: 'org-1', sendIntentId: null, AND: [legacyExecutionWhere()] },
       data: { state: 'PUBLISHED' },
     });
   });
@@ -114,7 +115,7 @@ describe('EngageRepository.markSentReplyRemoved', () => {
     );
 
     expect(postUpdate).toHaveBeenCalledWith({
-      where: { id: 'p1', sendIntentId: null },
+      where: { id: 'p1', organizationId: 'org-1', sendIntentId: null, AND: [legacyExecutionWhere()] },
       data: {
         state: 'PUBLISHED',
         releaseURL: 'https://www.reddit.com/r/test/comments/a/b/c1/',
@@ -130,7 +131,7 @@ describe('EngageRepository.markSentReplyRemoved', () => {
     await repo.markSentReplyRemoved('org-1', 'r1', 'removed', '');
 
     expect(postUpdate).toHaveBeenCalledWith({
-      where: { id: 'p1', sendIntentId: null },
+      where: { id: 'p1', organizationId: 'org-1', sendIntentId: null, AND: [legacyExecutionWhere()] },
       data: { state: 'PUBLISHED' },
     });
   });

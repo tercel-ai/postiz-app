@@ -135,5 +135,5 @@ export function setupSend() {
       now,
     });
   };
-  return { db, service, create, bindings, quotas };
+  return { db, service, create, bindings, quotas, policies, projects };
 }

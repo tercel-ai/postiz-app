@@ -1,5 +1,7 @@
 # OPTIONAL First Binding and Social Account Identity Unification — Implementation Notes
 
+Organization-wide sending defaults are optional and independent of Post/Reply selections and Project defaults. When the global default is absent or cleared, selection is explicit Post/Reply account → Project default. If neither is set, REQUIRED blocks enqueue and OPTIONAL may await verified first binding; the server does not create a global default or silently select an arbitrary account. POST and REPLY defaults are independent, and queued account snapshots are not changed by clearing a default.
+
 Date: 2026-10-16. Corresponds to [design doc §14.7](project-account-extension-node-binding-design.md#147-optional-first-binding-and-identity-unification-phase-2026-10-16).
 
 The initial phase connected OPTIONAL first binding, X/Reddit same-namespace identity reuse, and protected verification of historical OAuth identities; subsequently extension-controlled publishing/replying was completed for seven platforms, with the latest scope in design doc §14.9. **New controlled sends go through the extension only; OAuth API posting is currently unsupported.** The deployment master switch ACCOUNT_BOUND_SENDING_ENABLED and the actor rolloutReady flag remain off by default; no database migration was executed and no real social send occurred.
@@ -149,3 +151,9 @@ A legacy OAuth company account is unified through the original identity verifica
 
 
 Final verification for this phase: main repo full non-frozen suite 4098 passed, 0 failed, 96 skipped; standalone extension 2596 passed, 0 failed. backend/orchestrator/extension TypeScript and Chrome/Firefox temp-directory builds all passed. Targeted line coverage for the company actor module is 100% and branches 94.33%. Only the new migration is prepared; no database was connected, no SQL executed and no real content sent.
+
+## Claim and Sending Boundary Follow-Up (2026-10-19)
+
+See [design §14.15](project-account-extension-node-binding-design.md#1415-claim-fairness-and-sending-boundary-corrections-2026-10-19) for the corrected claim pagination, scoped persistent cursor, transaction-time authorization, policy fail-closed behavior, preflight replay, authenticated removal facts, draft INHERIT save contract, and extension-only capability projection. These changes preserve the original content intent, one-shot permit CAS, UNKNOWN protection and quota ledger. The new cursor migration is prepared only and must be applied by the user/deployment pipeline before enabling matching code. This follow-up does not complete the UI, generation-stage deduplication, queued rebinding, outbox or real-platform/database acceptance work above.
+
+The second review in [design §14.16](project-account-extension-node-binding-design.md#1416-second-review-of-claims-retries-and-settlement-2026-10-19) additionally fixes persistent account quarantine after contradictory receipts, late-confirmation accounting in newly initialized quota buckets, and monotonic published-resource projection across conflicting attempts. Conflicts revoke rolloutReady until a new user/deployment audit; ordinary result callbacks cannot restore it. This adds no migration and does not replace real PostgreSQL/browser acceptance or platform idempotency.

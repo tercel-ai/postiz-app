@@ -50,6 +50,17 @@ export function normalizedActor(namespace: string, id: string): string {
     ? value.replace(/^t2_/i, '').toLowerCase()
     : value;
 }
+
+export function sendPreflightChallenge(
+  execution: Parameters<typeof sendLease>[0] & { routeRevision: number; contentRevision: number },
+  index: number,
+  issuedAt: Date
+) {
+  return createHmac('sha256', sendLease(execution))
+    .update(JSON.stringify(['preflight-v1', index, execution.routeRevision,
+      execution.contentRevision, issuedAt.toISOString()]))
+    .digest('base64url');
+}
 export function canonicalSendAccount(
   org: string,
   provider: string,

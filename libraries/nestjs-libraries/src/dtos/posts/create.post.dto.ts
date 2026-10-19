@@ -7,6 +7,9 @@ import {
   IsDefined,
   IsIn,
   IsNumber,
+  IsInt,
+  Min,
+  Max,
   IsOptional,
   IsString,
   MinLength,
@@ -57,6 +60,12 @@ export class PostContent {
 export class Post {
   @IsOptional() @IsString() @MaxLength(128)
   itemKey?: string;
+
+  @IsOptional() @IsIn(['EXPLICIT', 'INHERIT'])
+  accountSelectionMode?: 'EXPLICIT' | 'INHERIT';
+
+  @IsOptional() @IsInt() @Min(0) @Max(2147483646)
+  expectedRouteRevision?: number;
 
   // Optional: `Post.integrationId` is nullable, and operation-plan posts for a
   // platform the org has NOT connected are materialized without one — they are

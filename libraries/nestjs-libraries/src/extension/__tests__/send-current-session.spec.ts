@@ -286,7 +286,7 @@ it('rolls back first binding if reservation preparation fails in the same transa
   f.seedActor();
   await f.enqueue();
   f.db.rows('post')[0].image = '[{}]';
-  await expect(f.claim()).rejects.toThrow('CONTROLLED_MEDIA_NOT_RESOLVED');
+  expect((await f.claim()).items).toEqual([]);
   expect(f.db.rows('sendIntent')[0]).toMatchObject({
     integrationId: null,
     routeRevision: 0,
@@ -310,8 +310,19 @@ it.each([true, false])(
         requestId: 'tighten',
         value: { mode: 'REQUIRED' },
       });
+    // Invocation order is not lock order: discovery now precedes the short binding transaction.
+    let locked!: () => void;
+    const bindingLock = new Promise<void>((resolve) => { locked = resolve; });
+    const lock = f.policies.lockSystemInTransaction.bind(f.policies);
+    vi.spyOn(f.policies, 'lockSystemInTransaction').mockImplementation(async (tx) => {
+      const result = await lock(tx);
+      locked();
+      return result;
+    });
+    const claiming = bindingFirst ? f.claim() : null;
+    if (bindingFirst) await bindingLock;
     const results = bindingFirst
-      ? await Promise.all([f.claim(), tighten()])
+      ? await Promise.all([claiming!, tighten()])
       : await Promise.all([tighten(), f.claim()]);
     const claim: any = results[bindingFirst ? 0 : 1];
     expect(claim.items).toHaveLength(bindingFirst ? 1 : 0);
