@@ -1,3 +1,5 @@
+import { SendModeService } from '../../../extension/send-mode.service';
+import { sendHash } from '../../../extension/send-coordination.utils';
 import { Optional } from '@nestjs/common';
 import { SendCoordinatorService } from '../../../extension/send-coordinator.service';
 import {
@@ -84,7 +86,8 @@ export class IntegrationService {
     @Inject(forwardRef(() => RefreshIntegrationService))
     private _refreshIntegrationService: RefreshIntegrationService,
     private _temporalService: TemporalService,
-    @Optional() private _sendCoordinator?: SendCoordinatorService
+    @Optional() private _sendCoordinator?: SendCoordinatorService,
+    @Optional() private _sendModes?: SendModeService
   ) {}
 
   async changeActiveCron(orgId: string) {
@@ -1067,7 +1070,7 @@ export class IntegrationService {
     if (!getIntegration || !originalIntegration) {
       return;
     }
-    await this._sendCoordinator?.assertLegacyAccount(data.orgId, getIntegration.id);
+    if (!this._sendModes) await this._sendCoordinator?.assertLegacyAccount(data.orgId, getIntegration.id);
 
     const getAllInternalPlugs = this._integrationManager
       .getInternalPlugs(getIntegration.providerIdentifier)
@@ -1081,7 +1084,8 @@ export class IntegrationService {
       getIntegration.providerIdentifier
     );
 
-    await runWithBizUsage(
+    const work = async () => {
+      await runWithBizUsage(
       { organizationId: data.orgId, bizCategory: BIZ_USAGE.AUTO_PLUG },
       async () =>
         // @ts-ignore
@@ -1091,8 +1095,17 @@ export class IntegrationService {
           data.post,
           data.information
         )
-    );
-
+      );
+    };
+    if (this._sendModes) return this._sendModes.autonomousEffect(data.orgId,
+      `internal-plug:${data.originalIntegration}:${data.integration}:${data.post}:${data.plugName}`,
+      { action: 'INTERNAL_PLUG', integrationId: data.integration, originalIntegrationId: data.originalIntegration,
+        postId: data.post, plugName: data.plugName, informationHash: sendHash(data.information),
+        ...(['linkedin', 'linkedin-page'].includes(getIntegration.providerIdentifier) && getAllInternalPlugs.methodName === 'addComment'
+          ? { quotaWriteKind: 'REPLY', quotaUnits: 1 }
+          : ['linkedin', 'linkedin-page'].includes(getIntegration.providerIdentifier) && getAllInternalPlugs.methodName === 'repostPostUsers'
+            ? { quotaWriteKind: 'WRITE', quotaUnits: 1 } : {}) }, work);
+    await work();
     return;
   }
 
@@ -1108,12 +1121,12 @@ export class IntegrationService {
       return true;
     }
 
-    await this._sendCoordinator?.assertLegacyAccount(getPlugById.integration.organizationId, getPlugById.integration.id);
+    if (!this._sendModes) await this._sendCoordinator?.assertLegacyAccount(getPlugById.integration.organizationId, getPlugById.integration.id);
     const integration = this._integrationManager.getSocialIntegration(
       getPlugById.integration.providerIdentifier
     );
 
-    const process = await runWithBizUsage(
+    const work = async () => !!(await runWithBizUsage(
       {
         organizationId: getPlugById.integration.organizationId,
         bizCategory: BIZ_USAGE.AUTO_REPOST,
@@ -1128,7 +1141,17 @@ export class IntegrationService {
             return all;
           }, {})
         )
-    );
+    ));
+    const process = this._sendModes ? await this._sendModes.autonomousEffect(
+      getPlugById.integration.organizationId,
+      `plug:${data.plugId}:${data.postId}:${data.currentRun ?? data.delay}`,
+      { action: 'PLUG', integrationId: getPlugById.integration.id, plugId: data.plugId,
+        postId: data.postId, run: data.currentRun ?? data.delay, plugFunction: getPlugById.plugFunction,
+        configurationHash: sendHash(getPlugById.data),
+        ...(['x', 'threads', 'linkedin-page'].includes(getPlugById.integration.providerIdentifier) && getPlugById.plugFunction === 'autoPlugPost'
+          ? { quotaWriteKind: 'REPLY', quotaUnits: 1 }
+          : ['x', 'linkedin-page'].includes(getPlugById.integration.providerIdentifier) && getPlugById.plugFunction === 'autoRepostPost'
+            ? { quotaWriteKind: 'WRITE', quotaUnits: 1 } : {}) }, work) : await work();
 
     if (process) {
       return true;

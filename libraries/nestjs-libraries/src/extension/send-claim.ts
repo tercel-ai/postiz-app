@@ -21,7 +21,7 @@ export async function claimControlledSend<T>(
   body: Claim,
   response: (execution: SendExecution, nodeId: string) => T
 ): Promise<{ items: T[]; executionId?: string; status?: string }> {
-  sends.enabled();
+  await sends.enabled(auth.org);
   if (!body.requestId?.trim() || body.requestId.length > 128 || !['POST', 'REPLY'].includes(body.action))
     throw new BadRequestException('INVALID_SEND_CLAIM');
   const fingerprint = sendHash(body);
@@ -50,6 +50,7 @@ export async function claimControlledSend<T>(
     return { items: [response(original, node.nodeId)] };
   };
   const initial = await sendTransaction(db, async (tx) => {
+    await sends.assertControlledIn(tx, auth.org);
     const node = await nodes.authenticateIn(tx, auth.org, auth.user, auth.nodeId, auth.token);
     const replay = await replayIn(tx, node);
     if (replay) return { replay };
@@ -145,6 +146,7 @@ export async function claimControlledSend<T>(
         projectVerdicts.set(candidate.projectId, await sends.claimProjectActive(auth.org, candidate.projectId));
       if (!projectVerdicts.get(candidate.projectId)) continue;
       const result = await sendTransaction(db, async (tx) => {
+        await sends.assertControlledIn(tx, auth.org);
         const currentNode = await nodes.authenticateIn(tx, auth.org, auth.user, auth.nodeId, auth.token);
         const replay = await replayIn(tx, currentNode);
         if (replay) return replay;
@@ -188,7 +190,8 @@ export async function claimControlledSend<T>(
     if (body.rootPostId) break;
   }
   return sendTransaction(db, async (tx) => {
-    const currentNode = await nodes.authenticateIn(tx, auth.org, auth.user, auth.nodeId, auth.token);
+    await sends.assertControlledIn(tx, auth.org);
+        const currentNode = await nodes.authenticateIn(tx, auth.org, auth.user, auth.nodeId, auth.token);
     const replay = await replayIn(tx, currentNode);
     if (replay) return replay;
     await sends.verifyPolicyIn(tx);

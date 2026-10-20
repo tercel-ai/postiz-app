@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { SEND_ACCOUNT_POLICY_KEY } from '../../../extension/send-policy.constants';
+import { SEND_MODE_SYSTEM_KEY, SEND_MODE_ORGANIZATION_PREFIX } from '../../../extension/send-mode.service';
 import { SettingsRepository } from './settings.repository';
 
 @Injectable()
@@ -21,11 +22,13 @@ export class SettingsService {
     }
   ) {
     if (key === SEND_ACCOUNT_POLICY_KEY) throw new BadRequestException('SEND_POLICY_MANAGED_SEPARATELY');
+    if (key === SEND_MODE_SYSTEM_KEY || key.startsWith(SEND_MODE_ORGANIZATION_PREFIX)) throw new BadRequestException('SEND_MODE_MANAGED_SEPARATELY');
     return this._settingsRepository.set(key, value, options);
   }
 
   async delete(key: string) {
     if (key === SEND_ACCOUNT_POLICY_KEY) throw new BadRequestException('SEND_POLICY_MANAGED_SEPARATELY');
+    if (key === SEND_MODE_SYSTEM_KEY || key.startsWith(SEND_MODE_ORGANIZATION_PREFIX)) throw new BadRequestException('SEND_MODE_MANAGED_SEPARATELY');
     return this._settingsRepository.delete(key);
   }
 

@@ -1,3 +1,4 @@
+import { SendModeService } from '../extension/send-mode.service';
 import { CONTROLLED_SEND_PLATFORMS } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
 import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
 import { AutomaticSendProducerService } from '../extension/automatic-send-producer.service';
@@ -264,7 +265,8 @@ export class EngageAutoReplyService implements OnModuleInit {
     // which is the correct degradation for a side channel.
     private _aiseeNotificationClient?: AiseeNotificationClient,
     private _sendCoordinator?: SendCoordinatorService,
-    private _automaticSends?: AutomaticSendProducerService
+    private _automaticSends?: AutomaticSendProducerService,
+    private _sendModes?: SendModeService
   ) {}
 
   /**
@@ -463,7 +465,10 @@ export class EngageAutoReplyService implements OnModuleInit {
    * day by construction — no separate scheduling clock needed.
    */
   async getDueReplies(org: Organization, now = new Date(), options?: { coordinated: boolean }): Promise<DueReply[]> {
-    const coordinated = options?.coordinated === true && isAccountBoundSendingEnabled();
+    const controlled = this._sendModes ? await this._sendModes.isControlled(org.id) : isAccountBoundSendingEnabled();
+    const coordinated = options?.coordinated === true && controlled;
+    if (options?.coordinated && !controlled) throw new Error('SEND_MODE_CONTROLLED_REQUIRED');
+    if (!coordinated && this._sendCoordinator && (await this._sendCoordinator.legacyBlockedPlatforms(org.id)).length) return [];
     // All resolved ONCE. The window, the floor and the day's ceiling are
     // consulted per (project × platform) below, and each of these is a settings
     // query — reading them inside the loop was an N+1 on global admin values.

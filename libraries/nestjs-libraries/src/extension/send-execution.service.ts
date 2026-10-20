@@ -91,8 +91,9 @@ export class SendExecutionService {
   }
 
   async renew(auth: NodeAuthentication, id: string, lease: string) {
-    this.sends.enabled();
+    await this.sends.enabled(auth.org);
     return sendTransaction(this.db, async (tx) => {
+      await this.sends.assertControlledIn(tx, auth.org);
       const { execution } = await this.authenticate(tx, auth, id, lease);
       const now = new Date();
       const intent = await tx.sendIntent.findUniqueOrThrow({
@@ -130,8 +131,9 @@ export class SendExecutionService {
     index: number,
     lease: string
   ) {
-    this.sends.enabled();
+    await this.sends.enabled(auth.org);
     return sendTransaction(this.db, async (tx) => {
+      await this.sends.assertControlledIn(tx, auth.org);
       const { execution } = await this.authenticate(tx, auth, id, lease);
       const segment = await tx.sendSegment.findUnique({
         where: {
@@ -187,9 +189,10 @@ export class SendExecutionService {
     index: number,
     lease: string
   ) {
-    this.sends.enabled();
+    await this.sends.enabled(auth.org);
     await this.sends.assertProjectSendActive(auth.org, id);
     return sendTransaction(this.db, async (tx) => {
+      await this.sends.assertControlledIn(tx, auth.org);
       const { execution, node } = await this.authenticate(tx, auth, id, lease);
       const segment = await tx.sendSegment.findUniqueOrThrow({
         where: {

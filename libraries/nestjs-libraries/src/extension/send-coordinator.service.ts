@@ -1,4 +1,4 @@
-import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { SendModeService } from './send-mode.service';
 import { CONTROLLED_SEND_PLATFORMS, canonicalControlledPlatform, controlledReplySettings, hasControlledReplyTarget } from './controlled-platforms';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { hashSecret } from './extension-node.protocol';
@@ -72,12 +72,26 @@ export class SendCoordinatorService {
     private readonly bindings: SendBindingService,
     private readonly policies: SendPolicyService,
     private readonly projects: ProjectValidationService,
-    private readonly quotas: SendQuotaService
+    private readonly quotas: SendQuotaService,
+    private readonly modes: SendModeService = new SendModeService(db)
   ) {}
 
-  enabled() {
-    if (!isAccountBoundSendingEnabled())
-      throw new ServiceUnavailableException('SEND_COORDINATION_NOT_ENABLED');
+  async enabled(org: string) {
+    const state = await this.modes.stateIn(this.db, org);
+    if (state.mode !== 'CONTROLLED') throw new ConflictException('SEND_MODE_CONTROLLED_REQUIRED');
+  }
+
+  isControlled(org: string, tx?: Prisma.TransactionClient) { return this.modes.isControlled(org, tx); }
+
+  assertControlledIn(tx: Prisma.TransactionClient, org: string) {
+    return this.modes.assertControlledIn(tx, org);
+  }
+
+  async autonomousTransaction<T>(org: string, work: (tx: Prisma.TransactionClient) => Promise<T>) {
+    return sendTransaction(this.db, async tx => {
+      await this.modes.assertAutonomousIn(tx, org);
+      return work(tx);
+    });
   }
 
   private async assertMember(tx: Prisma.TransactionClient, org: string, user: string) {
@@ -114,7 +128,7 @@ export class SendCoordinatorService {
       const segments = executions.length ? await tx.sendSegment.findMany({
         where: { organizationId: org, executionId: { in: executions.map(e => e.id) } }, orderBy: { segmentIndex: 'asc' },
       }) : [];
-      return sendBusinessSummary(root, intent, executions, segments, operationBlockCode);
+      return sendBusinessSummary(root, intent, executions, segments, operationBlockCode, await this.isControlled(org, tx));
     });
   }
 
@@ -224,7 +238,7 @@ export class SendCoordinatorService {
   }
 
   async enqueue(org: string, rootId: string, options: EnqueueSend) {
-    this.enabled();
+    await this.enabled(org);
     const now = options.now ?? new Date();
     const root = await this.db.post.findFirst({
       where: { id: rootId, organizationId: org, deletedAt: null },
@@ -233,6 +247,7 @@ export class SendCoordinatorService {
       throw new BadRequestException('SEND_PROJECT_REQUIRED');
     await this.projects.assertProjectActive(org, root.projectId);
     return sendTransaction(this.db, async (tx) => {
+      await this.assertControlledIn(tx, org);
       const posts = await this.chain(tx, org, rootId);
       const first = posts[0];
       const selection = options.selection;
@@ -477,6 +492,7 @@ export class SendCoordinatorService {
     now: Date
   ) {
     // Policy writers and first binding lock in the same order. Bound tasks never acquire this global lock.
+    await this.assertControlledIn(tx, org);
     const current = await this.policies.lockSystemInTransaction(tx);
     const posts = await this.chain(tx, org, rootId);
     const root = posts[0];
@@ -607,8 +623,8 @@ export class SendCoordinatorService {
 
   async enqueueSavedReply(org: string, userId: string, sentReplyId: string,
     options: import('./send-execution.dto').QueueStoredReplyDto = { sentReplyId }) {
-    this.enabled();
     await this.assertMember(this.db, org, userId);
+    await this.enabled(org);
     const reply = await this.db.engageSentReply.findFirst({
       where: { id: sentReplyId, organizationId: org },
     });
@@ -658,6 +674,7 @@ export class SendCoordinatorService {
     )
       throw new BadRequestException('SEND_REQUEST_ID_REQUIRED');
     return sendTransaction(this.db, async (tx) => {
+      await this.assertControlledIn(tx, org);
       const key = {
         organizationId: org,
         userId: user,
@@ -699,65 +716,19 @@ export class SendCoordinatorService {
     }));
   }
 
-  async assertLegacyAccount(org: string, integrationId: string) {
-    const integration = await this.db.integration.findFirst({
-      where: { organizationId: org, id: integrationId },
-    });
-    const aliases = await this.db.accountWriteState.findMany({
-      where: { organizationId: org },
-    });
-    if (
-      aliases.some(
-        (row) =>
-          row.integrationId === integrationId ||
-          row.identityIntegrationIds?.includes(integrationId) ||
-          (integration?.identityNamespace &&
-            row.canonicalAccountKey ===
-              canonicalSendAccount(
-                org,
-                integration.providerIdentifier,
-                integration.identityNamespace!,
-                integration.internalId
-              ))
-      )
-    )
-      reject('ACCOUNT_COORDINATION_REQUIRED');
+  async assertLegacyAccount(org: string, _integrationId: string) {
+    await this.autonomousTransaction(org, async () => undefined);
   }
 
   async legacyBlockedPlatforms(org: string) {
-    const states = await this.db.accountWriteState.findMany({
-      where: { organizationId: org },
-    });
-    if (!states.length) return [];
-    const ids = states.flatMap((s) => [
-      s.integrationId,
-      ...s.identityIntegrationIds,
-    ]);
-    const actors = await this.db.integration.findMany({
-      where: { organizationId: org, id: { in: ids } },
-    });
-    return [...new Set(actors.flatMap((a) => canonicalControlledPlatform(a.providerIdentifier) === 'linkedin'
-      ? ['linkedin', 'linkedin-page'] : [a.providerIdentifier]))];
+    const state = await this.modes.stateIn(this.db, org);
+    return state.mode === 'AUTONOMOUS' && state.autonomousAllowed
+      ? [] : [...CONTROLLED_SEND_PLATFORMS, 'linkedin-page'];
   }
 
-  async assertLegacyPosts(
-    org: string,
-    posts: {
-      id: string;
-      projectId?: string | null;
-      sendIntentId?: string | null;
-    }[]
-  ) {
-    for (const post of posts) {
-      if (post.sendIntentId) reject('SEND_COORDINATOR_REQUIRED');
-      if (
-        post.projectId &&
-        (await this.db.sendIntent.findFirst({
-          where: { organizationId: org, projectId: post.projectId },
-        }))
-      )
-        reject('PROJECT_SEND_COORDINATION_REQUIRED');
-    }
+  async assertLegacyPosts(org: string, posts: { id: string; projectId?: string | null; sendIntentId?: string | null; executionProtocol?: string | null }[]) {
+    for (const post of posts) if (post.sendIntentId || post.executionProtocol === 'ACCOUNT_BOUND_V1') reject('SEND_COORDINATOR_REQUIRED');
+    await this.autonomousTransaction(org, async () => undefined);
   }
 
   async assertProjectSendActive(org: string, executionId: string) {
@@ -781,7 +752,7 @@ export class SendCoordinatorService {
     executorKey: string,
     now = new Date()
   ) {
-    this.enabled();
+    await this.enabled(org);
     return sendTransaction(this.db, (tx) =>
       this.reserveIn(tx, org, rootId, 'API', executorKey, {}, now)
     );
@@ -832,6 +803,7 @@ export class SendCoordinatorService {
     },
     now: Date
   ) {
+    await this.assertControlledIn(tx, org);
     if (!executorKey?.trim())
       throw new BadRequestException('SEND_EXECUTOR_KEY_REQUIRED');
     const posts = await this.chain(tx, org, rootId);
@@ -947,7 +919,7 @@ export class SendCoordinatorService {
     observed: SendActor,
     now = new Date()
   ) {
-    this.enabled();
+    await this.enabled(org);
     await this.assertProjectSendActive(org, executionId);
     return sendTransaction(this.db, async (tx) => {
       const execution = await this.execution(tx, org, executionId);
@@ -963,8 +935,9 @@ export class SendCoordinatorService {
     observed: SendActor,
     now: Date
   ) {
-    await this.verifyPolicyIn(tx);
     const org = execution.organizationId;
+    await this.assertControlledIn(tx, org);
+    await this.verifyPolicyIn(tx);
     const account = await tx.accountWriteState.findUnique({
       where: {
         organizationId_canonicalAccountKey: {
@@ -1654,12 +1627,13 @@ export class SendCoordinatorService {
   }
 
   async retry(org: string, rootId: string, userId: string, now = new Date()) {
-    this.enabled();
     await this.assertMember(this.db, org, userId);
+    await this.enabled(org);
     const scope = await this.db.post.findFirst({ where: { id: rootId, organizationId: org, deletedAt: null } });
     if (!scope?.projectId) reject('SEND_RETRY_UNSAFE');
     await this.projects.assertProjectActive(org, scope.projectId!);
     return sendTransaction(this.db, async (tx) => {
+      await this.assertControlledIn(tx, org);
       await this.assertMember(tx, org, userId);
       const post = await tx.post.findFirst({
         where: { organizationId: org, id: rootId, projectId: scope.projectId, parentPostId: null, deletedAt: null },
@@ -1678,7 +1652,7 @@ export class SendCoordinatorService {
       const segments = executions.length ? await tx.sendSegment.findMany({
         where: { organizationId: org, executionId: { in: executions.map(e => e.id) } },
       }) : [];
-      if (!sendBusinessSummary(post!, intent, executions, segments).allowedActions.retry.allowed)
+      if (!sendBusinessSummary(post!, intent, executions, segments, null, true).allowedActions.retry.allowed)
         reject('SEND_RETRY_UNSAFE');
       await tx.sendIntent.update({
         where: { id: intent.id },

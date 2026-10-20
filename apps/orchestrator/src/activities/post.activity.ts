@@ -1,3 +1,5 @@
+import { SendModeService } from '@gitroom/nestjs-libraries/extension/send-mode.service';
+import { sendHash } from '@gitroom/nestjs-libraries/extension/send-coordination.utils';
 import { Optional } from '@nestjs/common';
 import { SendCoordinatorService } from '@gitroom/nestjs-libraries/extension/send-coordinator.service';
 import { currentSendContext } from '@gitroom/nestjs-libraries/extension/controlled-api-submit';
@@ -64,7 +66,8 @@ export class PostActivity {
     private _engageSentReply: PrismaRepository<'engageSentReply'>,
     private _engageOppState: PrismaRepository<'engageOpportunityState'>,
     private _aiseeNotificationClient: AiseeNotificationClient,
-    @Optional() private _sendCoordinator?: SendCoordinatorService
+    @Optional() private _sendCoordinator?: SendCoordinatorService,
+    @Optional() private _sendModes?: SendModeService
   ) {}
 
   @ActivityMethod()
@@ -170,129 +173,65 @@ export class PostActivity {
     return !!getIntegration.comment;
   }
 
-  @ActivityMethod()
-  async postComment(
-    postId: string,
-    lastPostId: string | undefined,
-    integration: Integration,
-    posts: Post[]
-  ) {
-    if (!currentSendContext()) {
-      if (posts.some(p => p.sendIntentId)) throw new Error('SEND_COORDINATOR_REQUIRED');
+  private async preparePostDetails(integration: Integration, posts: Post[],
+    provider: ReturnType<IntegrationManager['getSocialIntegration']>) {
+    const prepared = await this._postService.updateTags(integration.organizationId, posts);
+    return Promise.all((prepared || []).map(async post => ({
+      id: post.id,
+      message: stripHtmlValidation(provider.editor, post.content, true, false,
+        !/<\/?[a-z][\s\S]*>/i.test(post.content), provider.mentionFormat),
+      settings: JSON.parse(post.settings || '{}'),
+      media: limitToOnePostableVideo(await this._postService.updateMedia(post.id,
+        JSON.parse(post.image || '[]'), provider?.convertToJPEG || false, !currentSendContext()),
+      dropped => console.warn(`preparePostDetails: dropping video ${dropped} on post ${post.id}`)),
+    })));
+  }
+
+  private async assertAutonomousPosts(integration: Integration, posts: Post[]) {
+    if (currentSendContext()) return;
+    if (posts.some(post => post.sendIntentId || post.executionProtocol === 'ACCOUNT_BOUND_V1'))
+      throw new Error('SEND_COORDINATOR_REQUIRED');
+    if (!this._sendModes) {
       await this._sendCoordinator?.assertLegacyPosts(integration.organizationId, posts);
       await this._sendCoordinator?.assertLegacyAccount(integration.organizationId, integration.id);
     }
-    const getIntegration = this._integrationManager.getSocialIntegration(
-      integration.providerIdentifier
-    );
+  }
 
-    const newPosts = await this._postService.updateTags(
-      integration.organizationId,
-      posts
-    );
-
-    return runWithBizUsage(
-      {
-        organizationId: integration.organizationId,
-        bizCategory: publishBizCategory(posts),
-      },
-      async () =>
-        getIntegration.comment(
-          integration.internalId,
-          postId,
-          lastPostId,
-          integration.token,
-          await Promise.all(
-            (newPosts || []).map(async (p) => ({
-              id: p.id,
-              message: stripHtmlValidation(
-                getIntegration.editor,
-                p.content,
-                true,
-                false,
-                !/<\/?[a-z][\s\S]*>/i.test(p.content),
-                getIntegration.mentionFormat
-              ),
-              settings: JSON.parse(p.settings || '{}'),
-              // This posts DIRECTLY to the platform's API (unlike the
-              // extension's queue, there is no per-item check downstream), so
-              // a post whose media is really two videos — updateMedia stamps
-              // every item `type: 'image'` regardless of what it actually is —
-              // must be capped here, or the platform simply rejects the call.
-              media: limitToOnePostableVideo(
-                await this._postService.updateMedia(
-                  p.id,
-                  JSON.parse(p.image || '[]'),
-                  getIntegration?.convertToJPEG || false,
-                  !currentSendContext()
-                ),
-                (dropped) =>
-                  console.warn(
-                    `postComment: dropping video ${dropped} on post ${p.id} — a post carries one video or several images, never a mix`
-                  )
-              ),
-            }))
-          ),
-          integration
-        )
-    );
+  @ActivityMethod()
+  async postComment(postId: string, lastPostId: string | undefined, integration: Integration, posts: Post[]) {
+    await this.assertAutonomousPosts(integration, posts);
+    const provider = this._integrationManager.getSocialIntegration(integration.providerIdentifier);
+    if (!provider.comment) throw new Error('PLATFORM_COMMENTS_UNSUPPORTED');
+    // Preparation completes before recording the irreversible platform-write admission.
+    const payload = await this.preparePostDetails(integration, posts, provider);
+    const work = () => runWithBizUsage({ organizationId: integration.organizationId,
+      bizCategory: publishBizCategory(posts) }, () => provider.comment(
+      integration.internalId, postId, lastPostId, integration.token, payload, integration));
+    if (currentSendContext() || !this._sendModes) return work();
+    if (!posts[0]?.id) throw new Error('AUTONOMOUS_EFFECT_IDENTITY_REQUIRED');
+    return this._sendModes.autonomousEffect(integration.organizationId,
+      `comment:${posts[0].id}:${postId}`,
+      { action: 'COMMENT', integrationId: integration.id, postIds: posts.map(post => post.id), occurrenceKey: postId, parentPostId: postId, lastPostId,
+        contentHash: sendHash(posts.map(post => ({ id: post.id, content: post.content,
+          settings: post.settings, image: post.image }))) }, work);
   }
 
   @ActivityMethod()
   async postSocial(integration: Integration, posts: Post[]) {
-    if (!currentSendContext()) {
-      if (posts.some(p => p.sendIntentId)) throw new Error('SEND_COORDINATOR_REQUIRED');
-      await this._sendCoordinator?.assertLegacyPosts(integration.organizationId, posts);
-      await this._sendCoordinator?.assertLegacyAccount(integration.organizationId, integration.id);
-    }
-    const getIntegration = this._integrationManager.getSocialIntegration(
-      integration.providerIdentifier
-    );
-
-    const newPosts = await this._postService.updateTags(
-      integration.organizationId,
-      posts
-    );
-
-    return runWithBizUsage(
-      {
-        organizationId: integration.organizationId,
-        bizCategory: publishBizCategory(posts),
-      },
-      async () =>
-        getIntegration.post(
-          integration.internalId,
-          integration.token,
-          await Promise.all(
-            (newPosts || []).map(async (p) => ({
-              id: p.id,
-              message: stripHtmlValidation(
-                getIntegration.editor,
-                p.content,
-                true,
-                false,
-                !/<\/?[a-z][\s\S]*>/i.test(p.content),
-                getIntegration.mentionFormat
-              ),
-              settings: JSON.parse(p.settings || '{}'),
-              // Same reasoning as postComment above.
-              media: limitToOnePostableVideo(
-                await this._postService.updateMedia(
-                  p.id,
-                  JSON.parse(p.image || '[]'),
-                  getIntegration?.convertToJPEG || false,
-                  !currentSendContext()
-                ),
-                (dropped) =>
-                  console.warn(
-                    `postSocial: dropping video ${dropped} on post ${p.id} — a post carries one video or several images, never a mix`
-                  )
-              ),
-            }))
-          ),
-          integration
-        )
-    );
+    await this.assertAutonomousPosts(integration, posts);
+    const provider = this._integrationManager.getSocialIntegration(integration.providerIdentifier);
+    const payload = await this.preparePostDetails(integration, posts, provider);
+    const work = () => runWithBizUsage({ organizationId: integration.organizationId,
+      bizCategory: publishBizCategory(posts) }, () => provider.post(
+      integration.internalId, integration.token, payload, integration));
+    if (currentSendContext() || !this._sendModes) return work();
+    if (!posts[0]?.id) throw new Error('AUTONOMOUS_EFFECT_IDENTITY_REQUIRED');
+    const cycle = posts[0].intervalInDays ? new Date(posts[0].publishDate).toISOString() : 'single';
+    return this._sendModes.autonomousEffect(integration.organizationId,
+      `post:${posts[0].id}:${cycle}`,
+      { action: 'POST', integrationId: integration.id, postIds: posts.map(post => post.id), occurrenceKey: cycle,
+        contentHash: sendHash(posts.map(post => ({ id: post.id, content: post.content,
+          settings: post.settings, image: post.image }))) }, work);
   }
 
   @ActivityMethod()
@@ -420,7 +359,6 @@ export class PostActivity {
     delay: number;
     information: any;
   }) {
-    await this._sendCoordinator?.assertLegacyAccount(data.orgId, data.integration);
     return this._integrationService.processInternalPlug(data);
   }
 
@@ -432,7 +370,7 @@ export class PostActivity {
     finisherText: string,
     releaseURL: string
   ) {
-    await this._sendCoordinator?.assertLegacyAccount(integration.organizationId, integration.id);
+    if (!this._sendModes) await this._sendCoordinator?.assertLegacyAccount(integration.organizationId, integration.id);
     const getIntegration = this._integrationManager.getSocialIntegration(
       integration.providerIdentifier
     );
@@ -446,7 +384,8 @@ export class PostActivity {
       getIntegration.mentionFormat
     );
 
-    return runWithBizUsage(
+    const work = async () => {
+      await runWithBizUsage(
       {
         organizationId: integration.organizationId,
         bizCategory: BIZ_USAGE.POST_PUBLISH,
@@ -467,7 +406,13 @@ export class PostActivity {
           ],
           integration
         )
-    );
+      );
+    };
+    if (!this._sendModes) return work();
+    return this._sendModes.autonomousEffect(integration.organizationId,
+      `thread-finisher:${integration.providerIdentifier}:${mainPostId}`,
+      { action: 'THREAD_FINISHER', integrationId: integration.id, mainPostId, lastCommentId,
+        contentHash: sendHash({ finisherText, releaseURL }) }, work);
   }
 
   @ActivityMethod()

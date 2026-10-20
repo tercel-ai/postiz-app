@@ -1,3 +1,4 @@
+import { SendModeService } from '../../../extension/send-mode.service';
 import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
 import { v5 as sendUuid } from 'uuid';
 import { sendHash } from '../../../extension/send-coordination.utils';
@@ -228,8 +229,13 @@ export class PostsService {
     // notification, which is the correct degradation for a side channel — the
     // post is published or failed either way.
     private _aiseeNotificationClient?: AiseeNotificationClient,
-    private _sendCoordinator?: SendCoordinatorService
+    private _sendCoordinator?: SendCoordinatorService,
+    private _sendModes?: SendModeService
   ) {}
+
+  async isControlled(org: string) {
+    return this._sendModes ? this._sendModes.isControlled(org) : isAccountBoundSendingEnabled();
+  }
 
   searchForMissingThreeHoursPosts() {
     return this._postRepository.searchForMissingThreeHoursPosts();
@@ -1772,7 +1778,7 @@ export class PostsService {
     if (!post) throw new BadRequestException('POST_NOT_FOUND');
     if (!isLegacyExecution(post.executionProtocol)) {
       if (!this._sendCoordinator) throw new ServiceUnavailableException('SEND_COORDINATION_NOT_ENABLED');
-      this._sendCoordinator.enabled();
+      await this._sendCoordinator.enabled(orgId);
       if (!post.sendIntentId) throw new BadRequestException('SEND_INTENT_REQUIRED');
       if (post.publishMethod === 'EXTENSION') return;
       throw new BadRequestException('API_PUBLISHING_UNSUPPORTED_USE_EXTENSION');
@@ -1929,7 +1935,7 @@ export class PostsService {
       );
     }
 
-    const coordinated = isAccountBoundSendingEnabled() && body.type !== 'draft';
+    const coordinated = (await this.isControlled(orgId)) && body.type !== 'draft';
     if (coordinated && (!this._sendCoordinator || !userId)) throw new BadRequestException('SEND_POLICY_OWNER_REQUIRED');
     if (coordinated && new Set(body.posts.map((p, i) => p.itemKey ?? String(i))).size !== body.posts.length) throw new BadRequestException('DUPLICATE_SEND_ITEM_KEY');
     const suppliedRoots = body.posts.map(p => p.value?.[0]?.id).filter(Boolean);
@@ -1996,7 +2002,8 @@ export class PostsService {
         body.inter,
         body.source,
         body.projectId,
-        resolvedMethod === 'api' ? 'API' : resolvedMethod === 'extension' ? 'EXTENSION' : undefined
+        resolvedMethod === 'api' ? 'API' : resolvedMethod === 'extension' ? 'EXTENSION' : undefined,
+        undefined, coordinated ? 'CONTROLLED' : body.type !== 'draft' || body.source === 'engage' ? 'AUTONOMOUS' : undefined
       );
 
       if (!posts?.length) {
@@ -2600,7 +2607,7 @@ export class PostsService {
     // batch (not one per root) — a poll can claim up to 50.
     const chainNodes = await this._postRepository.getExtensionPublishChainNodes(
       orgId,
-      [...new Set(rows.map((r) => r.group).filter(Boolean))]
+      [...new Set<string>(rows.map((r) => r.group as string).filter(Boolean))]
     );
     // parentPostId -> node, so a chain is walked from its anchor in order. Keyed
     // by parent rather than by group because only nodes actually REACHABLE from
@@ -2805,9 +2812,10 @@ export class PostsService {
           .filter(Boolean)
       ),
     ];
+    const controlled = await this.isControlled(orgId);
     return uniquePlatforms.map((platform) => {
       const hasBoundIntegration = boundPlatforms.has(platform);
-      if (isAccountBoundSendingEnabled()) {
+      if (controlled) {
         const extensionCapable = (CONTROLLED_SEND_PLATFORMS as readonly string[])
           .includes(canonicalControlledPlatform(platform));
         return { platform, extensionCapable, apiCapable: false, hasBoundIntegration,
@@ -2870,7 +2878,7 @@ export class PostsService {
         failed.push({ id, code: 'NOT_FOUND', message: 'Post not found' });
         continue;
       }
-      if (isAccountBoundSendingEnabled()) {
+      if (await this.isControlled(orgId)) {
         try {
           if (!this._sendCoordinator || !sendContext) throw new BadRequestException('SEND_POLICY_OWNER_REQUIRED');
           const item = itemById.get(id)!;

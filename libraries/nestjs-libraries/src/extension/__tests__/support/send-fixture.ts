@@ -18,6 +18,7 @@ export const actor = {
 export function setupSend() {
   const now = sendNow;
   const db = memorySendDatabase();
+  db.seed('settings', { key: 'sending.organization_mode:org', value: { mode: 'CONTROLLED', revision: 1 } });
   db.seed('integration', actor);
   db.seed('userOrganization', {
     organizationId: 'org',

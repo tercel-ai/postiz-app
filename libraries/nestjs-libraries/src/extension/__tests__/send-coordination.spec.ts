@@ -262,10 +262,10 @@ describe('shared content send coordination', () => {
   it('does not permit a legacy sender to bypass an enrolled account', async () => {
     const { service } = setup();
     await expect(service.assertLegacyAccount('org', 'account')).rejects.toThrow(
-      'ACCOUNT_COORDINATION_REQUIRED'
+      'SEND_MODE_AUTONOMOUS_REQUIRED'
     );
     await expect(
       service.assertLegacyAccount('org', 'unrelated')
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow('SEND_MODE_AUTONOMOUS_REQUIRED');
   });
 });

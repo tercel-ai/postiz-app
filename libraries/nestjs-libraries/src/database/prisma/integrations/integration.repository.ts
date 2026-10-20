@@ -1,4 +1,3 @@
-import { isAccountBoundSendingEnabled } from '../../../extension/account-bound-sending.config';
 import { SocialAccountIdentityService, oauthSocialIdentity } from '../../../extension/social-account-identity.service';
 import { sendHash, sendTransaction } from '../../../extension/send-coordination.utils';
 import { PrismaService } from '../prisma.service';
@@ -249,10 +248,10 @@ export class IntegrationRepository {
       ? null : oauthSocialIdentity(provider, identityNamespace, internalId);
     // Default-off deployments keep the legacy upsert. Previously normalized
     // identities still use the shared resolver so disabling cannot create aliases.
-    const known = stable && !isAccountBoundSendingEnabled() && identityNamespace === 'legacy'
+    const known = stable && identityNamespace === 'legacy'
       ? await this._integration.model.integration.findFirst({where:{organizationId:org,providerIdentifier:provider,identityNamespace:stable.namespace,internalId:stable.id}})
       : null;
-    const coordinatedIdentity = isAccountBoundSendingEnabled() || identityNamespace !== 'legacy' || !!known;
+    const coordinatedIdentity = creation !== undefined || identityNamespace !== 'legacy' || !!known;
     if (coordinatedIdentity && ['x', 'reddit'].includes(provider) && !stable)
       throw new BadRequestException('ACCOUNT_IDENTITY_UNRESOLVED');
     if (stable && coordinatedIdentity) {

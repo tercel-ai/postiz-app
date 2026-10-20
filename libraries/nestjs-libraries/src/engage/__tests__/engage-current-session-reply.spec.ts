@@ -12,7 +12,7 @@ const body = {
 afterEach(() => vi.unstubAllEnvs());
 describe('OPTIONAL manual reply compatibility', () => {
   it.each([SendReplyDto, ScheduleReplyDto])(
-    'accepts an omitted account only on the coordinated path: %j',
+    'defers an omitted account to organization-aware service validation: %j',
     async (Dto) => {
       const instance = plainToInstance(Dto as typeof SendReplyDto, {
         ...body,
@@ -24,8 +24,8 @@ describe('OPTIONAL manual reply compatibility', () => {
       ).toHaveLength(0);
       vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'false');
       expect(
-        (await validate(instance)).some((e) => e.property === 'integrationId')
-      ).toBe(true);
+        (await validate(instance)).filter((e) => e.property === 'integrationId')
+      ).toHaveLength(0);
     }
   );
   it.each(['sendReply', 'scheduleReply'] as const)(
@@ -34,6 +34,7 @@ describe('OPTIONAL manual reply compatibility', () => {
       vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true');
       const createPost = vi.fn().mockResolvedValue([{ postId: 'root' }]);
       const service = Object.assign(Object.create(EngageService.prototype), {
+        _sendModes: { isControlled: vi.fn().mockResolvedValue(true) },
         _postsService: { createPost },
         _engageRepository: {
           claimOpportunityForReply: vi
@@ -63,6 +64,16 @@ describe('OPTIONAL manual reply compatibility', () => {
       });
     }
   );
+  it.each(['sendReply', 'scheduleReply'] as const)('requires an account in autonomous mode before %s claims content', async method => {
+    const claimOpportunityForReply = vi.fn();
+    const service = Object.assign(Object.create(EngageService.prototype), {
+      _sendModes: { isControlled: vi.fn().mockResolvedValue(false) },
+      _engageRepository: { claimOpportunityForReply },
+    }) as EngageService;
+    await expect(service[method]({ id: 'org' } as any, 'user', 'opportunity', body as any))
+      .rejects.toThrow('SEND_BINDING_REQUIRED');
+    expect(claimOpportunityForReply).not.toHaveBeenCalled();
+  });
   it('still rejects a malformed supplied account', async () => {
     vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true');
     const instance = plainToInstance(SendReplyDto, {

@@ -8,12 +8,11 @@ type PublicIntent = Partial<Pick<SendIntent, 'id' | 'status' | 'activeExecutionI
 type PublicExecution = Partial<Pick<SendExecution, 'id' | 'status' | 'resolutionRevision'>>;
 type PublicSegment = Partial<Pick<SendSegment, 'executionId' | 'status' | 'result' | 'segmentIndex' | 'postId' | 'confirmedAt'>>;
 
-export const needsSendSummary = (post: PublicPost) => isAccountBoundSendingEnabled() ||
+export const needsSendSummary = (post: PublicPost, controlled = false) => controlled ||
   post?.executionProtocol === 'ACCOUNT_BOUND_V1' || !!post?.sendIntentId;
 
 /** Public projection only: execution credentials and raw evidence must never escape. */
-export function sendBusinessSummary(post: PublicPost, intent: PublicIntent | null, executions: PublicExecution[], segments: PublicSegment[], operationBlockCode: string | null = null) {
-  const enabled = isAccountBoundSendingEnabled();
+export function sendBusinessSummary(post: PublicPost, intent: PublicIntent | null, executions: PublicExecution[], segments: PublicSegment[], operationBlockCode: string | null = null, enabled = isAccountBoundSendingEnabled()) {
   const controlled = !!intent || post.executionProtocol === 'ACCOUNT_BOUND_V1';
   const latest = executions.find(e => e.id === intent?.activeExecutionId) ?? executions[0];
   const confirmed = intent?.hasConfirmedSegments === true || segments.some(s => s.status === 'CONFIRMED');

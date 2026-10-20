@@ -1,6 +1,6 @@
+import { SendModeService } from '../extension/send-mode.service';
 import { controlledReplySettings } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
 import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
-import { needsSendSummary } from '@gitroom/nestjs-libraries/extension/send-business-summary';
 import { AutomaticSendProducerService } from '../extension/automatic-send-producer.service';
 import { isLegacyExecution } from '../extension/legacy-execution';
 import { AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
@@ -334,8 +334,13 @@ export class EngageService implements OnApplicationBootstrap {
     // service positionally. A missing client simply means no Aisee
     // notification, which is the correct degradation for a side channel.
     private _aiseeNotificationClient?: AiseeNotificationClient,
-    private _automaticSends?: AutomaticSendProducerService
+    private _automaticSends?: AutomaticSendProducerService,
+    private _sendModes?: SendModeService
   ) { }
+
+  private async isControlled(org: string) {
+    return this._sendModes ? this._sendModes.isControlled(org) : isAccountBoundSendingEnabled();
+  }
 
   // Auto-start global workflows on every app boot so pnpm dev / Docker restart
   // never leaves the system in a state where no workflow is running.
@@ -1207,7 +1212,7 @@ export class EngageService implements OnApplicationBootstrap {
    * platform. Legacy X enumeration retains its historical settings semantics.
    */
   async listReplyAccounts(org: Organization, projectId?: string | null) {
-    const controlled = isAccountBoundSendingEnabled();
+    const controlled = await this.isControlled(org.id);
     if (controlled && projectId) {
       if (!this._projectValidation) throw new ServiceUnavailableException('PROJECT_VALIDATION_UNAVAILABLE');
       await this._projectValidation.assertProjectAccess(org.id, projectId);
@@ -2313,7 +2318,7 @@ export class EngageService implements OnApplicationBootstrap {
   // extension has backfilled the permalink (replyUrl non-null).
   async getSentReplyStatus(org: Organization, sentReplyId: string, userId?: string) {
     const result = await this._engageRepository.getSentReplyStatus(org.id, sentReplyId);
-    return userId && result.postId && needsSendSummary(result) ? { ...result, sending: await this._postsService.getSendingSummary(org.id, userId, result.postId) } : result;
+    return userId && result.postId && (result.executionProtocol === 'ACCOUNT_BOUND_V1' || result.sendIntentId || await this.isControlled(org.id)) ? { ...result, sending: await this._postsService.getSendingSummary(org.id, userId, result.postId) } : result;
   }
 
   async getSentReplyItemById(org: Organization, sentReplyId: string) {
@@ -3474,7 +3479,7 @@ export class EngageService implements OnApplicationBootstrap {
     opportunityId: string,
     body: SendReplyDto
   ) {
-    if (!isAccountBoundSendingEnabled() && !body.integrationId)
+    if (!(await this.isControlled(org.id)) && !body.integrationId)
       throw new BadRequestException('SEND_BINDING_REQUIRED');
     // Atomic claim: marks status=REPLIED iff currently NEW/AUTO_QUEUED. Loser
     // of a concurrent race throws NotFoundException here, BEFORE createPost —
@@ -3494,7 +3499,7 @@ export class EngageService implements OnApplicationBootstrap {
     let postId: string | undefined;
     try {
       // §6/§6.1 pacing gate — a blocked send hits this same catch/rollback.
-      if (!isAccountBoundSendingEnabled()) await this._assertReplyPacing(
+      if (!(await this.isControlled(org.id))) await this._assertReplyPacing(
         org.id,
         resolvedProjectId,
         opportunity.platform,
@@ -3515,7 +3520,7 @@ export class EngageService implements OnApplicationBootstrap {
             {
               ...(body.integrationId ? {integration:{id:body.integrationId}} : {}),
               providerIdentifier: opportunity.platform,
-              publishMethod: isAccountBoundSendingEnabled() ? 'extension' : 'api',
+              publishMethod: (await this.isControlled(org.id)) ? 'extension' : 'api',
               value: [
                 {
                   content: body.draftContent,
@@ -3528,19 +3533,20 @@ export class EngageService implements OnApplicationBootstrap {
               settings: this._buildReplySettings(
                 opportunity.platform,
                 opportunity.externalPostId,
-                opportunity.externalPostUrl
+                opportunity.externalPostUrl,
+                await this.isControlled(org.id)
               ) as never,
             } as never,
           ],
         },
         userId,
-        ...(isAccountBoundSendingEnabled() ? [{ contentUnitId: `reply-primary:${resolvedProjectId}:${resolvedOpportunityId}`, context: { channel: opportunity.channelId, matchedKeywords: opportunity.matchedKeywords ?? [] }, origin: 'MANUAL' as const }] : [])
+        ...((await this.isControlled(org.id)) ? [{ contentUnitId: `reply-primary:${resolvedProjectId}:${resolvedOpportunityId}`, context: { channel: opportunity.channelId, matchedKeywords: opportunity.matchedKeywords ?? [] }, origin: 'MANUAL' as const }] : [])
       );
       // PostsService.createPost returns objects keyed `postId` (not `id`).
       postId = created?.[0]?.postId;
       if (!postId) throw new Error('Post creation failed');
     } catch (err) {
-      if (isAccountBoundSendingEnabled() && await this._postsService.hasContentSendIntent(org.id, `reply-primary:${resolvedProjectId}:${resolvedOpportunityId}`)) throw err;
+      if ((await this.isControlled(org.id)) && await this._postsService.hasContentSendIntent(org.id, `reply-primary:${resolvedProjectId}:${resolvedOpportunityId}`)) throw err;
       if (postId) await this._engageRepository.deletePostById(postId);
       await this._engageRepository.releaseOpportunityClaim(
         org.id,
@@ -3675,9 +3681,10 @@ export class EngageService implements OnApplicationBootstrap {
   private _buildReplySettings(
     platform: string,
     externalPostId: string,
-    externalPostUrl?: string
+    externalPostUrl?: string,
+    controlled = false
   ): unknown {
-    if (isAccountBoundSendingEnabled()) {
+    if (controlled) {
       const settings = controlledReplySettings(platform, externalPostId, externalPostUrl);
       if (settings) return { __type: platform, ...settings };
     }
@@ -3703,7 +3710,7 @@ export class EngageService implements OnApplicationBootstrap {
     opportunityId: string,
     body: ScheduleReplyDto
   ) {
-    if (!isAccountBoundSendingEnabled() && !body.integrationId)
+    if (!(await this.isControlled(org.id)) && !body.integrationId)
       throw new BadRequestException('SEND_BINDING_REQUIRED');
     if (new Date(body.scheduledAt) <= new Date()) {
       throw new BadRequestException('scheduledAt must be a future date');
@@ -3722,7 +3729,7 @@ export class EngageService implements OnApplicationBootstrap {
     // Scheduled posts publish at a future time — full rollback on failure is safe.
     let postId: string | undefined;
     try {
-      if (!isAccountBoundSendingEnabled()) await this._assertReplyPacing(
+      if (!(await this.isControlled(org.id))) await this._assertReplyPacing(
         org.id,
         resolvedProjectId,
         opportunity.platform,
@@ -3743,7 +3750,7 @@ export class EngageService implements OnApplicationBootstrap {
             {
               ...(body.integrationId ? {integration:{id:body.integrationId}} : {}),
               providerIdentifier: opportunity.platform,
-              publishMethod: isAccountBoundSendingEnabled() ? 'extension' : 'api',
+              publishMethod: (await this.isControlled(org.id)) ? 'extension' : 'api',
               value: [
                 {
                   content: body.draftContent,
@@ -3756,13 +3763,14 @@ export class EngageService implements OnApplicationBootstrap {
               settings: this._buildReplySettings(
                 opportunity.platform,
                 opportunity.externalPostId,
-                opportunity.externalPostUrl
+                opportunity.externalPostUrl,
+                await this.isControlled(org.id)
               ) as never,
             } as never,
           ],
         },
         userId,
-        ...(isAccountBoundSendingEnabled() ? [{ contentUnitId: `reply-primary:${resolvedProjectId}:${resolvedOpportunityId}`, context: { channel: opportunity.channelId, matchedKeywords: opportunity.matchedKeywords ?? [] }, origin: 'MANUAL' as const }] : [])
+        ...((await this.isControlled(org.id)) ? [{ contentUnitId: `reply-primary:${resolvedProjectId}:${resolvedOpportunityId}`, context: { channel: opportunity.channelId, matchedKeywords: opportunity.matchedKeywords ?? [] }, origin: 'MANUAL' as const }] : [])
       );
       postId = created?.[0]?.postId;
       if (!postId) throw new Error('Post creation failed');
@@ -3782,7 +3790,7 @@ export class EngageService implements OnApplicationBootstrap {
       // metrics sync is started after the scheduled post actually publishes
       // (the post workflow triggers it via engage-metrics-sync-on-publish).
     } catch (err) {
-      if (isAccountBoundSendingEnabled() && await this._postsService.hasContentSendIntent(org.id, `reply-primary:${resolvedProjectId}:${resolvedOpportunityId}`)) throw err;
+      if ((await this.isControlled(org.id)) && await this._postsService.hasContentSendIntent(org.id, `reply-primary:${resolvedProjectId}:${resolvedOpportunityId}`)) throw err;
       if (postId) await this._engageRepository.deletePostById(postId);
       await this._engageRepository.releaseOpportunityClaim(
         org.id,
@@ -3800,7 +3808,7 @@ export class EngageService implements OnApplicationBootstrap {
     opportunityId: string,
     body: BatchScheduleReplyDto
   ) {
-    if (isAccountBoundSendingEnabled()) throw new BadRequestException('REPLY_CONTENT_REQUIRES_SINGLE_SEND');
+    if ((await this.isControlled(org.id))) throw new BadRequestException('REPLY_CONTENT_REQUIRES_SINGLE_SEND');
     for (const item of body.items) {
       if (new Date(item.scheduledAt) <= new Date()) {
         throw new BadRequestException(
@@ -3924,7 +3932,7 @@ export class EngageService implements OnApplicationBootstrap {
     opportunityId: string,
     body: BatchSendReplyDto
   ) {
-    if (isAccountBoundSendingEnabled()) throw new BadRequestException('REPLY_CONTENT_REQUIRES_SINGLE_SEND');
+    if ((await this.isControlled(org.id))) throw new BadRequestException('REPLY_CONTENT_REQUIRES_SINGLE_SEND');
     const claim = await this._engageRepository.claimOpportunityForReply(
         org.id,
         opportunityId,

@@ -3,7 +3,7 @@ import { ExtensionNodeSession, Prisma } from '@prisma/client';
 import { PrismaService } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
 import { SendPolicyService } from '@gitroom/nestjs-libraries/extension/send-policy.service';
-import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { SendModeService } from '@gitroom/nestjs-libraries/extension/send-mode.service';
 import { accountBindingError } from '@gitroom/nestjs-libraries/extension/account-binding-error';
 import { canonicalControlledPlatform, CONTROLLED_SEND_PLATFORMS } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
 import { channelAvailability, NODE_ONLINE_MS } from '@gitroom/nestjs-libraries/extension/extension-node.protocol';
@@ -60,22 +60,21 @@ function availability(terminals: Terminal[], action: 'POST' | 'REPLY') {
 @Injectable()
 export class SendingContextService {
   constructor(private readonly db: PrismaService, private readonly projects: ProjectValidationService,
-    private readonly policies: SendPolicyService) {}
+    private readonly policies: SendPolicyService, private readonly modes: SendModeService) {}
 
   async get(org: string, user: string, project: string) {
     if (!user) throw new ForbiddenException('AUTHENTICATED_USER_REQUIRED');
     await this.projects.assertProjectAccess(org, project);
     const projectStatus = await this.projects.getActivationVerdict(org, project);
-    const enabled = isAccountBoundSendingEnabled();
     return sendTransaction(this.db, async tx => {
       const member = await tx.userOrganization.findUnique({ where: { userId_organizationId: { userId: user, organizationId: org } } });
       if (!member || member.disabled) throw new ForbiddenException('ORGANIZATION_MEMBERSHIP_REQUIRED');
-      const enrolled = !enabled && await tx.accountWriteState.count({ where: { organizationId: org } });
-      const mode = enabled ? 'CONTROLLED' : enrolled ? 'PAUSED' : 'LEGACY';
+      const state = await this.modes.stateIn(tx, org);
+      const mode = state.mode;
       const now = new Date();
-      const base = { organizationId: org, userId: user, projectId: project, mode, projectStatus, serverNow: now.toISOString() };
-      if (mode === 'LEGACY') return { ...base, requireAccountSelection: null, accounts: [], defaults: {} };
-      const policy = enabled ? await this.policies.snapshotInTransaction(tx, user) : null;
+      const base = { organizationId: org, userId: user, projectId: project, mode, modeRevision: state.revision, systemEnabled: state.systemEnabled, autonomousAllowed: state.autonomousAllowed, projectStatus, serverNow: now.toISOString() };
+      if (mode === 'AUTONOMOUS') return { ...base, requireAccountSelection: null, accounts: [], defaults: {} };
+      const policy = mode === 'CONTROLLED' ? await this.policies.snapshotInTransaction(tx, user) : null;
       const accounts = await tx.integration.findMany({
         where: { organizationId: org, deletedAt: null, providerIdentifier: { in: providers } },
         select: { id: true, organizationId: true, providerIdentifier: true, internalId: true,

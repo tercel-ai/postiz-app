@@ -1,8 +1,10 @@
-import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { SendModeService } from '@gitroom/nestjs-libraries/extension/send-mode.service';
 import {
   Body,
   Controller,
   Get,
+  Headers,
+  UnauthorizedException,
   Post,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -19,39 +21,61 @@ import {
 @ApiTags('Extension terminals')
 @Controller('/extension/nodes')
 export class ExtensionNodesController {
-  constructor(private readonly nodes: ExtensionNodeService) {}
+  constructor(private readonly nodes: ExtensionNodeService, private readonly modes: SendModeService) {}
 
-  private enabled() {
-    if (!isAccountBoundSendingEnabled())
+  private async enabled(org: string, user: string, registration = false) {
+    const state = await this.modes.get(org, user);
+    if (registration ? state.mode !== 'CONTROLLED'
+      : !state.systemEnabled && state.configuredMode !== 'CONTROLLED')
       throw new ServiceUnavailableException('EXTENSION_NODES_NOT_ENABLED');
   }
 
   @Post('/register')
-  register(
+  async register(
     @GetOrgFromRequest() org: Organization,
     @GetUserFromRequest() user: User,
     @Body() body: RegisterExtensionNodeDto
   ) {
-    this.enabled();
+    await this.enabled(org.id, user.id, true);
     return this.nodes.register(org.id, user.id, body);
   }
 
+  @Get('/current')
+  async current(
+    @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
+    @Headers('x-extension-node-id') nodeId?: string,
+    @Headers('x-extension-node-token') nodeToken?: string,
+    @Headers('x-extension-protocol-version') protocol?: string
+  ) {
+    if (protocol !== 'ACCOUNT_BOUND_V1')
+      throw new UnauthorizedException('NODE_AUTHENTICATION_REQUIRED');
+    await this.enabled(org.id, user.id);
+    const node = await this.nodes.authenticate(org.id, user.id, nodeId, nodeToken);
+    return {
+      nodeId: node.nodeId,
+      organizationId: node.organizationId,
+      registeredByUserId: node.registeredByUserId,
+      status: node.status,
+    };
+  }
+
   @Get('/')
-  list(
+  async list(
     @GetOrgFromRequest() org: Organization,
     @GetUserFromRequest() user: User
   ) {
-    this.enabled();
+    await this.enabled(org.id, user.id);
     return this.nodes.list(org.id, user.id);
   }
 
   @Post('/save')
-  save(
+  async save(
     @GetOrgFromRequest() org: Organization,
     @GetUserFromRequest() user: User,
     @Body() body: SaveExtensionNodeDto
   ) {
-    this.enabled();
+    await this.enabled(org.id, user.id);
     return this.nodes.save(org.id, user.id, body);
   }
 }

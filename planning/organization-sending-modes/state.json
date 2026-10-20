@@ -1,0 +1,130 @@
+{
+  "feature": "organization-sending-modes",
+  "created": "2026-10-20T02:39:20Z",
+  "updated": "2026-10-20T03:25:51.310259Z",
+  "status": "completed",
+  "execution_order": [
+    "mode-configuration",
+    "backend-routing",
+    "extension-negotiation",
+    "documentation-verification"
+  ],
+  "progress": {
+    "total_tasks": 4,
+    "completed": 4,
+    "in_progress": 0,
+    "pending": 0,
+    "skipped": 0,
+    "blocked": 0
+  },
+  "tasks": [
+    {
+      "id": "mode-configuration",
+      "file": "tasks/mode-configuration.md",
+      "title": "Mode configuration",
+      "status": "completed",
+      "started_at": "2026-10-20T02:39:20Z",
+      "completed_at": "2026-10-20T03:03:55Z",
+      "assignee": null,
+      "commits": [],
+      "estimated_hours": null,
+      "dependencies": []
+    },
+    {
+      "id": "backend-routing",
+      "file": "tasks/backend-routing.md",
+      "title": "Backend routing",
+      "status": "completed",
+      "started_at": "2026-10-20T02:39:20Z",
+      "completed_at": "2026-10-20T03:03:55Z",
+      "assignee": null,
+      "commits": [],
+      "estimated_hours": null,
+      "dependencies": [
+        "mode-configuration"
+      ]
+    },
+    {
+      "id": "extension-negotiation",
+      "file": "tasks/extension-negotiation.md",
+      "title": "Extension negotiation",
+      "status": "completed",
+      "started_at": "2026-10-20T02:39:20Z",
+      "completed_at": "2026-10-20T03:03:55Z",
+      "assignee": null,
+      "commits": [],
+      "estimated_hours": null,
+      "dependencies": [
+        "mode-configuration"
+      ]
+    },
+    {
+      "id": "documentation-verification",
+      "file": "tasks/documentation-verification.md",
+      "title": "Documentation and verification",
+      "status": "completed",
+      "started_at": "2026-10-20T02:39:20Z",
+      "completed_at": "2026-10-20T03:03:55Z",
+      "assignee": null,
+      "commits": [],
+      "estimated_hours": null,
+      "dependencies": [
+        "backend-routing",
+        "extension-negotiation"
+      ]
+    }
+  ],
+  "metadata": {
+    "source_doc": "docs/organization-sending-modes.md",
+    "created_by": "code-forge",
+    "version": "1.0",
+    "review": {
+      "date": "2026-10-20T03:25:51.310259Z",
+      "rating": "pass_with_notes",
+      "merge_readiness": "ready",
+      "total_issues": 0,
+      "blockers": 0,
+      "criticals": 0,
+      "warnings": 0,
+      "suggestions": 0,
+      "fixed_issues": 4,
+      "verification_reference": "verification.md",
+      "acceptance_gate": {
+        "status": "PASS",
+        "source": "plan",
+        "required_total": 51,
+        "covered": 51,
+        "uncovered_p0": 0,
+        "uncovered_p1": 0,
+        "tests_passed": 4356,
+        "tests_failed": 0,
+        "tests_skipped": 96
+      },
+      "extension_tests": {
+        "passed": 2703,
+        "failed": 0,
+        "skipped": 0
+      },
+      "health": {
+        "verdict": "healthy",
+        "finding_density": 0,
+        "critical_share": 0,
+        "auto_downgrade_share": 0,
+        "drop_share": 0,
+        "top_pre_downgrade": 0,
+        "top_post": 0,
+        "raw_findings_count": 0,
+        "auto_downgrades": {
+          "missing_evidence": 0,
+          "internal_trust_boundary": 0
+        },
+        "drops": {}
+      },
+      "limitations": [
+        "Frozen apps/extension excluded",
+        "96 gated infrastructure/provider cases skipped",
+        "No live PostgreSQL SSI or social-platform acceptance"
+      ]
+    }
+  }
+}

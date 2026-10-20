@@ -1,4 +1,4 @@
-import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { SendModeService } from '@gitroom/nestjs-libraries/extension/send-mode.service';
 import { AutomaticSendProducerService } from '../extension/automatic-send-producer.service';
 import { BadRequestException, Injectable, Logger, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { Organization } from '@prisma/client';
@@ -71,7 +71,8 @@ export class AutomationService {
     private readonly _engageAutoReply: EngageAutoReplyService,
     @Optional() private readonly _bindings?: SendBindingService,
     @Optional() private readonly _extensionNodes?: ExtensionNodeService,
-    @Optional() private readonly _automaticSends?: AutomaticSendProducerService
+    @Optional() private readonly _automaticSends?: AutomaticSendProducerService,
+    @Optional() private readonly _modes?: SendModeService
   ) {}
 
   /**
@@ -107,7 +108,7 @@ export class AutomationService {
       this._engageAutoReply.getReplyDailyCeilings(),
       this._engageAutoReply.getReplyWarmupTiers(),
       this._engageAutoReply.getChannelDailyLimits(),
-      isAccountBoundSendingEnabled() && this._bindings ? this._bindings.list(org.id, projectId) : null,
+      await this.controlled(org.id) && this._bindings ? this._bindings.list(org.id, projectId) : null,
     ]);
 
     // Resolved once so the hoisted default and the per-window overrides below
@@ -177,7 +178,7 @@ export class AutomationService {
       { ceilings, warmupTiers, channelDailyLimits }
     );
 
-    const views = this._extensionNodes && userId && bindingRows && isAccountBoundSendingEnabled()
+    const views = this._extensionNodes && userId && bindingRows && await this.controlled(org.id)
       ? await Promise.all((['POST', 'REPLY'] as const).map(action => this._extensionNodes!.accountViews(org.id, userId, bindingRows.filter(row => row.action === action && row.integrationId !== null).map(row => ({ id: row.integrationId!, disabled: row.accountDisabled })), action === 'POST' ? 'post' : 'reply')))
       : null;
 
@@ -279,11 +280,11 @@ export class AutomationService {
     dto: SaveAutomationPublishingDto,
     userId?: string
   ) {
-    if (isAccountBoundSendingEnabled()) {
+    if (await this.controlled(org.id)) {
       if (!this._automaticSends) throw new ServiceUnavailableException('AUTOMATIC_SEND_PRODUCER_REQUIRED');
       await this._automaticSends.assertOwnerAvailable(org.id, userId!);
     }
-    const writer = dto.accounts !== undefined ? this.bindingWriter() : null;
+    const writer = dto.accounts !== undefined ? await this.bindingWriter() : null;
     if (writer && dto.platforms === undefined && dto.windows === undefined && dto.enabled === undefined && dto.commit === undefined) {
       const result = await writer.save(org.id, userId!, projectId, 'POST', dto.accounts!, undefined, dto.requestId, dto);
       await this.captureOwner(org.id, projectId, 'POST', userId);
@@ -439,7 +440,7 @@ export class AutomationService {
    * switch has no business doing either.
    */
   async saveEnabled(org: Organization, projectId: string, enabled: boolean, userId?: string) {
-    if (isAccountBoundSendingEnabled()) {
+    if (await this.controlled(org.id)) {
       if (!this._automaticSends) throw new ServiceUnavailableException('AUTOMATIC_SEND_PRODUCER_REQUIRED');
       await this._automaticSends.assertOwnerAvailable(org.id, userId!);
     }
@@ -530,7 +531,7 @@ export class AutomationService {
       projectId,
       publishMethod,
       platforms,
-      ...(isAccountBoundSendingEnabled() ? [{ userId: await this._automaticSends!.owner(orgId, projectId, 'POST'), origin: 'AUTOMATION' as const }] : [])
+      ...((await this.controlled(orgId)) ? [{ userId: await this._automaticSends!.owner(orgId, projectId, 'POST'), origin: 'AUTOMATION' as const }] : [])
     );
   }
 
@@ -620,7 +621,7 @@ export class AutomationService {
     dto: SaveAutomationRepliesDto,
     userId?: string
   ) {
-    if (isAccountBoundSendingEnabled()) {
+    if (await this.controlled(org.id)) {
       if (!this._automaticSends) throw new ServiceUnavailableException('AUTOMATIC_SEND_PRODUCER_REQUIRED');
       await this._automaticSends.assertOwnerAvailable(org.id, userId!);
     }
@@ -629,7 +630,7 @@ export class AutomationService {
     }
 
     if (dto.accounts !== undefined) {
-      const writer = this.bindingWriter();
+      const writer = await this.bindingWriter();
       const transform = dto.autoReplyEnabled === undefined && dto.policies === undefined ? undefined : (settings: EngageConfigMetadata) => ({ ...settings,
         ...(dto.autoReplyEnabled !== undefined ? { autoReplyEnabled: dto.autoReplyEnabled } : {}),
         ...(dto.policies !== undefined ? { replyPolicies: replaceReplyPolicies(settings.replyPolicies as Record<string, Record<string, unknown>>, dto.policies) } : {}),
@@ -687,12 +688,17 @@ export class AutomationService {
   }
 
   private async captureOwner(org: string, project: string, action: 'POST' | 'REPLY', user?: string) {
-    if (isAccountBoundSendingEnabled()) await this._automaticSends!.saveOwner(org, project, action, user!);
+    if (await this.controlled(org)) await this._automaticSends!.saveOwner(org, project, action, user!);
   }
 
-  private bindingWriter() {
-    if (!this._bindings || !isAccountBoundSendingEnabled()) throw new ServiceUnavailableException('ACCOUNT_BINDINGS_NOT_ENABLED');
+  private async bindingWriter() {
+    if (!this._bindings || !(await this._modes?.getSystem())?.effectiveEnabled)
+      throw new ServiceUnavailableException('ACCOUNT_BINDINGS_NOT_ENABLED');
     return this._bindings;
+  }
+
+  private async controlled(org: string) {
+    return this._modes ? this._modes.isControlled(org) : false;
   }
 
 }

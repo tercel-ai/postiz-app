@@ -1,4 +1,3 @@
-import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
 import {
   X_FREE_MAX_WEIGHTED,
   X_SUBSCRIBED_MAX_WEIGHTED,
@@ -1446,7 +1445,7 @@ export class GenerateReferencePostDto {
 // ─── Reply Sending ────────────────────────────────────────────────────────────
 
 export class SendReplyDto {
-  @ValidateIf(value => value.integrationId !== undefined || !isAccountBoundSendingEnabled())
+  @ValidateIf(value => value.integrationId !== undefined)
   @IsString()
   @MinLength(1)
   integrationId?: string; // Resolved at enqueue, or at first coordinated claim under OPTIONAL.

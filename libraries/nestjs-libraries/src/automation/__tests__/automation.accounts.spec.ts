@@ -74,10 +74,22 @@ function setup() {
     {} as any,
     bindings as any,
     undefined,
-    automatic as any
+    automatic as any,
+    { isControlled: vi.fn().mockImplementation(async () => process.env.ACCOUNT_BOUND_SENDING_ENABLED === 'true'),
+      getSystem: vi.fn().mockImplementation(async () => ({ effectiveEnabled: process.env.ACCOUNT_BOUND_SENDING_ENABLED === 'true' })) } as any
   );
   return { service, bindings, posts, engage, repository, publishing, settings, automatic };
 }
+
+describe('organization-scoped automatic sending mode', () => {
+  it('does not capture a controlled owner in an autonomous org even when the environment is enabled', async () => {
+    const { service, automatic } = setup();
+    (service as any)._modes = { isControlled: vi.fn().mockResolvedValue(false) };
+    await service.saveEnabled({ id: 'org' } as any, 'project', false, 'user');
+    expect(automatic.assertOwnerAvailable).not.toHaveBeenCalled();
+    expect(automatic.saveOwner).not.toHaveBeenCalled();
+  });
+});
 
 describe('automation account DTO compatibility', () => {
   it('accepts account-only saves without requiring publishing platforms', async () => {

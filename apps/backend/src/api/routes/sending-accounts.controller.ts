@@ -1,4 +1,4 @@
-import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { SendModeService } from '@gitroom/nestjs-libraries/extension/send-mode.service';
 import {
   Body,
   Controller,
@@ -17,50 +17,50 @@ import { SaveSendingAccountsDto } from '@gitroom/nestjs-libraries/extension/send
 @ApiTags('Sending accounts')
 @Controller()
 export class SendingAccountsController {
-  constructor(private readonly bindings: SendBindingService) {}
+  constructor(private readonly bindings: SendBindingService, private readonly modes: SendModeService) {}
 
-  private enabled() {
-    if (!isAccountBoundSendingEnabled())
+  private async enabled() {
+    if (!(await this.modes.getSystem()).effectiveEnabled)
       throw new ServiceUnavailableException('ACCOUNT_BINDINGS_NOT_ENABLED');
   }
 
   @Get('/sending-accounts')
-  organization(
+  async organization(
     @GetOrgFromRequest() org: Organization,
     @GetUserFromRequest() user: User
   ) {
-    this.enabled();
+    await this.enabled();
     return this.bindings.getDefaults(org.id, user.id);
   }
 
   @Post('/sending-accounts/save')
-  saveOrganization(
+  async saveOrganization(
     @GetOrgFromRequest() org: Organization,
     @GetUserFromRequest() user: User,
     @Body() body: SaveSendingAccountsDto
   ) {
-    this.enabled();
+    await this.enabled();
     return this.bindings.saveDefaults(org.id, user.id, body);
   }
 
   @Get('/projects/:projectId/sending-accounts')
-  project(
+  async project(
     @GetOrgFromRequest() org: Organization,
     @GetUserFromRequest() user: User,
     @Param('projectId') projectId: string
   ) {
-    this.enabled();
+    await this.enabled();
     return this.bindings.getDefaults(org.id, user.id, projectId);
   }
 
   @Post('/projects/:projectId/sending-accounts/save')
-  saveProject(
+  async saveProject(
     @GetOrgFromRequest() org: Organization,
     @GetUserFromRequest() user: User,
     @Param('projectId') projectId: string,
     @Body() body: SaveSendingAccountsDto
   ) {
-    this.enabled();
+    await this.enabled();
     return this.bindings.saveDefaults(org.id, user.id, body, projectId);
   }
 }

@@ -374,3 +374,199 @@ it('includes legacy LinkedIn company roots in the canonical LinkedIn project bud
   await expect(db.$transaction((tx:any)=>quota.reserve(tx,'org','new',0,[budget({platform:'linkedin',limit:2})],now))).rejects.toThrow('SEND_QUOTA_EXHAUSTED');
   expect(db.rows('sendQuotaReservation')).toHaveLength(0);
 });
+
+describe('quota continuity across organization sending modes', () => {
+  it('rebuilds from controlled and autonomous facts without resetting the same-window allowance', async () => {
+    const { SendModeService } = await import('../send-mode.service');
+    const f = setupSend();
+    await f.create();
+    f.quotas.resolve.mockRestore();
+    f.db.rows('userOrganization')[0].role = 'ADMIN';
+    const intent = f.db.rows('sendIntent')[0];
+    const account = { ...f.db.rows('accountWriteState')[0], dailyWriteLimit: 3, timezone: 'UTC' };
+    const modes = new SendModeService(f.db as any);
+    const save = (mode: 'CONTROLLED' | 'AUTONOMOUS', expectedRevision: number, requestId: string) => modes.save('org', 'user',
+      { mode, expectedRevision, requestId, expectedOrganizationId: 'org', expectedUserId: 'user' });
+    const currentBudget = async () => (await f.quotas.resolve(f.db as any, intent, account, 0, now)).budgets
+      .find(row => row.dimension === 'PLATFORM_WRITES')!;
+    const firstBudget = await currentBudget();
+    await f.db.$transaction((tx: any) => f.quotas.reserve(tx, 'org', 'first', 0, [firstBudget], now));
+    f.db.seed('sendExecution', { id: 'first', organizationId: 'org', projectId: 'project', platform: 'x', action: 'POST',
+      canonicalAccountKey: account.canonicalAccountKey, sendIntentId: intent.id, status: 'CONFIRMED' });
+    f.db.seed('sendSegment', { organizationId: 'org', executionId: 'first', segmentIndex: 0, status: 'CONFIRMED', authorizedAt: now });
+    await f.db.$transaction((tx: any) => f.quotas.settle(tx, 'org', 'first', 0, true, now));
+    intent.status = 'SUCCEEDED';
+    f.db.rows('post')[0].state = 'PUBLISHED';
+    await save('AUTONOMOUS', 1, 'autonomous');
+    f.db.seed('post', { id: 'legacy', organizationId: 'org', integrationId: 'account', providerIdentifier: 'x',
+      parentPostId: null, state: 'PUBLISHED', publishDate: now, sendIntentId: null, executionProtocol: 'LEGACY' });
+    await save('CONTROLLED', 2, 'controlled-again');
+    const reopenedBudget = await currentBudget();
+    expect(reopenedBudget.key).not.toBe(firstBudget.key);
+    await f.db.$transaction((tx: any) => f.quotas.reserve(tx, 'org', 'second', 0, [reopenedBudget], now));
+    expect(f.db.rows('sendQuotaBucket').find(row => row.id === reopenedBudget.key))
+      .toMatchObject({ confirmedUnits: 2, heldUnits: 1 });
+    await expect(f.db.$transaction((tx: any) => f.quotas.reserve(tx, 'org', 'third', 0, [reopenedBudget], now)))
+      .rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+    f.db.seed('sendExecution', { id: 'second', organizationId: 'org', projectId: 'project', platform: 'x', action: 'POST',
+      canonicalAccountKey: account.canonicalAccountKey, sendIntentId: intent.id, status: 'CONFIRMED' });
+    f.db.seed('sendSegment', { organizationId: 'org', executionId: 'second', segmentIndex: 0, status: 'CONFIRMED', authorizedAt: now });
+    await f.db.$transaction((tx: any) => f.quotas.settle(tx, 'org', 'second', 0, true, now));
+    await save('CONTROLLED', 3, 'same-mode-save');
+    const sameModeBudget = await currentBudget();
+    expect(sameModeBudget.key).not.toBe(reopenedBudget.key);
+    await expect(f.db.$transaction((tx: any) => f.quotas.reserve(tx, 'org', 'fourth', 0, [sameModeBudget], now)))
+      .rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+    expect(f.db.rows('sendQuotaReservation').some(row => row.executionId === 'fourth')).toBe(false);
+  });
+});
+
+it('settles contradictory late confirmations into every mode epoch exactly once', async () => {
+  const { SendModeService } = await import('../send-mode.service');
+  const f = setupSend(); await f.create(); f.quotas.resolve.mockRestore();
+  f.db.rows('userOrganization')[0].role = 'ADMIN';
+  const intent = f.db.rows('sendIntent')[0];
+  const account = { ...f.db.rows('accountWriteState')[0], dailyWriteLimit: 3, timezone: 'UTC' };
+  const modes = new SendModeService(f.db as any);
+  const currentBudget = async () => (await f.quotas.resolve(f.db as any, intent, account, 0, now)).budgets
+    .find(row => row.dimension === 'PLATFORM_WRITES')!;
+  const originalBudget = await currentBudget();
+  await f.db.$transaction((tx: any) => f.quotas.reserve(tx, 'org', 'old-released', 0, [originalBudget], now));
+  f.db.seed('sendExecution', { id: 'old-released', organizationId: 'org', projectId: 'project', platform: 'x', action: 'POST',
+    canonicalAccountKey: account.canonicalAccountKey, sendIntentId: intent.id, status: 'FAILED_FINAL' });
+  f.db.seed('sendSegment', { organizationId: 'org', executionId: 'old-released', segmentIndex: 0,
+    status: 'NOT_SUBMITTED', authorizedAt: now });
+  await f.db.$transaction((tx: any) => f.quotas.settle(tx, 'org', 'old-released', 0, false, now));
+  intent.status = 'FAILED_FINAL'; f.db.rows('post')[0].state = 'ERROR';
+  await modes.save('org', 'user', { mode: 'AUTONOMOUS', expectedRevision: 1, requestId: 'leave',
+    expectedOrganizationId: 'org', expectedUserId: 'user' });
+  f.db.seed('post', { id: 'autonomous-published', organizationId: 'org', integrationId: 'account', providerIdentifier: 'x',
+    parentPostId: null, state: 'PUBLISHED', publishDate: now, sendIntentId: null, executionProtocol: 'LEGACY' });
+  await modes.save('org', 'user', { mode: 'CONTROLLED', expectedRevision: 2, requestId: 'return',
+    expectedOrganizationId: 'org', expectedUserId: 'user' });
+  const reopened = await currentBudget();
+  await f.db.$transaction((tx: any) => f.quotas.reserve(tx, 'org', 'current', 0, [reopened], now));
+  for (let index = 0; index < 2; index++)
+    await f.db.$transaction((tx: any) => f.quotas.correctLateConfirmation(tx, 'org', 'old-released', 0, now));
+  expect(f.db.rows('sendQuotaBucket').find(row => row.id === reopened.key)).toMatchObject({ confirmedUnits: 2, heldUnits: 1 });
+  expect(f.db.rows('sendQuotaReservation').filter(row => row.executionId === 'old-released').map(row => row.state))
+    .toEqual(['COMMITTED', 'COMMITTED']);
+  await expect(f.db.$transaction((tx: any) => f.quotas.reserve(tx, 'org', 'extra', 0, [reopened], now)))
+    .rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+});
+
+it.each([['x', 'x', 'reddit'], ['linkedin', 'linkedin-page', 'x']])(
+  'charges unattributed %s writes conservatively to account quota while excluding another platform', async (platform, samePlatform, otherPlatform) => {
+    const f = setupSend(); await f.create(); f.quotas.resolve.mockRestore();
+    const intent = { ...f.db.rows('sendIntent')[0], platform };
+    const account = { ...f.db.rows('accountWriteState')[0], dailyWriteLimit: 5, timezone: 'UTC' };
+    for (const [id, integrationId, providerIdentifier, sendIntentId] of [
+      ['same-platform', null, samePlatform, null], ['unknown-platform', null, null, null],
+      ['blank-platform', null, '', null], ['bound-actor', 'account', platform, null],
+      ['different-platform', null, otherPlatform, null], ['other-bound-actor', 'other', platform, null],
+      ['controlled-post', null, platform, 'controlled-intent'],
+    ]) f.db.seed('post', { id, organizationId: 'org', integrationId, providerIdentifier, sendIntentId,
+      state: 'PUBLISHED', publishDate: now, parentPostId: null });
+    const selected = (await f.quotas.resolve(f.db as any, intent, account, 0, now)).budgets
+      .find(row => row.dimension === 'PLATFORM_WRITES')!;
+    await f.db.$transaction((tx: any) => f.quotas.reserve(tx, 'org', 'one', 0, [selected], now));
+    expect(f.db.rows('sendQuotaBucket').find(row => row.id === selected.key))
+      .toMatchObject({ confirmedUnits: 4, heldUnits: 1 });
+    await expect(f.db.$transaction((tx: any) => f.quotas.reserve(tx, 'org', 'two', 0, [selected], now)))
+      .rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+  }
+);
+
+it('counts a recurring thread-comment release clone as a reply write and excludes it from business root quotas', async () => {
+  const db = memorySendDatabase(); const quota = new SendQuotaService();
+  db.seed('post', { id: 'thread-release', organizationId: 'org', projectId: 'project', providerIdentifier: 'x',
+    state: 'PUBLISHED', publishDate: now, sendIntentId: null, parentPostId: null,
+    sourcePostId: 'template-child', sourcePost: { parentPostId: 'template-root' }, source: 'calendar', settings: '{}' });
+  await expect(db.$transaction((tx: any) => quota.reserve(tx, 'org', 'write', 0,
+    [budget({ key: 'write', dimension: 'REPLY_WRITES', limit: 1 })], now))).rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+  await db.$transaction((tx: any) => quota.reserve(tx, 'org', 'root', 0,
+    [budget({ key: 'root', dimension: 'REPLY_ROOTS_AUTO', limit: 1 })], now));
+  expect(db.rows('sendQuotaBucket').find(row => row.id === 'root')).toMatchObject({ confirmedUnits: 0, heldUnits: 1 });
+});
+
+
+describe('autonomous side-effect quota baseline', () => {
+  const sideEffectBudget = (extra: Partial<SendBudget> = {}) => budget({
+    key: 'actor-budget', scope: 'ACCOUNT', dimension: 'PLATFORM_WRITES', accountKey: 'actor-key',
+    projectId: undefined, ...extra,
+  });
+  function fixture() {
+    const db = memorySendDatabase();
+    db.seed('accountWriteState', { organizationId: 'org', canonicalAccountKey: 'actor-key',
+      integrationId: 'actor', identityIntegrationIds: ['actor-alias'] });
+    return { db, q: new SendQuotaService() };
+  }
+  it('does not charge a repost to reply quotas, another actor, another day, or a conditional plug that did nothing', async () => {
+    const { db, q } = fixture();
+    const seed = (result: Record<string, unknown>) => db.seed('sendMutationReceipt', {
+      organizationId: 'org', operation: 'autonomous-side-effect', result: {
+        action: 'PLUG', integrationId: 'actor', status: 'CONFIRMED', revision: 2,
+        confirmedAt: now.toISOString(), quotaWriteKind: 'WRITE', quotaUnits: 1, ...result,
+      },
+    });
+    seed({});
+    seed({ quotaWriteKind: 'REPLY', integrationId: 'other-actor' });
+    seed({ quotaWriteKind: 'REPLY', confirmedAt: '2026-10-14T23:59:59Z' });
+    seed({ quotaWriteKind: 'REPLY', quotaUnits: 0, result: false });
+    await q.reserve(db as any, 'org', 'new', 0, [sideEffectBudget({ dimension: 'REPLY_WRITES' })], now);
+    expect(db.rows('sendQuotaBucket')[0]).toMatchObject({ confirmedUnits: 0, heldUnits: 1 });
+  });
+  it('counts successful conditional reply plugs and internal comments without treating them as project reply roots', async () => {
+    const { db, q } = fixture();
+    for (const action of ['PLUG', 'INTERNAL_PLUG']) db.seed('sendMutationReceipt', {
+      organizationId: 'org', operation: 'autonomous-side-effect', result: {
+        action, integrationId: 'actor', status: 'CONFIRMED', revision: 2,
+        confirmedAt: now.toISOString(), quotaWriteKind: 'REPLY', quotaUnits: 1, result: true,
+      },
+    });
+    await expect(q.reserve(db as any, 'org', 'new', 0,
+      [sideEffectBudget({ limit: 2, dimension: 'REPLY_WRITES' })], now)).rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+    await q.reserve(db as any, 'org', 'business-root', 0, [budget()], now);
+    expect(db.rows('sendQuotaBucket').find((row: any) => row.id === 'budget')).toMatchObject({ confirmedUnits: 0 });
+  });
+  it('fails closed for a confirmed plugin write whose units are not attributable', async () => {
+    const { db, q } = fixture();
+    db.seed('sendMutationReceipt', { organizationId: 'org', operation: 'autonomous-side-effect', result: {
+      action: 'INTERNAL_PLUG', integrationId: 'actor', status: 'CONFIRMED', revision: 2,
+      confirmedAt: now.toISOString(),
+    } });
+    await expect(q.reserve(db as any, 'org', 'new', 0, [sideEffectBudget()], now))
+      .rejects.toThrow('SEND_QUOTA_BASELINE_UNRESOLVED');
+  });
+  it('denies an old-format receipt whose completion time cannot be established from admission time', async () => {
+    const { db, q } = fixture();
+    db.seed('sendMutationReceipt', { organizationId: 'org', operation: 'autonomous-side-effect',
+      createdAt: new Date('2026-10-14T23:59:59Z'),
+      result: { action: 'THREAD_FINISHER', integrationId: 'actor', status: 'CONFIRMED', revision: 2,
+        hasResult: true, undefinedResult: true } });
+    // SendMutationReceipt has no updatedAt column; the generic harness adds it.
+    delete db.rows('sendMutationReceipt')[0].updatedAt;
+    await expect(db.$transaction((tx: any) => q.reserve(tx, 'org', 'new', 0,
+      [sideEffectBudget()], now))).rejects.toThrow('SEND_QUOTA_BASELINE_UNRESOLVED');
+  });
+  it('does not count the POST/COMMENT receipts a second time alongside their published rows', async () => {
+    const { db, q } = fixture();
+    db.seed('post', { organizationId: 'org', id: 'published', integrationId: 'actor',
+      providerIdentifier: 'x', state: 'PUBLISHED', publishDate: now, source: 'calendar', settings: '{}' });
+    db.seed('sendMutationReceipt', { organizationId: 'org', operation: 'autonomous-side-effect', result: {
+      action: 'POST', integrationId: 'actor', status: 'CONFIRMED', revision: 2,
+      confirmedAt: now.toISOString(), postIds: ['published'],
+    } });
+    await q.reserve(db as any, 'org', 'new', 0, [sideEffectBudget({ limit: 2 })], now);
+    expect(db.rows('sendQuotaBucket')[0]).toMatchObject({ confirmedUnits: 1, heldUnits: 1 });
+  });
+  it.each(['PLATFORM_WRITES', 'REPLY_WRITES'])('counts a confirmed autonomous thread finisher against %s after enrollment', async dimension => {
+    const { db, q } = fixture();
+    db.seed('sendMutationReceipt', { organizationId: 'org', operation: 'autonomous-side-effect',
+      result: { action: 'THREAD_FINISHER', integrationId: 'actor-alias', status: 'CONFIRMED', revision: 2,
+        confirmedAt: now.toISOString(), quotaWriteKind: 'REPLY', quotaUnits: 1, hasResult: true, undefinedResult: true } });
+    await expect(db.$transaction((tx: any) => q.reserve(tx, 'org', 'new', 0,
+      [sideEffectBudget({ dimension })], now))).rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+    expect(db.rows('sendQuotaReservation')).toHaveLength(0);
+  });
+});

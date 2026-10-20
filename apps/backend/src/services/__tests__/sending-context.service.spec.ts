@@ -35,7 +35,8 @@ function setup() {
   db.$transaction.mockImplementation(work => work(db));
   const projects = { assertProjectAccess: vi.fn(), getActivationVerdict: vi.fn().mockResolvedValue('active') };
   const policies = { snapshotInTransaction: vi.fn().mockResolvedValue({ requirePreselectedAccount: true }) };
-  return { db, projects, policies, service: new SendingContextService(db as any, projects as any, policies as any) };
+  const modes = { stateIn: vi.fn().mockResolvedValue({ mode: 'CONTROLLED', revision: 4, systemEnabled: true, autonomousAllowed: false }) };
+  return { db, projects, policies, modes, service: new SendingContextService(db as any, projects as any, policies as any, modes as any) };
 }
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(now); vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true'); });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
@@ -53,7 +54,8 @@ describe('shared Project, Post and Reply sending context', () => {
     expect(result.defaults.x.REPLY).toEqual({ integrationId: null, effectiveIntegrationId: null, source: 'UNBOUND', blockCode: 'SEND_BINDING_REQUIRED' });
     expect(db.$transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: 'Serializable' });
     expect(policies.snapshotInTransaction).toHaveBeenCalledWith(db, 'user');
-    expect(JSON.stringify(result)).not.toContain('revision');
+    expect(result).toMatchObject({ modeRevision: 4, autonomousAllowed: false });
+    expect(result.defaults.x.POST).not.toHaveProperty('revision');
   });
   it('keeps a single account row across multiple nodes and does not require the current browser to match', async () => {
     const { service, db } = setup();
@@ -163,17 +165,16 @@ describe('shared Project, Post and Reply sending context', () => {
     await expect(service.get('org', 'user', 'project')).rejects.toThrow('POLICY_UNAVAILABLE');
   });
   it('returns legacy mode without interpreting empty accounts as a controlled send capability', async () => {
-    const { service, db, policies } = setup();
-    vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'false');
-    expect(await service.get('org', 'user', 'project')).toMatchObject({ mode: 'LEGACY', accounts: [], defaults: {}, requireAccountSelection: null });
+    const { service, db, policies, modes } = setup();
+    modes.stateIn.mockResolvedValue({ mode: 'AUTONOMOUS', revision: 0, systemEnabled: true, autonomousAllowed: true });
+    expect(await service.get('org', 'user', 'project')).toMatchObject({ mode: 'AUTONOMOUS', accounts: [], defaults: {}, requireAccountSelection: null, autonomousAllowed: true });
     expect(db.integration.findMany).not.toHaveBeenCalled();
     expect(db.extensionNode.findMany).not.toHaveBeenCalled();
     expect(policies.snapshotInTransaction).not.toHaveBeenCalled();
   });
   it('keeps existing protected organizations paused rather than falling back to legacy', async () => {
-    const { service, db } = setup();
-    vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'false');
-    db.accountWriteState.count.mockResolvedValue(1);
+    const { service, modes } = setup();
+    modes.stateIn.mockResolvedValue({ mode: 'PAUSED', revision: 2, systemEnabled: false, autonomousAllowed: false });
     const result = await service.get('org', 'user', 'project');
     expect(result.mode).toBe('PAUSED');
     expect(result.accounts[0].actions.POST).toMatchObject({ canSelect: false, reason: 'ACCOUNT_BINDINGS_NOT_ENABLED' });

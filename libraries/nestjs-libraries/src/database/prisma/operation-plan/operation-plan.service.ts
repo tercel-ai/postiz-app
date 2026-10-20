@@ -1,4 +1,3 @@
-import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
 import { AutomaticSendProducerService } from '../../../extension/automatic-send-producer.service';
 import {
   BadRequestException,
@@ -537,7 +536,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         plan.projectId,
         undefined,
         undefined,
-        ...(isAccountBoundSendingEnabled() ? [{ userId: await this._automaticSends!.owner(plan.organizationId, plan.projectId, 'POST'), origin: 'AUTOMATION' as const }] : [])
+        ...((await this._postsService.isControlled(plan.organizationId)) ? [{ userId: await this._automaticSends!.owner(plan.organizationId, plan.projectId, 'POST'), origin: 'AUTOMATION' as const }] : [])
       );
     } catch (err) {
       this.logger.warn(

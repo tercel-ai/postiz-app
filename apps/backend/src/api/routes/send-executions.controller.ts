@@ -1,4 +1,4 @@
-import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { SendModeService } from '@gitroom/nestjs-libraries/extension/send-mode.service';
 import { PrismaService } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { SendCoordinatorService } from '@gitroom/nestjs-libraries/extension/send-coordinator.service';
 import {
@@ -182,11 +182,15 @@ export class SendReconciliationController {
 
 @Controller('/extension/send-protocol')
 export class SendProtocolController {
-  constructor(private readonly db: PrismaService) {}
+  constructor(private readonly modes: SendModeService) {}
   @Get()
   async get(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User) {
-    const enabled = isAccountBoundSendingEnabled();
-    const enrolled = await this.db.accountWriteState.count({ where: { organizationId: org.id } });
-    return { protocol: enabled ? 'ACCOUNT_BOUND_V1' : 'LEGACY', coordinationRequired: enabled || enrolled > 0, nodesEnabled: isAccountBoundSendingEnabled(), userId: user.id, organizationId: org.id, serverNow: new Date().toISOString() };
+    const state = await this.modes.get(org.id, user.id);
+    const controlled = state.mode === 'CONTROLLED';
+    return { protocol: controlled ? 'ACCOUNT_BOUND_V1' : 'LEGACY',
+      sendingMode: state.mode, modeRevision: state.revision,
+      autonomousAllowed: state.autonomousAllowed,
+      coordinationRequired: state.mode !== 'AUTONOMOUS', nodesEnabled: controlled,
+      userId: user.id, organizationId: org.id, serverNow: new Date().toISOString() };
   }
 }

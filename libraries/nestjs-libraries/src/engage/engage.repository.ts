@@ -1,3 +1,5 @@
+import { SendModeService } from '../extension/send-mode.service';
+import { sendTransaction } from '../extension/send-coordination.utils';
 import { isLegacyExecution, legacyExecutionWhere } from '../extension/legacy-execution';
 import {
   BadRequestException,
@@ -465,7 +467,8 @@ export class EngageRepository {
     // The engage_reply ledger. Needed by the broken-address triage below: it is
     // the only signal that survives for legacy paid generations, whose
     // EngageOpportunityState.generationHistory is SQL NULL.
-    private _billingRecord: PrismaRepository<'billingRecord'>
+    private _billingRecord: PrismaRepository<'billingRecord'>,
+    private _sendModes?: SendModeService
   ) {}
 
   // Runs a create that may hit a unique constraint and converts the resulting
@@ -2341,8 +2344,15 @@ export class EngageRepository {
        * comments in one subreddit that the cap exists to prevent.
        */
       excludeChannelIds?: string[];
-    }
+    },
+    tx?: Prisma.TransactionClient
   ) {
+    if (this._sendModes && !tx) {
+      return sendTransaction(this._tx.model, async client => {
+        await this._sendModes!.assertAutonomousIn(client, organizationId);
+        return this.claimDueEngageReplies(organizationId, projectId, platform, opts, client);
+      });
+    }
     if (opts.limit <= 0) return [];
 
     const available: Prisma.PostWhereInput = {
@@ -2388,16 +2398,18 @@ export class EngageRepository {
         }),
       },
       post: {
+        sendIntentId: null,
+        OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }],
         state: 'QUEUE',
         deletedAt: null,
         // Belt and braces with `state`: a reply that went out leaves QUEUE AND
         // gains a URL, so a half-written commit cannot resurrect it.
         releaseURL: null,
-        ...available,
+        AND: [available],
       },
     };
 
-    const candidates = await this._sentReply.model.engageSentReply.findMany({
+    const candidates = await (tx?.engageSentReply ?? this._sentReply.model.engageSentReply).findMany({
       where: dueWhere,
       // LEAST-RECENTLY-ATTEMPTED first, not oldest-drafted first.
       //
@@ -2432,14 +2444,15 @@ export class EngageRepository {
     const postIds = candidates.map((c) => c.postId);
     if (!postIds.length) return [];
 
-    await this._post.model.post.updateMany({
+    await (tx?.post ?? this._post.model.post).updateMany({
       // Re-check availability at write time: a concurrent claim of the same
       // candidate loses the race for that row, where the guard is a no-op.
-      where: { id: { in: postIds }, state: 'QUEUE', ...available },
+      where: { organizationId, id: { in: postIds }, state: 'QUEUE', sendIntentId: null,
+        AND: [available, { OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] }] },
       data: { releaseId: opts.leaseToken, claimedAt: opts.now },
     });
 
-    const won = await this._sentReply.model.engageSentReply.findMany({
+    const won = await (tx?.engageSentReply ?? this._sentReply.model.engageSentReply).findMany({
       where: { postId: { in: postIds }, post: { releaseId: opts.leaseToken } },
       orderBy: { createdAt: 'asc' },
       select: {
@@ -3919,7 +3932,12 @@ export class EngageRepository {
     // two concurrent saves from both seeing no draft and inserting two — that needs a
     // DB-level partial unique index, deliberately skipped to avoid a migration; the
     // realistic trigger is a double-click, which the client should debounce.)
-    return this._tx.model.$transaction(async (tx) => {
+    return sendTransaction(this._tx.model, async (tx) => {
+      if (this._sendModes) {
+        if (data.coordinatedAutomatic) await this._sendModes.assertControlledIn(tx, organizationId);
+        else if (state === 'QUEUE') await this._sendModes.assertAutonomousIn(tx, organizationId);
+        else await this._sendModes.lockIn(tx, organizationId);
+      }
       // Scoped to the state being written: re-saving a human's draft updates
       // that draft, and the driver's own upsert can only ever meet its own
       // queued row. Without the scope a driver run would silently overwrite a

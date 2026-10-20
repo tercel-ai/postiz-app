@@ -1,3 +1,4 @@
+import { SendModeService } from '../../extension/send-mode.service';
 import { AutomaticSendProducerService } from '../../extension/automatic-send-producer.service';
 import { SendExecutionService } from '../../extension/send-execution.service';
 import { SendCoordinatorService } from '../../extension/send-coordinator.service';
@@ -174,6 +175,7 @@ import { SendPolicyService } from '@gitroom/nestjs-libraries/extension/send-poli
     ExtensionExecutionReadyGuard,
     SendBindingService,
     SendPolicyService,
+    SendModeService,
     SendCoordinatorService,
     AutomaticSendProducerService,
     SendExecutionService,

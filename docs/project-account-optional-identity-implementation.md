@@ -1,6 +1,10 @@
 # OPTIONAL First Binding and Social Account Identity Unification — Implementation Notes
 
+Current routing update (2026-10-20): [Organization sending modes](organization-sending-modes.md) supersedes the historical environment-only rollout statements below. System capability and Organization AUTONOMOUS/CONTROLLED selection are separate. REQUIRED/OPTIONAL applies only inside CONTROLLED. An unconfigured, unenrolled Organization remains autonomous; a paused controlled Organization cannot fall back automatically. Safe explicit mode switching preserves all controlled content and settlement history.
+
 Organization-wide sending defaults are optional and independent of Post/Reply selections and Project defaults. When the global default is absent or cleared, selection is explicit Post/Reply account → Project default. If neither is set, REQUIRED blocks enqueue and OPTIONAL may await verified first binding; the server does not create a global default or silently select an arbitrary account. POST and REPLY defaults are independent, and queued account snapshots are not changed by clearing a default.
+
+Node identity is initialized automatically per extension installation; no native helper or manual pairing is required. It survives in-place updates and restarts; uninstalling or clearing all extension data creates a new node without releasing old execution/account locks or quota holds. See [design §4.2](project-account-extension-node-binding-design.md#42-automatic-installation-nodeid-and-account-isolation).
 
 Date: 2026-10-16. Corresponds to [design doc §14.7](project-account-extension-node-binding-design.md#147-optional-first-binding-and-identity-unification-phase-2026-10-16).
 

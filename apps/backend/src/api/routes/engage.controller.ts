@@ -1,3 +1,4 @@
+import { SendModeService } from '@gitroom/nestjs-libraries/extension/send-mode.service';
 import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
 import { Headers } from '@nestjs/common';
 import { SendExecutionService } from '@gitroom/nestjs-libraries/extension/send-execution.service';
@@ -129,7 +130,8 @@ export class EngageController {
     private _ingestQuota: EngageIngestQuotaService,
     private _redditTargets: RedditTargetResolutionService,
     @Optional() private _extensionNodes?: ExtensionNodeService,
-    @Optional() private _sendExecutions?: SendExecutionService
+    @Optional() private _sendExecutions?: SendExecutionService,
+    @Optional() private _sendModes?: SendModeService
   ) {}
 
   // ─── Extension scan loop ──────────────────────────────────────────────────
@@ -565,7 +567,7 @@ export class EngageController {
     @GetUserFromRequest() user?: User
   ) {
     const accounts = await this._engageService.listReplyAccounts(org, projectId);
-    if (!user || !isAccountBoundSendingEnabled() || !this._extensionNodes) return accounts;
+    if (!user || !(this._sendModes ? await this._sendModes.isControlled(org.id) : isAccountBoundSendingEnabled()) || !this._extensionNodes) return accounts;
     const views = await this._extensionNodes.accountViews(org.id, user.id, accounts.map(account => ({ id: account.id as string, disabled: account.disabled === true || account.engageEnabled === false || !!account.blockCode })), 'reply');
     return accounts.map(account => ({ ...account, ...views.get(account.id as string), ...(account.blockCode ? { sendAvailability: account.blockCode } : {}) }));
   }
@@ -615,7 +617,7 @@ export class EngageController {
     if (headers?.['x-extension-node-id']) {
       if (!this._sendExecutions || !user) throw new Error('SEND_COORDINATOR_REQUIRED');
       if (this._extensionNodes) await this._extensionNodes.authenticate(org.id, user.id, headers['x-extension-node-id'], headers['x-extension-node-token']);
-      if (isAccountBoundSendingEnabled()) await this._engageAutoReplyService.getDueReplies(org, new Date(), { coordinated: true });
+      if (this._sendModes ? await this._sendModes.isControlled(org.id) : isAccountBoundSendingEnabled()) await this._engageAutoReplyService.getDueReplies(org, new Date(), { coordinated: true });
       const [claimed, pacing] = await Promise.all([
         this._sendExecutions.claim({ org: org.id, user: user.id, nodeId: headers['x-extension-node-id'], token: headers['x-extension-node-token'] }, { requestId: body?.requestId!, action: 'REPLY' }),
         this._platformPacing.getPlatformPacing(),

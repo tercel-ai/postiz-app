@@ -1,3 +1,4 @@
+import { organizationSendModeKey } from './send-mode.service';
 import {
   ConflictException,
   ForbiddenException,
@@ -69,7 +70,9 @@ export class SendQuotaService {
     segmentIndex: number,
     now: Date
   ): Promise<SendQuotaPlan> {
+    const modeKey = organizationSendModeKey(intent.organizationId);
     const keys = [
+      modeKey,
       'platform_pacing',
       'extension_publish.min_gap',
       'engage_reply_pacing',
@@ -82,6 +85,9 @@ export class SendQuotaService {
       where: { key: { in: keys } },
     });
     const values = new Map(settings.map((row) => [row.key, row.value]));
+    const modeConfiguration = values.get(modeKey) as { revision?: number } | null | undefined;
+    const modeRevision = modeConfiguration?.revision ?? 0;
+    if (!integer(modeRevision)) throw new ForbiddenException('SEND_QUOTA_POLICY_INVALID');
     const pacing = sanitizePlatformPacing(values.get('platform_pacing'));
     const window = resolvePacingWindow(pacing, intent.platform);
     if (
@@ -133,8 +139,12 @@ export class SendQuotaService {
     ) => {
       if (!integer(limit))
         throw new ForbiddenException('SEND_QUOTA_POLICY_INVALID');
+      if (extra.accountKey) extra = { platform: intent.platform, ...extra };
       const key = sendHash([
         intent.organizationId,
+        // Reopening controlled sending reseeds from all facts in the same window.
+        // A prior bucket cannot observe autonomous publications made while it was inactive.
+        'organization-mode-revision', modeRevision,
         scope,
         dimension,
         range.since.toISOString(),
@@ -155,6 +165,7 @@ export class SendQuotaService {
         windowEnd: range.until,
         timezone,
         policyVersion: sendHash([
+          modeRevision,
           limit,
           timezone,
           policy,
@@ -425,14 +436,15 @@ export class SendQuotaService {
         publishDate: { gte: budget.windowStart, lt: budget.windowEnd },
         ...(account
           ? {
-              integrationId: {
-                in: [
-                  ...new Set([
-                    account.integrationId,
-                    ...account.identityIntegrationIds,
-                  ]),
-                ],
-              },
+              OR: [
+                { integrationId: { in: [...new Set([account.integrationId, ...account.identityIntegrationIds])] } },
+                // Unattributed autonomous writes may belong to this actor. Unknown platforms are conservative holds.
+                { integrationId: null, OR: [
+                  ...(budget.platform ? [{ providerIdentifier: { in: budget.platform === 'linkedin'
+                    ? ['linkedin', 'linkedin-page'] : [budget.platform] } }] : []),
+                  { providerIdentifier: null }, { providerIdentifier: '' },
+                ] },
+              ],
             }
           : {}),
         ...(budget.projectId
@@ -440,6 +452,7 @@ export class SendQuotaService {
           : {}),
       },
       include: {
+        sourcePost: { select: { parentPostId: true } },
         engageSentReply: {
           include: { opportunity: { select: { channelId: true } } },
         },
@@ -452,19 +465,20 @@ export class SendQuotaService {
       } catch {
         /* Legacy malformed settings cannot prove a reply target. */
       }
+      const threadReply = !!post.parentPostId || !!post.sourcePost?.parentPostId;
       const reply =
         !!post.engageSentReply ||
         !!settings.reply_to_tweet_id ||
         !!settings.replyToId ||
         post.source === 'engage' ||
-        !!post.parentPostId;
+        threadReply;
       if (
         (budget.dimension === 'REPLY_WRITES' ||
           budget.dimension.startsWith('REPLY_ROOTS')) &&
         !reply
       )
         return false;
-      if (budget.dimension.startsWith('REPLY_ROOTS') && post.parentPostId)
+      if (budget.dimension.startsWith('REPLY_ROOTS') && threadReply)
         return false;
       const channel =
         post.engageSentReply?.opportunity?.channelId ??
@@ -475,9 +489,40 @@ export class SendQuotaService {
           post.engageSentReply?.matchedKeywords.includes(budget.keyword))
       );
     }).length;
+    // These autonomous account writes have no Post row. POST/COMMENT receipts
+    // are represented by their published Posts and must not be charged twice.
+    let autonomousUnits = 0;
+    if (account && ['PLATFORM_WRITES', 'REPLY_WRITES'].includes(budget.dimension)) {
+      const actorIds = new Set([account.integrationId, ...account.identityIntegrationIds]);
+      const receipts = await tx.sendMutationReceipt.findMany({
+        where: { organizationId: org, operation: 'autonomous-side-effect' },
+      });
+      for (const receipt of receipts) {
+        const fact = receipt.result as {
+          status?: string; action?: string; integrationId?: string; confirmedAt?: string;
+          quotaWriteKind?: string; quotaUnits?: number;
+        } | null;
+        if (!fact || fact.status !== 'CONFIRMED' || !actorIds.has(fact.integrationId!) ||
+            !['THREAD_FINISHER', 'PLUG', 'INTERNAL_PLUG'].includes(fact.action!)) continue;
+        // Admission time does not prove completion time; old receipts must fail closed.
+        if (typeof fact.confirmedAt !== 'string') throw new ForbiddenException('SEND_QUOTA_BASELINE_UNRESOLVED');
+        const at = new Date(fact.confirmedAt);
+        if (!Number.isFinite(at.getTime())) throw new ForbiddenException('SEND_QUOTA_BASELINE_UNRESOLVED');
+        if (at < budget.windowStart || at >= budget.windowEnd) continue;
+        const kind = fact.quotaWriteKind ?? (fact.action === 'THREAD_FINISHER' ? 'REPLY' : undefined);
+        const units = fact.quotaUnits ?? (fact.action === 'THREAD_FINISHER' ? 1 : undefined);
+        if (units === 0) continue;
+        if (!['WRITE', 'REPLY'].includes(kind!) || !integer(units))
+          throw new ForbiddenException('SEND_QUOTA_BASELINE_UNRESOLVED');
+        if (budget.dimension === 'REPLY_WRITES' && kind !== 'REPLY') continue;
+        // Missing channel attribution cannot prove this write belonged elsewhere.
+        autonomousUnits += units;
+        if (!Number.isSafeInteger(autonomousUnits)) throw new ForbiddenException('SEND_QUOTA_BASELINE_UNRESOLVED');
+      }
+    }
     return {
       confirmedUnits:
-        legacyCount + relevant.filter((r) => r.status === 'CONFIRMED').length,
+        legacyCount + autonomousUnits + relevant.filter((r) => r.status === 'CONFIRMED').length,
       heldUnits: relevant.filter((r) => ['AUTHORIZED', 'UNKNOWN'].includes(r.status)).length,
       holds: relevant
         .filter((r) => ['AUTHORIZED', 'UNKNOWN', 'NOT_SUBMITTED'].includes(r.status))

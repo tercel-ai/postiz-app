@@ -1,0 +1,202 @@
+# Organization 发送模式
+
+更新：2026-10-20。本文定义本次实现的模式、切换安全边界和 API。它取代旧设计中“环境变量开启后所有组织统一受控”的规则。两种模式均使用最新版插件。
+
+## 产品行为
+
+| 模式 | 用户体验 | 账号来源 |
+| --- | --- | --- |
+| AUTONOMOUS：插件自主发送 | 保留已有插件发送流程，不要求节点注册或受控许可 | 当前浏览器实际登录的账号；已有业务账号选择和校验继续适用 |
+| CONTROLLED：多节点受控发送 | 后台冻结账号，由合格节点领取并验证，取得许可后提交 | 单条 Post/Reply 指定 → Project 默认 → 可选 Organization 全局默认 |
+| PAUSED：受控发送暂停 | 停止新的受控发送，保留查询、结果上报和结算 | 保留已冻结账号和执行记录，不能退回自主流程重发 |
+
+发送模式属于 **Organization**。同一组织的所有项目共用模式，Project 只管理平台/动作的默认账号。组织全局默认独立且可选，没有设置时解析结束于 Project。Post/Reply 不需要新增“继承默认”选项，未指定账号即由后台解析。
+
+AUTONOMOUS 保留插件原有本地队列和业务租约，不使用 V1 的统一发送许可和受控提交日志。因此不能把自主模式宣传为具备与受控模式相同的多节点防重保证。受控任务始终不能转入自主队列重发。
+
+默认未启用受控模式的组织使用 AUTONOMOUS。存在历史受控记录但没有显式模式的组织保守暂停，管理员需明确选择模式；不会因为本次升级自动释放历史保护。
+
+REQUIRED / OPTIONAL 是 CONTROLLED 内部的账号预选政策：REQUIRED 要求入队前有账号；OPTIONAL 允许符合条件的无账号任务在首次领取时绑定。两者都必须经过节点认证、身份验证、账号锁和配额结算，都不是自主发送的开关。
+
+## 用户实际操作
+
+1. 只需要当前浏览器账号发送：未启用受控的新组织无需设置，保留 AUTONOMOUS。
+2. 需要多节点：系统管理员先开放系统能力；组织管理员在最新版插件 Options 的 Organization sending mode 中选择 **Use controlled sending**。
+3. 插件自动使用已有 Node ID 注册并上报当前平台账号。Options 的 **Check / retry node registration** 显示 HTTP 状态和错误码；失败时排查该错误，不自动转自主发送。
+4. 设置 Project 默认账号，或在单条 Post/Reply 指定账号。Organization 全局默认可不设置。REQUIRED 下没有可解析账号会要求补选；OPTIONAL 下可等待首次合格领取绑定。
+5. 需要退回自主发送：先完成/处理阻塞任务，再由管理员点击 **Use autonomous sending**。失败时依据返回的 blockers 处理，不通过关闭系统能力强行降级。
+
+aisee-app 的 Organization 模式入口和业务页面接入仍需前端按文档实现；本次已提供后端 API 和插件 Options 入口。
+
+## 系统能力与组织选择
+
+系统设置 `sending.account_bound_enabled` 只控制是否开放受控能力：
+
+1. 环境变量 `ACCOUNT_BOUND_SENDING_ENABLED=false` 是紧急停止覆盖，Settings 不能绕过。
+2. 存在有效的系统 Settings 时采用其 `enabled`。
+3. 没有该设置时，以环境变量 `ACCOUNT_BOUND_SENDING_ENABLED=true` 为兼容默认；未设置时为 false。
+
+系统开启不代表所有组织启用。系统关闭时，自主组织仍走自主流程；已选择 CONTROLLED 的组织进入 PAUSED，不自动降级。环境变量修改需要重启相关进程；Settings 保存后由后台读取，不依赖进程内永久缓存。
+
+```mermaid
+flowchart TD
+  A[已认证用户和组织] --> B{组织选择}
+  B -->|AUTONOMOUS| C[插件自主发送]
+  B -->|CONTROLLED| D{系统能力开放}
+  B -->|未配置且存在受控历史| P[PAUSED]
+  D -->|否| P
+  D -->|是| E[单条指定 → Project 默认 → 可选 Organization 默认]
+  E --> F{解析到账号}
+  F -->|是| G[冻结账号和内容]
+  F -->|否且 REQUIRED| H[要求配置账号]
+  F -->|否且 OPTIONAL| I[首次合格领取原子绑定]
+  G --> J[唯一领取 → 验证 → 许可 → 提交 → 幂等结算]
+  I --> J
+  P --> K[只保留恢复查询、结果上报和结算]
+```
+
+## 安全切换
+
+模式切换是管理员操作，不由“项目没配置账号”、注册失败、网络错误或节点离线触发。
+
+模式变更、任务入队、节点领取与提交授权共享组织模式事务锁，并使用现有 Serializable 重试机制。系统能力修改与授权共享系统设置锁。读取模式之后再在另一个事务无条件授权，不能满足并发保护要求。
+
+模式修订也参与受控配额桶标识。自主期间可能产生新的 PUBLISHED 记录，重新开启受控时必须重新建立同一时间窗的配额基线，同时计入此前受控确认记录、自主发送记录和仍需保护的历史预留。切换模式、反复保存同一模式都不会重置当天额度；历史预留仍按原账本幂等结算。自主发送若没有可确认的账号归属，其已发送记录会保守计入相同平台的账号配额，不能把身份不明确当作零用量。
+
+没有独立 Post 记录的线程补尾、自动评论/转发等自主写入，按一次性执行回执计入账号额度，以确认时间归属时间窗。只有已核实行为的提供方方法才记录确定的写入类型和数量；无法确认实际写入量的方法，或缺少可信确认时间的旧回执，会返回 `SEND_QUOTA_BASELINE_UNRESOLVED`，暂停该账号的新受控授权，避免将未知用量当作零。已有 PUBLISHED Post 的主帖和普通评论不重复计入回执用量。
+
+| 方向 | 必须满足的条件 |
+| --- | --- |
+| 自主 → 受控 | 没有尚未完成的自主发送队列/领取工作；旧插件本地工作和旧 worker 必须先停止、结清。普通未发送 Post 草稿不阻塞；未完成的 Engage Reply DRAFT 可能已经在浏览器提交，仍会保守阻塞。 |
+| 受控 → 自主 | 没有非终态 Intent、未完成执行、已授权/未知提交、未结算配额预留、活动账号锁，或已经标记 V1 但尚未形成 Intent 的待发送内容。 |
+| 系统关闭 | 已受控组织暂停新工作；允许迟到结果继续结算，不清理未知结果或账号锁。 |
+
+不安全切换返回 HTTP 409 `SEND_MODE_SWITCH_UNSAFE` 和阻塞计数。先处理已有任务，再重新发起切换。系统不自动取消、不清锁、不退款、不复制任务，也不声称超时意味着平台没有提交。
+
+安全退回自主模式只影响后续自主业务。原受控内容的 Intent、提交日志、平台结果和配额流水永久保留；不能通过旧回调、变更账号、改写 Post 或重新排队绕过原内容保护。UNKNOWN 必须核查并走已有对账，不可当失败重发。
+
+已经标记为 V1、尚未形成 Intent 的 DRAFT/QUEUE 也阻止降级，包括受控计划生成的待发送草稿。需要先通过正常业务取消/删除未提交草稿或完成发送，不能直接改数据库抹掉标记。
+
+自主流程中的历史 OAuth 自动转发、内部插件动作和线程补尾同样可能写入社交账号。它们在平台调用前使用现有 SendMutationReceipt 登记一次性执行权，与组织切换共享模式锁；平台调用在事务外执行，不放进会重试的数据库事务。确认结果回写回执，崩溃、异常或结果不明保留阻塞。相同业务动作的重试不会再次调用平台。此处复用回执表，不新增表。
+
+插件接收到明确、匹配当前用户/组织的 AUTONOMOUS 授权后，才可进入自主流程。旧协议、请求失败或缺少字段不能解除本机的受控保护；本地尚有受控执行日志时，先恢复/上报，不能将其转入自主队列。
+
+历史自主动作结果不明时，由组织管理员先停止原执行器、确认没有尚待提交的请求，再核查平台事实。专用查询/人工核查接口位于 `/sending/mode/autonomous-effects`；人工结论只解除切换阻塞，不重新授予同一动作发送权。NOT_SUBMITTED 也不自动重试。人工确认依赖操作人员提供真实证据，系统不能通过等待超时证明平台没有提交。
+
+## 组织 API
+
+沿用现有鉴权和 Organization 上下文，不能通过请求体指定其他组织。
+
+```http
+GET /sending/mode
+```
+
+返回模式状态、当前修订、系统能力和是否允许自主发送。`canManage` 用于前端显隐；服务端仍独立校验保存权限。最终字段以实现返回为准。
+
+```json
+{
+  "organizationId": "organization-id",
+  "userId": "current-user-id",
+  "mode": "AUTONOMOUS",
+  "configuredMode": null,
+  "revision": 0,
+  "systemEnabled": true,
+  "systemRevision": 1,
+  "autonomousAllowed": true,
+  "canManage": true,
+  "blockers": {
+    "legacyQueuedPosts": 0, "legacyReplyDrafts": 0, "legacyClaims": 0,
+    "controlledPendingPosts": 0, "nonterminalIntents": 0, "activeExecutions": 0,
+    "uncertainSegments": 0, "heldQuotaReservations": 0, "accountLocks": 0,
+    "autonomousEffects": 0
+  }
+}
+```
+
+```http
+POST /sending/mode
+Content-Type: application/json
+```
+
+```json
+{
+  "mode": "CONTROLLED",
+  "expectedOrganizationId": "organization-id",
+  "expectedUserId": "current-user-id",
+  "expectedRevision": 0,
+  "requestId": "one-stable-id-for-this-switch"
+}
+```
+
+仅当前组织的有效 ADMIN/SUPERADMIN 可修改。一次操作固定 requestId 和请求体，网络重试复用；改变选择应新建 requestId。expectedRevision、expectedOrganizationId 和 expectedUserId 来自 GET；身份/组织变化返回 SEND_OWNER_CHANGED，版本过期则刷新并让用户重新决定，不能自动覆盖。这里版本保护的是整个组织的发送安全状态，不是普通默认账号表单。
+
+相同 requestId 的重试读取已有回执；不同内容复用 requestId 被拒绝。模式版本冲突、权限不足、系统能力未开放和切换阻塞均应展示实际错误，不把失败展示为切换成功。
+
+保存回执描述该次操作当时的结果。成功后必须重新 GET 当前模式，不能用旧回执覆盖后续修改。切换组织/用户后丢弃旧表单；不自动将旧操作重试到新身份。
+
+### 历史自主平台写入的人工核查
+
+```http
+GET /sending/mode/autonomous-effects
+POST /sending/mode/autonomous-effects/:id/resolve
+```
+
+仅当前组织 ADMIN/SUPERADMIN 可用。查询返回 `{ organizationId, userId, items }`，每项包含回执 id、动作、integrationId、状态、版本和创建时间及允许公开的业务资源标识；不返回凭据、请求原文或内部哈希。一次最多列出 100 项，处理后再次查询。
+
+```json
+{
+  "decision": "NOT_SUBMITTED",
+  "expectedRevision": 2,
+  "expectedOrganizationId": "organization-id",
+  "expectedUserId": "current-user-id",
+  "requestId": "stable-resolution-id",
+  "executorStopped": true,
+  "noPendingSubmit": true,
+  "evidence": "Stopped the original worker and checked the platform record."
+}
+```
+
+decision 只允许 CONFIRMED / NOT_SUBMITTED。必须实际停止原执行器并核查平台事实，再提交真实证据（非空，最多 2000 字符）；这些字段是操作人员的确认，不是系统自动证明。处理使用版本 CAS 和幂等回执，不清除审计历史。NOT_SUBMITTED 不授权自动重试；人工 CONFIRMED 若没有原调用缓存结果，也不会重新调用平台“补结果”。业务 Post 状态和配额仍走各自既有结算入口，不由该接口猜测或直接修改。
+
+历史服务端 OAuth 平台写入若抛出异常（包括 refresh_token 错误），保守进入 UNKNOWN。一次调用可能已完成部分提交，不能仅凭异常自动刷新令牌后重发整个动作；应先重新授权并核查结果。最新版插件的自主执行路径不经过这层 OAuth 包装。
+
+## 系统管理 API
+
+系统管理员使用专用类型校验接口，普通 Settings 写入不能绕过安全规则：
+
+```http
+GET /admin/settings/sending.account_bound_enabled
+POST /admin/settings/sending.account_bound_enabled
+```
+
+```json
+{
+  "enabled": true,
+  "expectedRevision": 0,
+  "requestId": "one-stable-system-setting-id"
+}
+```
+
+GET/保存返回 `{ key, value: { enabled, revision }, effectiveEnabled, environmentOverride }`，`environmentOverride="DISABLED"` 表示环境变量强制关闭。支持保留的 PUT 别名。环境变量强制 false 时返回的有效能力仍为关闭；不能仅凭存储值展示“受控已可用”。
+
+## 插件和前端接入
+
+`GET /extension/send-protocol` 保留原协议字段，增加组织模式投影：`sendingMode`、`modeRevision`、`autonomousAllowed`。自主模式返回 LEGACY 协议，表示调用现有自主执行路径，不表示使用旧版插件。暂停状态不能作为允许自主发送的信号。
+
+Project/Post/Reply 继续使用 `GET /projects/:projectId/sending-context` 获取模式、默认账号与节点列表。读取失败必须显示错误。aisee-app 在 Organization 设置提供两个模式选择；无需新增个人开关或 Project 模式开关。默认账号、账号列表和 Reply 选择的详细改动见 [前端接入指南](../../aisee-app/docs/aisee-app-multi-node-integration.md)。
+
+诊断按钮使用带 `x-extension-node-id`、`x-extension-node-token` 和 `x-extension-protocol-version: ACCOUNT_BOUND_V1` 的 `GET /extension/nodes/current` 核验当前凭据；返回仅含 `nodeId`、`organizationId`、`registeredByUserId`、`status`。该接口不重建或轮换凭据，不受注册回执十分钟恢复期限影响；撤销节点、错误凭据或身份归属不符不能显示注册成功。
+
+插件 Options 显示当前组织模式及注册诊断。诊断仅包含 HTTP 状态和允许公开的错误码，不能展示 nodeToken、JWT、请求头或密钥。切换后重新读取后台模式，不能仅通过本地开关改变发送行为。
+
+## 部署和验收
+
+复用 Settings、SendMutationReceipt 和现有发送/配额记录，本次模式配置不新增表。已有受控发送依赖的迁移仍由用户或部署流水线应用；本次不连接数据库、不执行 SQL。
+
+本版本的模式判定需要检查既有发送、执行、回执和配额表，因此部署前必须具备这些表，即使组织保留自主模式也一样。缺表或读取失败会报错，不推测为“从未受控”并放行发送。
+
+部署后构建并重启 backend 和 orchestrator，更新独立插件。Settings 不会替代插件所需的稳定凭据密钥。先确认组织模式，再开启受控能力并清理切换阻塞。旧浏览器插件本地自主队列无法由服务器完全观测，升级前需停止旧执行并结清；不应混跑可绕过新授权的旧程序。
+
+必须验证：默认自主、显式受控、系统暂停、权限和组织隔离、模式写入幂等、并发切换/领取/授权、迟到回调、UNKNOWN 不重发、配额只结算一次、本机日志恢复，以及注册失败不降级。
+
+本次验证结果、逐项测试对应和未覆盖的真实环境边界见 [验收记录](../planning/organization-sending-modes/verification.md)。

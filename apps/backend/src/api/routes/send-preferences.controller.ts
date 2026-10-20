@@ -1,4 +1,4 @@
-import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { SendModeService } from '@gitroom/nestjs-libraries/extension/send-mode.service';
 import {
   Body,
   Controller,
@@ -16,26 +16,26 @@ import { SaveSendPreferencesDto } from '@gitroom/nestjs-libraries/extension/send
 @ApiTags('Sending preferences')
 @Controller('/user/send-preferences')
 export class SendPreferencesController {
-  constructor(private readonly policies: SendPolicyService) {}
+  constructor(private readonly policies: SendPolicyService, private readonly modes: SendModeService) {}
 
-  private enabled() {
-    if (!isAccountBoundSendingEnabled())
+  private async enabled() {
+    if (!(await this.modes.getSystem()).effectiveEnabled)
       throw new ServiceUnavailableException('ACCOUNT_BINDINGS_NOT_ENABLED');
   }
 
   @Get()
-  get(@GetUserFromRequest() user: User) {
-    this.enabled();
+  async get(@GetUserFromRequest() user: User) {
+    await this.enabled();
     return this.policies.getPreferences(user.id);
   }
 
   @Post()
-  save(
+  async save(
     @GetOrgFromRequest() org: Organization,
     @GetUserFromRequest() user: User,
     @Body() body: SaveSendPreferencesDto
   ) {
-    this.enabled();
+    await this.enabled();
     return this.policies.savePreferences(org.id, user.id, body);
   }
 }

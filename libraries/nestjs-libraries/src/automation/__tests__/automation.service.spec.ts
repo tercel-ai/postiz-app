@@ -153,6 +153,7 @@ describe('AutomationService.getOverview', () => {
     vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true');
     try {
       const { service } = makeService();
+      (service as any)._modes = { isControlled: vi.fn().mockResolvedValue(true) };
       (service as any)._bindings = { list: vi.fn().mockResolvedValue([
         { platform: 'x', action: 'POST', integrationId: 'post-account', revision: 4, accountDisabled: false },
         { platform: 'x', action: 'REPLY', integrationId: 'reply-account', revision: 7, accountDisabled: true },

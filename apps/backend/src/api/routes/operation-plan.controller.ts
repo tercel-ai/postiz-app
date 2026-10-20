@@ -1,4 +1,4 @@
-import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { SendModeService } from '@gitroom/nestjs-libraries/extension/send-mode.service';
 import { Body, Controller, Get, Param, Post, Query, ServiceUnavailableException } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { Organization, User } from '@prisma/client';
@@ -40,7 +40,7 @@ export class CreateOperationPlanDto {
 @ApiTags('Operation Plans')
 @Controller()
 export class OperationPlanController {
-  constructor(private _operationPlanService: OperationPlanService, private _planExecution?: PlanExecutionService) {}
+  constructor(private _operationPlanService: OperationPlanService, private _planExecution?: PlanExecutionService, private _modes?: SendModeService) {}
 
   // Resolve project access from the persisted plan; omitting projectId cannot bypass it.
   @Get('/operation-plans/:id')
@@ -71,14 +71,14 @@ export class OperationPlanController {
   // flow. The LLM generation call still runs (real token cost), but no user
   // credit is deducted and nothing is written.
   @Post('/projects/:projectId/operation-plans/:id/execution-routes')
-  saveExecutionRoutes(
+  async saveExecutionRoutes(
     @GetOrgFromRequest() org: Organization,
     @GetUserFromRequest() user: User,
     @Param('projectId') projectId: string,
     @Param('id') id: string,
     @Body() body: SavePlanExecutionDto
   ) {
-    if (!isAccountBoundSendingEnabled() || !this._planExecution) throw new ServiceUnavailableException('PROJECT_ACCOUNT_BINDINGS_DISABLED');
+    if (!this._planExecution || !(await this._modes?.getSystem())?.effectiveEnabled) throw new ServiceUnavailableException('PROJECT_ACCOUNT_BINDINGS_DISABLED');
     return this._planExecution.save(org.id, user.id, projectId, id, body);
   }
 

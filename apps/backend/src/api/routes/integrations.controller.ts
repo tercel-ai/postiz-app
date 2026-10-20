@@ -1,3 +1,4 @@
+import { SendModeService } from '@gitroom/nestjs-libraries/extension/send-mode.service';
 import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
 import { oauthSocialIdentity } from '@gitroom/nestjs-libraries/extension/social-account-identity.service';
 import {
@@ -75,8 +76,13 @@ export class IntegrationsController {
     private _dataTicksService: DataTicksService,
     private _aiseeClient: AiseeCreditService,
     private _permissionsService: PermissionsService,
-    @Optional() private _extensionNodes?: ExtensionNodeService
+    @Optional() private _extensionNodes?: ExtensionNodeService,
+    @Optional() private _sendModes?: SendModeService
   ) {}
+
+  private async controlled(org: string) {
+    return this._sendModes ? this._sendModes.isControlled(org) : isAccountBoundSendingEnabled();
+  }
 
   private resolveCallbackBaseUrl(origin?: string): string {
     if (!origin) return process.env.FRONTEND_URL!;
@@ -156,7 +162,8 @@ export class IntegrationsController {
   })
   async getIntegrationList(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user?: User) {
     const integrations = await this._integrationService.getIntegrationsList(org.id);
-    const views = user && isAccountBoundSendingEnabled() && this._extensionNodes
+    const controlled = await this.controlled(org.id);
+    const views = user && controlled && this._extensionNodes
       ? await this._extensionNodes.accountViews(org.id, user.id, integrations)
       : undefined;
 
@@ -229,7 +236,7 @@ export class IntegrationsController {
     @Headers('x-extension-protocol-version') protocolVersion?: string
   ) {
     if (nodeId || nodeToken || protocolVersion || body.reportSequence !== undefined) {
-      if (!isAccountBoundSendingEnabled() || !this._extensionNodes) throw new ServiceUnavailableException('EXTENSION_NODES_NOT_ENABLED');
+      if (!(await this.controlled(org.id)) || !this._extensionNodes) throw new ServiceUnavailableException('EXTENSION_NODES_NOT_ENABLED');
       if (protocolVersion && protocolVersion !== 'ACCOUNT_BOUND_V1') throw new HttpException('EXTENSION_PROTOCOL_UNSUPPORTED', 400);
       let maxChannels: number | null | undefined;
       try { maxChannels = await this._permissionsService.channelCreationLimit(org.id, user.id); }
@@ -281,8 +288,8 @@ export class IntegrationsController {
   }
 
   @Post('/:id/identity/verify')
-  verifyStableIdentity(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User, @Param('id') id: string) {
-    if (!isAccountBoundSendingEnabled()) throw new ServiceUnavailableException('ACCOUNT_BINDINGS_NOT_ENABLED');
+  async verifyStableIdentity(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User, @Param('id') id: string) {
+    if (!(await this.controlled(org.id))) throw new ServiceUnavailableException('ACCOUNT_BINDINGS_NOT_ENABLED');
     return this._integrationService.verifyStableIdentity(org.id,user.id,id);
   }
 
@@ -575,7 +582,8 @@ export class IntegrationsController {
       org.id,
       projectId
     );
-    const views = user && isAccountBoundSendingEnabled() && this._extensionNodes
+    const controlled = await this.controlled(org.id);
+    const views = user && controlled && this._extensionNodes
       ? await this._extensionNodes.accountViews(org.id, user.id, rows.map(row => ({ id: row.integration.id, disabled: row.integration.disabled || row.disabled || (action === 'REPLY' && !row.engageEnabled) })), action === 'REPLY' ? 'reply' : 'post')
       : undefined;
     return {
@@ -598,7 +606,7 @@ export class IntegrationsController {
           projectAssigned: true,
           identityNamespace: p.identityNamespace,
           ...(views?.get(p.id) ?? {}),
-          ...(isAccountBoundSendingEnabled() ? { action, blockCode, ...(blockCode ? { sendAvailability: blockCode } : {}) } : {}),
+          ...(controlled ? { action, blockCode, ...(blockCode ? { sendAvailability: blockCode } : {}) } : {}),
           editor: findIntegration.editor,
           picture: p.picture || '/no-picture.jpg',
           identifier: p.providerIdentifier,
@@ -1018,7 +1026,7 @@ export class IntegrationsController {
             )
           : undefined,
         'legacy',
-        isAccountBoundSendingEnabled() ? { maxChannels: await this._permissionsService.channelCreationLimit(org.id, user.id) } : undefined
+        (await this.controlled(org.id)) ? { maxChannels: await this._permissionsService.channelCreationLimit(org.id, user.id) } : undefined
       );
 
     this._refreshIntegrationService
@@ -1062,7 +1070,7 @@ export class IntegrationsController {
 
   private async assertUnscopedChannelCreation(org: Organization, user: User, provider: string) {
     // Stable actors are counted only after identity resolution, inside the creation transaction.
-    if (isAccountBoundSendingEnabled() && ['x', 'reddit'].includes(provider)) return;
+    if ((await this.controlled(org.id)) && ['x', 'reddit'].includes(provider)) return;
     const ability = await this._permissionsService.check(org.id, org.createdAt,
       (org as any).users[0].role, [[AuthorizationActions.Create, Sections.CHANNEL]], user.id);
     if (!ability.can(AuthorizationActions.Create, Sections.CHANNEL))

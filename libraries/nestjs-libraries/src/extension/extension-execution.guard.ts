@@ -1,4 +1,3 @@
-import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
 import {
   CanActivate,
   ExecutionContext,
@@ -16,7 +15,8 @@ export class ExtensionExecutionReadyGuard implements CanActivate {
       headers['x-extension-node-token'] ||
       headers['x-extension-protocol-version']
     ) {
-      if (isAccountBoundSendingEnabled() && headers['x-extension-node-id'] && headers['x-extension-node-token'] && headers['x-extension-protocol-version'] === 'ACCOUNT_BOUND_V1') return true;
+      // Organization mode and Settings capability are enforced in the claim transaction.
+      if (process.env.ACCOUNT_BOUND_SENDING_ENABLED !== 'false' && headers['x-extension-node-id'] && headers['x-extension-node-token'] && headers['x-extension-protocol-version'] === 'ACCOUNT_BOUND_V1') return true;
       throw new ServiceUnavailableException('ACCOUNT_BOUND_SEND_NOT_ENABLED');
     }
     return true;

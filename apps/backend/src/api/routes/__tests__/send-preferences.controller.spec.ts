@@ -62,7 +62,7 @@ describe('sending policy APIs', () => {
   it('takes personal identity only from authenticated request decorators', async () => {
     vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true');
     const service = { getPreferences: vi.fn(), savePreferences: vi.fn() };
-    const controller = new SendPreferencesController(service as any);
+    const controller = new SendPreferencesController(service as any, { getSystem: vi.fn().mockResolvedValue({ effectiveEnabled: true }) } as any);
     const body = {
       requirePreselectedAccount: true,
       expectedRevision: 0,
@@ -112,15 +112,14 @@ describe('sending policy APIs', () => {
       } as any)
     ).rejects.toMatchObject({ status: 400 });
   });
-  it('blocks new setting endpoints before the foundation schema is enabled', () => {
+  it('blocks personal setting endpoints when system capability is disabled', async () => {
     vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'false');
-    const controller = new SendPreferencesController({} as any);
-    expect(() => controller.get({ id: 'user' } as any)).toThrow(
+    const controller = new SendPreferencesController({} as any, { getSystem: vi.fn().mockResolvedValue({ effectiveEnabled: false }) } as any);
+    await expect(controller.get({ id: 'user' } as any)).rejects.toThrow(
       'ACCOUNT_BINDINGS_NOT_ENABLED'
     );
-    expect(() =>
-      controller.save({ id: 'org' } as any, { id: 'user' } as any, {} as any)
-    ).toThrow('ACCOUNT_BINDINGS_NOT_ENABLED');
+    await expect(controller.save({ id: 'org' } as any, { id: 'user' } as any, {} as any))
+      .rejects.toThrow('ACCOUNT_BINDINGS_NOT_ENABLED');
     const admin = new AdminSettingsController(
       {} as any,
       {} as any,
@@ -128,8 +127,7 @@ describe('sending policy APIs', () => {
       {} as any,
       {} as any
     );
-    expect(() =>
-      admin.saveSendPolicy({ id: 'user' } as any, policyBody)
-    ).toThrow('ACCOUNT_BINDINGS_NOT_ENABLED');
+    await expect(admin.saveSendPolicy({ id: 'user' } as any, policyBody))
+      .rejects.toThrow('ACCOUNT_BINDINGS_NOT_ENABLED');
   });
 });

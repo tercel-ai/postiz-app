@@ -1,3 +1,4 @@
+import { SendModeService } from '../../../extension/send-mode.service';
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { isLegacyExecution, legacyExecutionWhere } from '../../../extension/legacy-execution';
 import { PrismaRepository, PrismaTransaction } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
@@ -150,7 +151,8 @@ export class PostsRepository {
     private _tags: PrismaRepository<'tags'>,
     private _tagsPosts: PrismaRepository<'tagsPosts'>,
     private _errors: PrismaRepository<'errors'>,
-    private _tx?: PrismaTransaction
+    private _tx?: PrismaTransaction,
+    private _sendModes?: SendModeService
   ) { }
 
   searchForMissingThreeHoursPosts() {
@@ -1038,10 +1040,18 @@ export class PostsRepository {
   async findOrCreateCycleClone(
     originalPost: any,
     cyclePublishDate: Date,
-    claimToken: string
+    claimToken: string,
+    tx?: Prisma.TransactionClient
   ): Promise<{ clone: any; alreadyHandled: boolean }> {
     if (!isLegacyExecution(originalPost.executionProtocol)) throw new ServiceUnavailableException('ACCOUNT_BOUND_SEND_NOT_ENABLED');
-    const existing = await this._post.model.post.findFirst({
+    if (this._sendModes && !tx) {
+      if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
+      return sendTransaction(this._tx.model, async client => {
+        await this._sendModes!.assertAutonomousIn(client, originalPost.organizationId);
+        return this.findOrCreateCycleClone(originalPost, cyclePublishDate, claimToken, client);
+      });
+    }
+    const existing = await (tx?.post ?? this._post.model.post).findFirst({
       where: {
         group: originalPost.group,
         publishDate: cyclePublishDate,
@@ -1057,7 +1067,7 @@ export class PostsRepository {
 
       // Clone is QUEUE — try to atomically claim it by setting releaseId.
       // Only succeeds if releaseId is still null (no other workflow claimed it).
-      const claimed = await this._post.model.post.updateMany({
+      const claimed = await (tx?.post ?? this._post.model.post).updateMany({
         where: {
           id: existing.id,
           state: 'QUEUE',
@@ -1076,7 +1086,7 @@ export class PostsRepository {
       return { clone: existing, alreadyHandled: false };
     }
 
-    const clone = await this._post.model.post.create({
+    const clone = await (tx?.post ?? this._post.model.post).create({
       data: {
         content: originalPost.content,
         title: originalPost.title,
@@ -1110,7 +1120,7 @@ export class PostsRepository {
     // Guard against concurrent creates: if another workflow also created a
     // clone for the same (group, publishDate) between our findFirst and
     // create, multiple clones exist.  The earliest createdAt wins.
-    const allClones = await this._post.model.post.findMany({
+    const allClones = await (tx?.post ?? this._post.model.post).findMany({
       where: {
         group: originalPost.group,
         publishDate: cyclePublishDate,
@@ -1122,7 +1132,7 @@ export class PostsRepository {
 
     if (allClones.length > 1 && allClones[0].id !== clone.id) {
       // We lost the race — delete our clone and report as already handled
-      await this._post.model.post.delete({ where: { id: clone.id } });
+      await (tx?.post ?? this._post.model.post).delete({ where: { id: clone.id } });
       return { clone: allClones[0], alreadyHandled: true };
     }
 
@@ -1436,8 +1446,17 @@ export class PostsRepository {
    * Sets releaseId to the given claimToken only if it is currently null and state is QUEUE.
    * Returns true if this caller won the claim; false if another workflow already claimed it.
    */
-  async claimPostForPublishing(id: string, claimToken: string): Promise<boolean> {
-    const result = await this._post.model.post.updateMany({
+  async claimPostForPublishing(id: string, claimToken: string, tx?: Prisma.TransactionClient): Promise<boolean> {
+    if (this._sendModes && !tx) {
+      if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
+      return sendTransaction(this._tx.model, async client => {
+        const post = await client.post.findUnique({ where: { id }, select: { organizationId: true } });
+        if (!post) return false;
+        await this._sendModes!.assertAutonomousIn(client, post.organizationId);
+        return this.claimPostForPublishing(id, claimToken, client);
+      });
+    }
+    const result = await (tx?.post ?? this._post.model.post).updateMany({
       where: {
         id,
         AND: [legacyExecutionWhere()],
@@ -2129,8 +2148,19 @@ export class PostsRepository {
     source?: PostSource,
     projectId?: string,
     publishMethod?: PublishMethod,
-    tx?: Prisma.TransactionClient
+    tx?: Prisma.TransactionClient,
+    admissionMode?: 'AUTONOMOUS' | 'CONTROLLED'
   ) {
+    if (admissionMode && this._sendModes) {
+      if (!tx) {
+        if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
+        return sendTransaction(this._tx.model, client => this.createOrUpdatePost(
+          state, orgId, date, body, tags, inter, source, projectId, publishMethod, client, admissionMode
+        ));
+      }
+      if (admissionMode === 'CONTROLLED') await this._sendModes.assertControlledIn(tx, orgId);
+      else await this._sendModes.assertAutonomousIn(tx, orgId);
+    }
     if ((body.accountSelectionMode === 'INHERIT' && body.integration?.id) ||
         (body.accountSelectionMode === 'EXPLICIT' && !body.integration?.id))
       throw new BadRequestException('SEND_ACCOUNT_SELECTION_CONFLICT');
@@ -2141,7 +2171,7 @@ export class PostsRepository {
     if (clearSelection && !tx) {
       if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
       return sendTransaction(this._tx.model, (client) => this.createOrUpdatePost(
-        state, orgId, date, body, tags, inter, source, projectId, publishMethod, client
+        state, orgId, date, body, tags, inter, source, projectId, publishMethod, client, admissionMode
       ));
     }
     const posts: Post[] = [];
@@ -2207,6 +2237,7 @@ export class PostsRepository {
         ...(type === 'create' ? { source: source || 'calendar' } : {}),
         approvedSubmitForOrder: APPROVED_SUBMIT_FOR_ORDER.NO,
         state: state === 'draft' ? ('DRAFT' as const) : ('QUEUE' as const),
+        ...(admissionMode === 'CONTROLLED' ? { executionProtocol: 'ACCOUNT_BOUND_V1' } : {}),
         releaseId: null,
         releaseURL: null,
         error: null,
@@ -2267,7 +2298,9 @@ export class PostsRepository {
             organizationId: orgId,
             ...(clearSelection ? {
               state: 'DRAFT', sendIntentId: null, releaseId: null, routeRevision: body.expectedRouteRevision,
-            } : { sendIntentId: null, AND: [legacyExecutionWhere()] }),
+            } : admissionMode === 'CONTROLLED'
+              ? { sendIntentId: null, state: 'DRAFT', releaseId: null }
+              : { sendIntentId: null, AND: [legacyExecutionWhere()] }),
           },
           create: { id, ...updateData('create') },
           update: {
@@ -2389,11 +2422,20 @@ export class PostsRepository {
     return count > 0;
   }
 
-  async resetPostForRetry(id: string, orgId: string): Promise<boolean> {
-    const result = await this._post.model.post.updateMany({
+  async resetPostForRetry(id: string, orgId: string, tx?: Prisma.TransactionClient): Promise<boolean> {
+    if (this._sendModes && !tx) {
+      if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
+      return sendTransaction(this._tx.model, async client => {
+        await this._sendModes!.assertAutonomousIn(client, orgId);
+        return this.resetPostForRetry(id, orgId, client);
+      });
+    }
+    const result = await (tx?.post ?? this._post.model.post).updateMany({
       where: {
         id,
         organizationId: orgId,
+        sendIntentId: null,
+        AND: [legacyExecutionWhere()],
         state: 'ERROR',
         deletedAt: null,
       },
@@ -3100,12 +3142,20 @@ export class PostsRepository {
     limit: number,
     leaseToken: string,
     leaseCutoff: Date,
-    blockedPlatforms: string[] = []
+    blockedPlatforms: string[] = [],
+    tx?: Prisma.TransactionClient
   ) {
+    if (this._sendModes && !tx) {
+      if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
+      return sendTransaction(this._tx.model, async client => {
+        await this._sendModes!.assertAutonomousIn(client, organizationId);
+        return this.claimDueExtensionPublishPosts(organizationId, providerIdentifiers, now, limit, leaseToken, leaseCutoff, blockedPlatforms, client);
+      });
+    }
     const available = PostsRepository.extensionLeaseAvailableWhere(leaseCutoff);
     const dueWhere = { ...this.extensionDueWhere(organizationId, providerIdentifiers, now), ...(blockedPlatforms.length ? { NOT: { OR: [{ providerIdentifier: { in: blockedPlatforms } }, { integration: { providerIdentifier: { in: blockedPlatforms } } }] } } : {}) };
 
-    const candidates = await this._post.model.post.findMany({
+    const candidates = await (tx?.post ?? this._post.model.post).findMany({
       where: { AND: [dueWhere, available] },
       orderBy: { publishDate: 'asc' },
       take: limit,
@@ -3114,14 +3164,14 @@ export class PostsRepository {
     const ids = candidates.map((c) => c.id);
     if (!ids.length) return [];
 
-    await this._post.model.post.updateMany({
+    await (tx?.post ?? this._post.model.post).updateMany({
       // Re-check availability at write time so a concurrent claim of the same
       // candidate loses the race for that row (guard is a no-op there).
       where: { AND: [dueWhere, available, { id: { in: ids } }] },
       data: { releaseId: leaseToken, claimedAt: now },
     });
 
-    return this._post.model.post.findMany({
+    return (tx?.post ?? this._post.model.post).findMany({
       where: { id: { in: ids }, releaseId: leaseToken },
       orderBy: { publishDate: 'asc' },
       select: PostsRepository.EXTENSION_DUE_SELECT,
@@ -3448,13 +3498,21 @@ export class PostsRepository {
    * as one channel's chain. DRAFT-only so already-scheduled / published / errored
    * work is never disturbed. publishDate is left as materialized (planned date).
    */
-  schedulePostGroupToQueue(
+  async schedulePostGroupToQueue(
     organizationId: string,
     group: string,
     publishMethod: PublishMethod,
-    publishDate?: Date
+    publishDate?: Date,
+    tx?: Prisma.TransactionClient
   ) {
-    return this._post.model.post.updateMany({
+    if (this._sendModes && !tx) {
+      if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
+      return sendTransaction(this._tx.model, async client => {
+        await this._sendModes!.assertAutonomousIn(client, organizationId);
+        return this.schedulePostGroupToQueue(organizationId, group, publishMethod, publishDate, client);
+      });
+    }
+    return (tx?.post ?? this._post.model.post).updateMany({
       where: {
         organizationId,
         AND: [legacyExecutionWhere()],

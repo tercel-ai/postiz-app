@@ -94,7 +94,7 @@ describe('SchedulePostsDto — the plan form no longer lives on /posts/schedule'
     const schedulePosts = vi.fn().mockResolvedValue({ scheduled: [], failed: [] });
     const schedulePlanPosts = vi.fn();
     const controller = new PostsController(
-      { schedulePosts, schedulePlanPosts } as any,
+      { schedulePosts, schedulePlanPosts, isControlled: vi.fn().mockResolvedValue(false) } as any,
       {} as any,
       {} as any,
       {} as any,

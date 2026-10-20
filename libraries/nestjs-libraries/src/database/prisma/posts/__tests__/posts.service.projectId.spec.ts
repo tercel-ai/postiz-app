@@ -97,7 +97,9 @@ describe('PostsService projectId threading', () => {
       undefined,
       undefined,
       'proj-1',
-      undefined
+      undefined,
+      undefined,
+      'AUTONOMOUS'
     );
   });
 
@@ -113,7 +115,9 @@ describe('PostsService projectId threading', () => {
       undefined,
       undefined,
       undefined,
-      undefined
+      undefined,
+      undefined,
+      'AUTONOMOUS'
     );
   });
 

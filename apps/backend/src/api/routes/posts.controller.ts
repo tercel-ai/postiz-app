@@ -1,4 +1,3 @@
-import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
 import { Headers, Optional } from '@nestjs/common';
 import { SendExecutionService } from '@gitroom/nestjs-libraries/extension/send-execution.service';
 import {
@@ -300,7 +299,7 @@ export class PostsController {
   async getPostsByGroup(@GetOrgFromRequest() org: Organization, @Param('group') group: string,
     @GetUserFromRequest() user?: User) {
     const result = await this._postsService.getPostsByGroup(org.id, group);
-    return user && result.posts[0] && needsSendSummary(result.posts[0]) ? { ...result, sending: await this._postsService.getSendingSummary(org.id, user.id, result.posts[0].id) } : result;
+    return user && result.posts[0] && (needsSendSummary(result.posts[0]) || await this._postsService.isControlled(org.id)) ? { ...result, sending: await this._postsService.getSendingSummary(org.id, user.id, result.posts[0].id) } : result;
   }
 
   /**
@@ -350,7 +349,7 @@ export class PostsController {
     @GetUserFromRequest() user?: User
   ) {
     const result = await this._postsService.getPost(org.id, id, false, projectId);
-    return user && result.posts[0] && needsSendSummary(result.posts[0]) ? { ...result, sending: await this._postsService.getSendingSummary(org.id, user.id, result.posts[0].id) } : result;
+    return user && result.posts[0] && (needsSendSummary(result.posts[0]) || await this._postsService.isControlled(org.id)) ? { ...result, sending: await this._postsService.getSendingSummary(org.id, user.id, result.posts[0].id) } : result;
   }
 
   @Post('/')
@@ -464,7 +463,7 @@ export class PostsController {
     @Body() body: SchedulePostsDto,
     @GetUserFromRequest() user?: User
   ) {
-    if (isAccountBoundSendingEnabled()) return this._postsService.schedulePosts(org.id, body.posts, { userId: user?.id ?? '', origin: 'MANUAL' });
+    if (await this._postsService.isControlled(org.id)) return this._postsService.schedulePosts(org.id, body.posts, { userId: user?.id ?? '', origin: 'MANUAL' });
     return this._postsService.schedulePosts(org.id, body.posts);
   }
 

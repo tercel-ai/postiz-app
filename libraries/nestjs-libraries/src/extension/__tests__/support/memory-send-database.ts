@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 
 // Deterministic transaction harness; it does not model PostgreSQL SSI or unique-index contention.
 export function memorySendDatabase() {
@@ -55,12 +56,14 @@ export function memorySendDatabase() {
         typeof value === 'object'
       )
         return matches(row, value);
-      const actual = relation(row, key);
+      let actual = relation(row, key);
       if (value === null) return actual == null;
       if (value instanceof Date) return actual?.getTime() === value.getTime();
       if (typeof value !== 'object') return actual === value;
+      if (Array.isArray(value.path)) actual = value.path.reduce((current:any,part:string)=>current?.[part],actual);
       return Object.entries(value).every(([op, expected]: [string, any]) => {
-        if (op === 'equals') return JSON.stringify(actual) === JSON.stringify(expected);
+        if (op === 'path') return true;
+        if (op === 'equals') return JSON.stringify(actual) === JSON.stringify(expected === Prisma.JsonNull ? null : expected);
         if (op === 'in') return expected.includes(actual);
         if (op === 'notIn') return !expected.includes(actual);
         if (op === 'not') return actual !== expected;
@@ -76,6 +79,7 @@ export function memorySendDatabase() {
   function update(row: any, data: any) {
     for (const [key, value] of Object.entries(data)) {
       if (value === undefined) continue;
+      if (value === Prisma.JsonNull) { row[key] = null; continue; }
       if (key === 'integration' && (value as any)?.disconnect === true) {
         row.integrationId = null;
         row.integration = null;
@@ -175,7 +179,7 @@ export function memorySendDatabase() {
               ...(name === 'sendExecution' ? { status: 'RESERVED' } : {}),
               ...(name === 'integration' ? {disabled:false,inBetweenSteps:false,refreshNeeded:false} : {}),
               ...(name === 'extensionNode' ? {status:'ACTIVE',credentialVersion:1,revision:1,lastReportSequence:0,lastSeenAt:new Date()} : {}),
-              ...structuredClone(data),
+              ...structuredClone(Object.fromEntries(Object.entries(data).map(([key,value]) => [key, value === Prisma.JsonNull ? null : value]))),
             };
             rows(name).push(row);
             return output(row);

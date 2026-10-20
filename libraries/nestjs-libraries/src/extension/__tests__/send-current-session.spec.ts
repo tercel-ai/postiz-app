@@ -13,6 +13,7 @@ import { memorySendDatabase } from './support/memory-send-database';
 const now = new Date('2026-10-16T12:00:00Z');
 function fixture(action: 'POST' | 'REPLY' = 'POST') {
   const db = memorySendDatabase();
+  db.seed('settings', { key: 'sending.organization_mode:org', value: { mode: 'CONTROLLED', revision: 1 } });
   db.seed('settings', {
     key: SEND_ACCOUNT_POLICY_KEY,
     value: { mode: 'OPTIONAL', revision: 1, lastRequiredRevision: 0 },
@@ -201,7 +202,7 @@ describe('OPTIONAL initial current-session binding', () => {
     const f = fixture();
     f.seedActor();
     await f.enqueue();
-    f.db.rows('settings')[0].value = {
+    f.db.rows('settings').find(row => row.key === SEND_ACCOUNT_POLICY_KEY).value = {
       mode: 'OPTIONAL',
       revision: 3,
       lastRequiredRevision: 2,

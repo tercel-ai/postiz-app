@@ -33,7 +33,7 @@ describe('automatic producer API wiring', () => {
  it('captures the authenticated configuration owner only after a successful save', async () => {
   const automatic = { assertOwnerAvailable: vi.fn(), saveOwner: vi.fn() };
   const saveConfig = vi.fn();
-  const service = new AutomationService({} as any, {} as any, { saveConfig } as any, {} as any, {} as any, {} as any, undefined, undefined, automatic as any);
+  const service = new AutomationService({} as any, {} as any, { saveConfig } as any, {} as any, {} as any, {} as any, undefined, undefined, automatic as any, { isControlled: vi.fn().mockResolvedValue(true) } as any);
   saveConfig.mockRejectedValueOnce(new Error('configuration failed'));
   await expect(service.saveReplies({ id: 'org' } as any, 'project', { autoReplyEnabled: false }, 'owner')).rejects.toThrow('configuration failed');
   expect(automatic.saveOwner).not.toHaveBeenCalled();

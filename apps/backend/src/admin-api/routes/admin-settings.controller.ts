@@ -32,8 +32,11 @@ import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.req
 import { User } from '@prisma/client';
 import { SEND_ACCOUNT_POLICY_KEY, SendPolicyService } from '@gitroom/nestjs-libraries/extension/send-policy.service';
 import { SaveSystemSendPolicyDto } from '@gitroom/nestjs-libraries/extension/send-policy.dto';
+import { SendModeService, SEND_MODE_SYSTEM_KEY, SEND_MODE_ORGANIZATION_PREFIX } from '@gitroom/nestjs-libraries/extension/send-mode.service';
+import { SaveSystemSendModeDto } from '@gitroom/nestjs-libraries/extension/send-mode.dto';
 
-const RESERVED_KEYS = ['ai_model_pricing', SEND_ACCOUNT_POLICY_KEY];
+const RESERVED_KEYS = ['ai_model_pricing', SEND_ACCOUNT_POLICY_KEY, SEND_MODE_SYSTEM_KEY];
+const reservedKey = (key: string) => RESERVED_KEYS.includes(key) || key.startsWith(SEND_MODE_ORGANIZATION_PREFIX);
 
 function safePage(val?: string): number {
   const n = val ? Number(val) : 1;
@@ -56,7 +59,8 @@ export class AdminSettingsController {
     private _engageScanConfigService: EngageScanConfigService,
     private _extensionPublishConfigService: ExtensionPublishConfigService,
     private _integrationManager: IntegrationManager,
-    private _sendPolicy?: SendPolicyService
+    private _sendPolicy?: SendPolicyService,
+    private _sendMode?: SendModeService
   ) {}
 
   // ============ Social providers ============
@@ -203,20 +207,41 @@ export class AdminSettingsController {
     };
   }
 
-  private sendPolicy() {
-    if (!isAccountBoundSendingEnabled() || !this._sendPolicy)
+  private async sendPolicy() {
+    const enabled = this._sendMode ? (await this._sendMode.getSystem()).effectiveEnabled : isAccountBoundSendingEnabled();
+    if (!enabled || !this._sendPolicy)
       throw new ServiceUnavailableException('ACCOUNT_BINDINGS_NOT_ENABLED');
     return this._sendPolicy;
   }
 
+  private sendMode() {
+    if (!this._sendMode) throw new ServiceUnavailableException('SEND_MODE_UNAVAILABLE');
+    return this._sendMode;
+  }
+
+  @Get('/settings/sending.account_bound_enabled')
+  getSendModeCapability() {
+    return this.sendMode().getSystem();
+  }
+
+  @Post('/settings/sending.account_bound_enabled')
+  saveSendModeCapability(@GetUserFromRequest() user: User, @Body() body: SaveSystemSendModeDto) {
+    return this.sendMode().saveSystem(user.id, body);
+  }
+
+  @Put('/settings/sending.account_bound_enabled')
+  putSendModeCapability(@GetUserFromRequest() user: User, @Body() body: SaveSystemSendModeDto) {
+    return this.saveSendModeCapability(user, body);
+  }
+
   @Get('/settings/sending.account_selection_policy')
   async getSendPolicy() {
-    return { key: SEND_ACCOUNT_POLICY_KEY, value: await this.sendPolicy().getSystem() };
+    return { key: SEND_ACCOUNT_POLICY_KEY, value: await (await this.sendPolicy()).getSystem() };
   }
 
   @Post('/settings/sending.account_selection_policy')
-  saveSendPolicy(@GetUserFromRequest() user: User, @Body() body: SaveSystemSendPolicyDto) {
-    return this.sendPolicy().saveSystem(user.id, body);
+  async saveSendPolicy(@GetUserFromRequest() user: User, @Body() body: SaveSystemSendPolicyDto) {
+    return (await this.sendPolicy()).saveSystem(user.id, body);
   }
 
   @Put('/settings/sending.account_selection_policy')
@@ -251,7 +276,7 @@ export class AdminSettingsController {
     @Param('key') key: string,
     @Body() body: UpdateSettingDto
   ) {
-    if (RESERVED_KEYS.includes(key)) {
+    if (reservedKey(key)) {
       throw new HttpException(
         `Setting "${key}" is managed by a dedicated API, use the corresponding endpoint instead`,
         400
@@ -266,7 +291,7 @@ export class AdminSettingsController {
 
   @Delete('/settings/:key')
   async deleteSetting(@Param('key') key: string) {
-    if (RESERVED_KEYS.includes(key)) {
+    if (reservedKey(key)) {
       throw new HttpException(
         `Setting "${key}" is managed by a dedicated API and cannot be deleted here`,
         400

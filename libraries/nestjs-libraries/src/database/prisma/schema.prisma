@@ -475,7 +475,7 @@ model Integration {
   @@index([disabled])
 }
 
-// nodeId is SHA-256 of a native machine anchor and canonical browser/profile identity.
+// nodeId is a cryptographically random 256-bit identity persisted per extension installation.
 // It is shared across accounts; credentials and sessions are account-scoped.
 // id is an internal row key, never the public terminal identity.
 model ExtensionNode {

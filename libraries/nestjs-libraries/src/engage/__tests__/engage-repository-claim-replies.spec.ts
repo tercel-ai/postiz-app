@@ -57,7 +57,7 @@ describe('EngageRepository.claimDueEngageReplies — what it will not pick up', 
 
     await repo.claimDueEngageReplies('org-1', 'proj-1', 'reddit', opts);
 
-    expect(sentFindMany.mock.calls[0][0].where.post.OR).toEqual([
+    expect(sentFindMany.mock.calls[0][0].where.post.AND[0].OR).toEqual([
       { releaseId: null },
       { claimedAt: { lte: leaseCutoff } },
     ]);
@@ -179,9 +179,12 @@ describe('EngageRepository.claimDueEngageReplies — winning the race', () => {
 
     expect(postUpdateMany).toHaveBeenCalledWith({
       where: {
+        organizationId: 'org-1',
         id: { in: ['p1'] },
         state: 'QUEUE',
-        OR: [{ releaseId: null }, { claimedAt: { lte: leaseCutoff } }],
+        sendIntentId: null,
+        AND: [{ OR: [{ releaseId: null }, { claimedAt: { lte: leaseCutoff } }] },
+          { OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] }],
       },
       data: { releaseId: 'claim_abc', claimedAt: now },
     });

@@ -34,29 +34,45 @@ describe('terminal API registration', () => {
       )
     ).toBe(RequestMethod.GET);
   });
-  it('uses authenticated tenant and user rather than body identifiers', () => {
+  it('uses authenticated tenant and user rather than body identifiers', async () => {
     const service = {
       register: vi.fn().mockReturnValue('registered'),
       list: vi.fn().mockReturnValue([]),
       save: vi.fn().mockReturnValue('saved'),
     };
-    const controller = new ExtensionNodesController(service as any);
+    const controller = new ExtensionNodesController(service as any, { get: vi.fn().mockResolvedValue({ mode: 'CONTROLLED', systemEnabled: true }) } as any);
     const input: any = { organizationId: 'other', userId: 'other' };
-    expect(controller.register(org, user, input)).toBe('registered');
+    expect(await controller.register(org, user, input)).toBe('registered');
     expect(service.register).toHaveBeenCalledWith('org', 'user', input);
-    expect(controller.list(org, user)).toEqual([]);
-    expect(controller.save(org, user, input)).toBe('saved');
+    expect(await controller.list(org, user)).toEqual([]);
+    expect(await controller.save(org, user, input)).toBe('saved');
   });
-  it('stays disabled by default without accessing new database tables', () => {
-    vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'false');
+  it('checks current credentials on the server and returns only the authenticated owner scope', async () => {
+    const service = { authenticate: vi.fn().mockResolvedValue({
+      nodeId: 'node', organizationId: 'org', registeredByUserId: 'user',
+      status: 'ACTIVE', credentialHash: 'secret', registrationExpiresAt: new Date(0),
+    }) };
+    const controller = new ExtensionNodesController(service as any, { get: vi.fn().mockResolvedValue({ mode: 'CONTROLLED', systemEnabled: true }) } as any);
+    expect(Reflect.getMetadata(PATH_METADATA, ExtensionNodesController.prototype.current)).toBe('/current');
+    expect(Reflect.getMetadata(METHOD_METADATA, ExtensionNodesController.prototype.current)).toBe(RequestMethod.GET);
+    expect(await controller.current(org, user, 'node', 'token', 'ACCOUNT_BOUND_V1')).toEqual({
+      nodeId: 'node', organizationId: 'org', registeredByUserId: 'user', status: 'ACTIVE',
+    });
+    expect(service.authenticate).toHaveBeenCalledWith('org', 'user', 'node', 'token');
+    service.authenticate.mockRejectedValue(new Error('NODE_AUTHENTICATION_REQUIRED'));
+    await expect(controller.current(org, user, 'node', 'wrong', 'ACCOUNT_BOUND_V1')).rejects.toThrow('NODE_AUTHENTICATION_REQUIRED');
+  });
+  it('requires the controlled protocol before checking current node credentials', async () => {
+    const service = { authenticate: vi.fn() };
+    const controller = new ExtensionNodesController(service as any, { get: vi.fn().mockResolvedValue({ mode: 'CONTROLLED', systemEnabled: true }) } as any);
+    await expect(controller.current(org, user, 'node', 'token', undefined)).rejects.toThrow('NODE_AUTHENTICATION_REQUIRED');
+    expect(service.authenticate).not.toHaveBeenCalled();
+  });
+  it('refuses autonomous node registration before invoking node persistence', async () => {
     const service = { register: vi.fn() };
-    expect(() =>
-      new ExtensionNodesController(service as any).register(
-        org,
-        user,
-        {} as any
-      )
-    ).toThrow('EXTENSION_NODES_NOT_ENABLED');
+    const mode = { get: vi.fn().mockResolvedValue({ mode: 'AUTONOMOUS', systemEnabled: false }) };
+    await expect(new ExtensionNodesController(service as any, mode as any).register(org, user, {} as any))
+      .rejects.toThrow('EXTENSION_NODES_NOT_ENABLED');
     expect(service.register).not.toHaveBeenCalled();
   });
 });

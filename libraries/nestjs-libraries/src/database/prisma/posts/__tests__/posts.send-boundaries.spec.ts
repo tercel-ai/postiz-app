@@ -19,6 +19,7 @@ it('rejects legacy removal for managed posts without touching stored facts', asy
 it('advertises extension-only controlled routes, including company actors and unsupported providers', async () => {
   vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true');
   const context = {
+    isControlled: vi.fn().mockResolvedValue(true),
     _integrationService: { getIntegrationsList: vi.fn(async () => [{ providerIdentifier: 'x' }]) },
     _integrationManager: { getSocialProviderList: () => ['x', 'linkedin-page', 'mastodon'].map(identifier => ({ identifier })) },
   };

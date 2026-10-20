@@ -32,6 +32,7 @@ it.each(platformCases.flatMap(row => ['POST', 'REPLY'].map(action => [...row, ac
   const company = namespace === 'linkedin.organization_id';
   const provider = company ? 'linkedin-page' : platform;
   const db = memorySendDatabase();
+  db.seed('settings', { key: 'sending.organization_mode:org', value: { mode: 'CONTROLLED', revision: 1 } });
   db.seed('userOrganization', {
     organizationId: 'org',
     userId: 'owner',

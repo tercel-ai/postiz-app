@@ -31,7 +31,7 @@ describe('compatible operation plan account endpoints', () => {
   it('forwards tenant, current user, persisted project scope and revisions to route saving', async () => {
     vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true');
     const save = vi.fn().mockResolvedValue({ executionRevision: 1 });
-    const controller = new OperationPlanController({} as any, { save } as any);
+    const controller = new OperationPlanController({} as any, { save } as any, { getSystem: vi.fn().mockResolvedValue({ effectiveEnabled: true }) } as any);
     const body = {
       expectedRevision: 0,
       executionRoutes: routes,
@@ -49,13 +49,14 @@ describe('compatible operation plan account endpoints', () => {
     ).toEqual({ executionRevision: 1 });
     expect(save).toHaveBeenCalledWith('org', 'user', 'project', 'plan', body);
   });
-  it('blocks route saving while the compatibility feature is disabled', () => {
+  it('blocks route saving while system capability is disabled', async () => {
     vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'false');
     const controller = new OperationPlanController(
       {} as any,
-      { save: vi.fn() } as any
+      { save: vi.fn() } as any,
+      { getSystem: vi.fn().mockResolvedValue({ effectiveEnabled: false }) } as any
     );
-    expect(() =>
+    await expect(
       controller.saveExecutionRoutes(
         { id: 'org' } as any,
         { id: 'user' } as any,
@@ -63,7 +64,7 @@ describe('compatible operation plan account endpoints', () => {
         'plan',
         { expectedRevision: 0, executionRoutes: {}, drafts: [] }
       )
-    ).toThrow('PROJECT_ACCOUNT_BINDINGS_DISABLED');
+    ).rejects.toThrow('PROJECT_ACCOUNT_BINDINGS_DISABLED');
   });
   it('validates nested versions and forbids client-selected terminals or snapshots', async () => {
     for (const value of [

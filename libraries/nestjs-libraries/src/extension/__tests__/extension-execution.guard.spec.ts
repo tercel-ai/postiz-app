@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ExtensionExecutionReadyGuard } from '../extension-execution.guard';
+
+afterEach(() => vi.unstubAllEnvs());
 
 describe('registry-only execution rollout', () => {
   const context = (headers: Record<string, string>) =>
@@ -10,6 +12,13 @@ describe('registry-only execution rollout', () => {
         context({ 'x-aisee-ext-version': '1.20.7' })
       )
     ).toBe(true);
+  });
+  it('admits complete headers with Settings-managed capability when the environment is unset', () => {
+    vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', undefined);
+    expect(new ExtensionExecutionReadyGuard().canActivate(context({
+      'x-extension-node-id': 'node', 'x-extension-node-token': 'token',
+      'x-extension-protocol-version': 'ACCOUNT_BOUND_V1',
+    }))).toBe(true);
   });
   it.each([
     'x-extension-node-id',

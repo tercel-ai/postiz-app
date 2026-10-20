@@ -1,3 +1,4 @@
+import { SendModeController } from './routes/send-mode.controller';
 import { SendExecutionsController, SendIntentsController, SendReconciliationController, SendProtocolController } from './routes/send-executions.controller';
 import { SendingContextController } from './routes/sending-context.controller';
 import { SendingContextService } from '@gitroom/backend/services/sending-context.service';
@@ -66,6 +67,7 @@ const authenticatedController = [
   SendingAccountsController,
   SendingContextController,
   SendPreferencesController,
+  SendModeController,
 ];
 @Module({
   imports: [UploadModule],

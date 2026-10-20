@@ -1,4 +1,3 @@
-import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
 import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Organization, User } from '@prisma/client';
@@ -43,7 +42,7 @@ export class AutomationController {
     @Param('projectId') projectId: string,
     @GetUserFromRequest() user?: User
   ) {
-    if (isAccountBoundSendingEnabled() && user) return this._automationService.getOverview(org, projectId, user.id);
+    if (user) return this._automationService.getOverview(org, projectId, user.id);
     return this._automationService.getOverview(org, projectId);
   }
 
@@ -58,7 +57,7 @@ export class AutomationController {
     @Body() body: SaveAutomationEnabledDto,
     @GetUserFromRequest() user?: User
   ) {
-    if (isAccountBoundSendingEnabled()) return this._automationService.saveEnabled(org, projectId, body.enabled, user?.id);
+    if (user) return this._automationService.saveEnabled(org, projectId, body.enabled, user?.id);
     return this._automationService.saveEnabled(org, projectId, body.enabled);
   }
 
@@ -73,7 +72,7 @@ export class AutomationController {
     @Body() body: SaveAutomationPublishingDto,
     @GetUserFromRequest() user?: User
   ) {
-    if (body.accounts !== undefined || isAccountBoundSendingEnabled()) return this._automationService.savePublishing(org, projectId, body, user?.id);
+    if (body.accounts !== undefined || user) return this._automationService.savePublishing(org, projectId, body, user?.id);
     return this._automationService.savePublishing(org, projectId, body);
   }
 
@@ -88,7 +87,7 @@ export class AutomationController {
     @Body() body: SaveAutomationRepliesDto,
     @GetUserFromRequest() user?: User
   ) {
-    if (body.accounts !== undefined || isAccountBoundSendingEnabled()) return this._automationService.saveReplies(org, projectId, body, user?.id);
+    if (body.accounts !== undefined || user) return this._automationService.saveReplies(org, projectId, body, user?.id);
     return this._automationService.saveReplies(org, projectId, body);
   }
 }
