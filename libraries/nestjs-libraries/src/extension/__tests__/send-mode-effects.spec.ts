@@ -288,7 +288,7 @@ describe('durable autonomous side effects', () => {
     ).rejects.toThrow('AUTONOMOUS_EFFECT_CONTENT_CHANGED');
     expect(work).not.toHaveBeenCalled();
   });
-  it('blocks controlled enrollment while a platform callback is pending and invokes it only once', async () => {
+  it('waits for a pending platform callback and invokes it only once', async () => {
     const { db, service } = setup();
     let started!: () => void;
     const ready = new Promise<void>((resolve) => {
@@ -310,13 +310,8 @@ describe('durable autonomous side effects', () => {
     );
     await ready;
     expect((await service.stateIn(db, 'org')).mode).toBe('AUTONOMOUS');
-    await expect(
-      service.save('org', 'admin', change('CONTROLLED'))
-    ).rejects.toMatchObject({
-      response: {
-        code: 'SEND_MODE_SWITCH_UNSAFE',
-        blockers: { autonomousEffects: 1 },
-      },
+    expect(await service.save('org', 'admin', change('CONTROLLED'))).toMatchObject({
+      mode: 'AUTONOMOUS', transition: { remainingCount: 1, status: 'DRAINING' },
     });
     await expect(
       service.autonomousEffect('org', 'plug:post:1', request, work)
@@ -327,9 +322,8 @@ describe('durable autonomous side effects', () => {
       await service.autonomousEffect('org', 'plug:post:1', request, work)
     ).toBe(true);
     expect(work).toHaveBeenCalledTimes(1);
-    expect(
-      await service.save('org', 'admin', change('CONTROLLED'))
-    ).toMatchObject({ mode: 'CONTROLLED' });
+    await service.reconcilePendingTransitions();
+    expect(await service.get('org', 'admin')).toMatchObject({ mode: 'CONTROLLED', transition: null });
   });
   it('retains an unknown obligation after platform errors and refuses automatic retry', async () => {
     const { db, service } = setup();
@@ -348,9 +342,9 @@ describe('durable autonomous side effects', () => {
       service.autonomousEffect('org', 'plug:post:1', request, work)
     ).rejects.toThrow('AUTONOMOUS_EFFECT_RECONCILIATION_REQUIRED');
     expect(work).toHaveBeenCalledTimes(1);
-    await expect(
-      service.save('org', 'admin', change('CONTROLLED'))
-    ).rejects.toThrow('SEND_MODE_SWITCH_UNSAFE');
+    expect(await service.save('org', 'admin', change('CONTROLLED'))).toMatchObject({
+      mode: 'AUTONOMOUS', transition: { status: 'NEEDS_ATTENTION', waitReason: 'RECONCILIATION_REQUIRED' },
+    });
   });
   it('finds immutable effect receipts across membership changes, rejects changed input, and strips provider secrets', async () => {
     const { db, service } = setup();

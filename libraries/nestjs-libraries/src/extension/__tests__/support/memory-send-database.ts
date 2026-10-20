@@ -64,6 +64,7 @@ export function memorySendDatabase() {
       return Object.entries(value).every(([op, expected]: [string, any]) => {
         if (op === 'path') return true;
         if (op === 'equals') return JSON.stringify(actual) === JSON.stringify(expected === Prisma.JsonNull ? null : expected);
+        if (op === 'startsWith') return typeof actual === 'string' && actual.startsWith(expected);
         if (op === 'in') return expected.includes(actual);
         if (op === 'notIn') return !expected.includes(actual);
         if (op === 'not') return actual !== expected;

@@ -78,9 +78,11 @@ describe('autonomous plug retries with durable receipts', () => {
     await expect(service.processPlugs(data)).rejects.toThrow('AUTONOMOUS_EFFECT_RECONCILIATION_REQUIRED');
     expect(network).toHaveBeenCalledOnce();
     expect((await effects.stateIn(db, 'org')).blockers.autonomousEffects).toBe(1);
-    await expect(effects.save('org', 'owner', { mode: 'CONTROLLED', expectedRevision: 0,
+    expect(await effects.save('org', 'owner', { mode: 'CONTROLLED', expectedRevision: 0,
       expectedOrganizationId: 'org', expectedUserId: 'owner', requestId: 'switch' }))
-      .rejects.toMatchObject({ response: { code: 'SEND_MODE_SWITCH_UNSAFE' } });
+      .toMatchObject({ mode: 'AUTONOMOUS', transition: { status: 'NEEDS_ATTENTION', waitReason: 'RECONCILIATION_REQUIRED', remainingCount: 1 } });
+    await effects.reconcilePendingTransitions();
+    expect((await effects.stateIn(db, 'org')).mode).toBe('AUTONOMOUS');
   });
 });
 

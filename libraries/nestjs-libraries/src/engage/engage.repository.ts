@@ -2345,12 +2345,13 @@ export class EngageRepository {
        */
       excludeChannelIds?: string[];
     },
-    tx?: Prisma.TransactionClient
-  ) {
+    tx?: Prisma.TransactionClient,
+    drainPostIds?: string[] | null
+  ): Promise<{ id: string; projectId: string | null; opportunityId: string; platform: string; url: string; content: string }[]> {
     if (this._sendModes && !tx) {
       return sendTransaction(this._tx.model, async client => {
-        await this._sendModes!.assertAutonomousIn(client, organizationId);
-        return this.claimDueEngageReplies(organizationId, projectId, platform, opts, client);
+        const captured = await this._sendModes!.autonomousDrainPostIdsIn(client, organizationId);
+        return this.claimDueEngageReplies(organizationId, projectId, platform, opts, client, captured);
       });
     }
     if (opts.limit <= 0) return [];
@@ -2398,6 +2399,7 @@ export class EngageRepository {
         }),
       },
       post: {
+        ...(drainPostIds ? { id: { in: drainPostIds } } : {}),
         sendIntentId: null,
         OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }],
         state: 'QUEUE',
@@ -5340,10 +5342,25 @@ export class EngageRepository {
     // from an opportunity to the posts to reopen.
     const parked = await this._sentReply.model.engageSentReply.findMany({
       where: { opportunityId: { in: ids } },
-      select: { postId: true },
+      select: { postId: true, organizationId: true },
     });
 
-    return this._tx.model.$transaction(async (tx) => {
+    return sendTransaction(this._tx.model, async (tx) => {
+      const byOrganization = new Map<string, string[]>();
+      for (const reply of parked) {
+        const postIds = byOrganization.get(reply.organizationId) ?? [];
+        postIds.push(reply.postId);
+        byOrganization.set(reply.organizationId, postIds);
+      }
+      const eligiblePostIds: string[] = [];
+      for (const organizationId of [...byOrganization.keys()].sort()) {
+        if (this._sendModes) {
+          const mode = await this._sendModes.lockIn(tx, organizationId);
+          // Repairing a shared opportunity does not authorize new legacy sends.
+          if (mode.mode !== 'AUTONOMOUS' || !mode.autonomousAllowed || mode.transition) continue;
+        }
+        eligiblePostIds.push(...byOrganization.get(organizationId)!);
+      }
       // `repliesDisabledAt: { not: null }` rather than a blind update, so an
       // untouched row is reported as untouched.
       const cleared = await tx.engageOpportunity.updateMany({
@@ -5358,16 +5375,18 @@ export class EngageRepository {
         // `releaseURL: null` and `deletedAt: null` are re-asserted here because
         // a reply that DID go out (or was removed afterwards) must never be
         // re-sent, however its error text reads.
-        const reopened = await tx.post.updateMany({
+        const reopened = eligiblePostIds.length ? await tx.post.updateMany({
           where: {
-            id: { in: parked.map((p) => p.postId) },
+            id: { in: eligiblePostIds },
+            sendIntentId: null,
+            AND: [legacyExecutionWhere()],
             state: 'ERROR',
             deletedAt: null,
             releaseURL: null,
             error: { startsWith: REPLIES_DISABLED_ERROR_PREFIX },
           },
           data: { state: 'QUEUE', error: null },
-        });
+        }) : { count: 0 };
         repliesReopened = reopened.count;
       }
 

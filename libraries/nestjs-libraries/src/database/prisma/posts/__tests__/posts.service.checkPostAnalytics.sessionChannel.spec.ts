@@ -14,6 +14,9 @@
  * tests pin the guard that stops it.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+vi.mock('@gitroom/nestjs-libraries/redis/redis.service', () => ({
+  ioRedis: { get: vi.fn().mockResolvedValue(null), set: vi.fn().mockResolvedValue('OK') },
+}));
 import { PostsService } from '../posts.service';
 import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 

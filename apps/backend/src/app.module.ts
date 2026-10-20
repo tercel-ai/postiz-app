@@ -1,3 +1,4 @@
+import { SendModeTransitionReconciliationService } from './services/send-mode-transition-reconciliation.service';
 import { Global, Module } from '@nestjs/common';
 import { DatabaseModule } from '@gitroom/nestjs-libraries/database/prisma/database.module';
 import { ApiModule } from '@gitroom/backend/api/api.module';
@@ -59,6 +60,7 @@ import { AutomationModule } from '@gitroom/backend/automation/automation.module'
   ],
   controllers: [],
   providers: [
+    SendModeTransitionReconciliationService,
     FILTER,
     {
       provide: APP_GUARD,

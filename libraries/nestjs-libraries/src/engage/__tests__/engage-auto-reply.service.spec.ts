@@ -1928,3 +1928,20 @@ it('does not generate controlled work for a platform without a submission adapte
   expect(owner).not.toHaveBeenCalled(); expect(engage.reserveReplyGeneration).not.toHaveBeenCalled();
  } finally { vi.unstubAllEnvs(); }
 });
+
+it('drains queued replies while skipping paid generation during a pending sending-mode transition', async () => {
+  const { svc, repo, draft, engage } = makeService({ configs: [enabledConfig] });
+  (svc as any)._sendModes = {
+    isControlled: vi.fn().mockResolvedValue(false),
+    isTransitionPending: vi.fn().mockResolvedValue(true),
+  };
+  repo.claimDueEngageReplies.mockImplementation(async (_org: string, _project: string, platform: string) =>
+    platform === 'reddit' ? [{ id: 'captured-reply', opportunityId: 'opp', projectId: 'proj-1',
+      platform, url: 'https://reddit.com/r/test/comments/1', content: 'already approved' }] : []);
+  const due = await svc.getDueReplies(org, DURING_ACTIVE_HOURS);
+  expect(due).toHaveLength(1);
+  expect(due[0].sentReplyId).toBe('captured-reply');
+  expect(repo.claimDueEngageReplies).toHaveBeenCalledTimes(2);
+  expect(engage.getReplyBudget).not.toHaveBeenCalled();
+  expect(draft.generateDraft).not.toHaveBeenCalled();
+});

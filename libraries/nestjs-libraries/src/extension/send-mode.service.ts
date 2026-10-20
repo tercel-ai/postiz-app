@@ -3,12 +3,16 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma/prisma.service';
 import { sendHash, sendJson, sendTransaction } from './send-coordination.utils';
 import {
+  BeginBrowserWriteDto,
+  BrowserWriteOutcomeDto,
+  CancelSendModeTransitionDto,
   ResolveAutonomousEffectDto,
   SaveSendModeDto,
   SaveSystemSendModeDto,
@@ -30,6 +34,9 @@ export interface AutonomousEffectRequest {
 }
 interface AutonomousEffectResult {
   status: 'AUTHORIZED' | 'UNKNOWN' | 'CONFIRMED' | 'NOT_SUBMITTED';
+  source?: 'BROWSER';
+  platform?: string;
+  browserUserId?: string;
   revision: number;
   action: AutonomousEffectRequest['action'];
   integrationId: string;
@@ -58,6 +65,35 @@ export interface SendModeBlockers {
   controlledPendingPosts: number;
   autonomousEffects: number;
 }
+interface PendingSendModeTransition {
+  version: 1;
+  targetMode: 'CONTROLLED';
+  requestedAt: string;
+  requestedByUserId: string;
+  eligiblePostIds: string[];
+  eligiblePostOccurrences: Record<string, string | null>;
+  initialPendingCount: number;
+}
+export interface SendModeTransitionState {
+  targetMode: OrganizationSendingMode;
+  status: 'DRAINING' | 'NEEDS_ATTENTION';
+  requestedAt: string;
+  requestedByUserId: string;
+  initialPendingCount: number;
+  remainingCount: number;
+  completedCount: number;
+  scheduledNotBefore: string | null;
+  estimatedCompletionAt: null;
+  waitReason:
+    | 'SCHEDULED_WORK'
+    | 'IN_FLIGHT'
+    | 'RECONCILIATION_REQUIRED'
+    | 'SYSTEM_DISABLED'
+    | 'RECURRING_SCHEDULE'
+    | null;
+  lastCheckedAt: string;
+  pendingByKind: Record<string, number>;
+}
 export interface SendModeState {
   organizationId: string;
   mode: OrganizationSendingMode | 'PAUSED';
@@ -67,6 +103,7 @@ export interface SendModeState {
   systemRevision: number;
   autonomousAllowed: boolean;
   blockers: SendModeBlockers;
+  transition: SendModeTransitionState | null;
 }
 const validRevision = (value: unknown): value is number =>
   Number.isInteger(value) &&
@@ -79,6 +116,8 @@ const retryConflict = () =>
 
 @Injectable()
 export class SendModeService {
+  private readonly logger = new Logger(SendModeService.name);
+
   constructor(private readonly db: PrismaService) {}
 
   private parseSystem(raw: unknown) {
@@ -101,9 +140,15 @@ export class SendModeService {
   private parseOrganization(raw: unknown): {
     mode: OrganizationSendingMode | null;
     revision: number;
+    transition: PendingSendModeTransition | null;
   } {
-    if (raw === undefined || raw === null) return { mode: null, revision: 0 };
-    const value = raw as { mode: OrganizationSendingMode; revision: number };
+    if (raw === undefined || raw === null)
+      return { mode: null, revision: 0, transition: null };
+    const value = raw as {
+      mode: OrganizationSendingMode;
+      revision: number;
+      transition?: PendingSendModeTransition;
+    };
     if (
       !value ||
       !['AUTONOMOUS', 'CONTROLLED'].includes(value.mode) ||
@@ -111,7 +156,50 @@ export class SendModeService {
       value.revision === 0
     )
       throw new ServiceUnavailableException('SEND_MODE_CONFIGURATION_INVALID');
-    return { mode: value.mode, revision: value.revision };
+    const pending = value.transition;
+    if (
+      pending != null &&
+      (value.mode !== 'AUTONOMOUS' ||
+        pending.version !== 1 ||
+        pending.targetMode !== 'CONTROLLED' ||
+        typeof pending.requestedAt !== 'string' ||
+        !Number.isFinite(Date.parse(pending.requestedAt)) ||
+        typeof pending.requestedByUserId !== 'string' ||
+        !pending.requestedByUserId.trim() ||
+        pending.requestedByUserId.length > 128 ||
+        !Array.isArray(pending.eligiblePostIds) ||
+        pending.eligiblePostIds.length > 5000 ||
+        pending.eligiblePostIds.some(
+          (id) => typeof id !== 'string' || !id || id.length > 128
+        ) ||
+        new Set(pending.eligiblePostIds).size !==
+          pending.eligiblePostIds.length ||
+        !validRevision(pending.initialPendingCount) ||
+        pending.initialPendingCount < pending.eligiblePostIds.length ||
+        !pending.eligiblePostOccurrences ||
+        typeof pending.eligiblePostOccurrences !== 'object' ||
+        Array.isArray(pending.eligiblePostOccurrences) ||
+        Object.keys(pending.eligiblePostOccurrences).length !==
+          pending.eligiblePostIds.length ||
+        pending.eligiblePostIds.some(
+          (id) =>
+            !Object.prototype.hasOwnProperty.call(
+              pending.eligiblePostOccurrences,
+              id
+            ) ||
+            (pending.eligiblePostOccurrences[id] !== null &&
+              (typeof pending.eligiblePostOccurrences[id] !== 'string' ||
+                !Number.isFinite(
+                  Date.parse(pending.eligiblePostOccurrences[id]!)
+                )))
+        ))
+    )
+      throw new ServiceUnavailableException('SEND_MODE_CONFIGURATION_INVALID');
+    return {
+      mode: value.mode,
+      revision: value.revision,
+      transition: pending ?? null,
+    };
   }
 
   private async systemIn(tx: Pick<Prisma.TransactionClient, 'settings'>) {
@@ -140,7 +228,7 @@ export class SendModeService {
     organizationId: string
   ): Promise<SendModeBlockers> {
     const scope = { organizationId };
-    const legacy = {
+    const legacy: Prisma.PostWhereInput = {
       organizationId,
       deletedAt: null,
       sendIntentId: null,
@@ -267,7 +355,230 @@ export class SendModeService {
       systemRevision: system.value.revision,
       autonomousAllowed,
       blockers,
+      transition: configured.transition
+        ? await this.transitionStateIn(
+            tx,
+            organizationId,
+            configured.transition,
+            system.effectiveEnabled
+          )
+        : null,
     };
+  }
+
+  private async pendingPostsIn(
+    tx: Prisma.TransactionClient,
+    organizationId: string
+  ) {
+    const posts = await tx.post.findMany({
+      where: {
+        organizationId,
+        deletedAt: null,
+        sendIntentId: null,
+        AND: [
+          {
+            OR: [
+              { executionProtocol: null },
+              { executionProtocol: { not: 'ACCOUNT_BOUND_V1' } },
+            ],
+          },
+          {
+            OR: [
+              { state: 'QUEUE' },
+              {
+                state: { not: 'PUBLISHED' },
+                releaseId: { not: null },
+                claimedAt: { not: null },
+              },
+            ],
+          },
+        ],
+      },
+      select: {
+        id: true,
+        state: true,
+        publishDate: true,
+        releaseId: true,
+        claimedAt: true,
+        intervalInDays: true,
+        source: true,
+      },
+      take: 5001,
+    });
+    if (posts.length > 5000)
+      throw new ConflictException('SEND_MODE_TRANSITION_TOO_LARGE');
+    return posts;
+  }
+
+  private pendingCount(
+    postIds: string[],
+    effects: Awaited<ReturnType<SendModeService['pendingAutonomousIn']>>
+  ) {
+    const ids = new Set(postIds);
+    let standalone = 0;
+    for (const { result } of effects) {
+      if (result.postIds?.length) result.postIds.forEach((id) => ids.add(id));
+      else standalone++;
+    }
+    return ids.size + standalone;
+  }
+
+  private async transitionStateIn(
+    tx: Prisma.TransactionClient,
+    organizationId: string,
+    pending: PendingSendModeTransition,
+    systemEnabled: boolean
+  ): Promise<SendModeTransitionState> {
+    const [remainingPosts, effects, owner] = await Promise.all([
+      this.pendingPostsIn(tx, organizationId),
+      this.pendingAutonomousIn(tx, organizationId),
+      tx.userOrganization.findUnique({
+        where: {
+          userId_organizationId: {
+            userId: pending.requestedByUserId,
+            organizationId,
+          },
+        },
+      }),
+    ]);
+    const remainingCount = this.pendingCount(
+      remainingPosts.map((post) => post.id),
+      effects
+    );
+    const pacing = await tx.settings.findUnique({
+      where: { key: 'engage_reply_pacing' },
+    });
+    const configuredReplyLease =
+      pacing?.value && typeof pacing.value === 'object' && !Array.isArray(pacing.value)
+        ? Number(pacing.value.claimLeaseMinutes)
+        : 0;
+    // Mirror the executor lease windows for diagnostics only; never clear claims.
+    const publishLeaseMinutes = Math.max(
+      1,
+      Number(process.env.EXTENSION_PUBLISH_LEASE_MINUTES) || 10
+    );
+    const replyLeaseMinutes = Number.isFinite(configuredReplyLease) && configuredReplyLease > 0
+      ? configuredReplyLease : 30;
+    const needsReconciliation =
+      effects.some(
+        ({ result, row }) =>
+          result.status === 'UNKNOWN' ||
+          Date.now() - new Date(row.createdAt).getTime() > 600_000
+      ) ||
+      remainingPosts.some(
+        (post) =>
+          post.state !== 'QUEUE' ||
+          (post.releaseId && post.claimedAt &&
+            Date.now() - new Date(post.claimedAt).getTime() >
+              (post.source === 'engage' ? replyLeaseMinutes : publishLeaseMinutes) * 60_000) ||
+          !pending.eligiblePostIds.includes(post.id) ||
+          pending.eligiblePostOccurrences[post.id] !==
+            (post.publishDate &&
+            Number.isFinite(new Date(post.publishDate).getTime())
+              ? new Date(post.publishDate).toISOString()
+              : null)
+      ) ||
+      !owner ||
+      owner.disabled ||
+      !['ADMIN', 'SUPERADMIN'].includes(owner.role);
+    const futureDates = remainingPosts
+      .map((post) => new Date(post.publishDate).getTime())
+      .filter((value) => Number.isFinite(value) && value > Date.now());
+    const scheduledNotBefore = futureDates.length
+      ? new Date(Math.max(...futureDates)).toISOString()
+      : null;
+    const recurringSchedule = remainingPosts.some(
+      (post) =>
+        typeof post.intervalInDays === 'number' && post.intervalInDays > 0
+    );
+    const waitReason = !systemEnabled
+      ? 'SYSTEM_DISABLED'
+      : needsReconciliation
+      ? 'RECONCILIATION_REQUIRED'
+      : recurringSchedule
+      ? 'RECURRING_SCHEDULE'
+      : scheduledNotBefore
+      ? 'SCHEDULED_WORK'
+      : remainingCount
+      ? 'IN_FLIGHT'
+      : null;
+    return {
+      targetMode: pending.targetMode,
+      status:
+        !systemEnabled || needsReconciliation || recurringSchedule
+          ? 'NEEDS_ATTENTION'
+          : 'DRAINING',
+      requestedAt: pending.requestedAt,
+      requestedByUserId: pending.requestedByUserId,
+      initialPendingCount: pending.initialPendingCount,
+      remainingCount,
+      completedCount: Math.max(0, pending.initialPendingCount - remainingCount),
+      scheduledNotBefore,
+      estimatedCompletionAt: null,
+      waitReason,
+      lastCheckedAt: new Date().toISOString(),
+      pendingByKind: {
+        queuedPosts: remainingPosts.filter((post) => post.state === 'QUEUE')
+          .length,
+        claimedPosts: remainingPosts.filter(
+          (post) => post.releaseId && post.claimedAt
+        ).length,
+        autonomousEffects: effects.length,
+      },
+    };
+  }
+
+  async reconcilePendingTransitions() {
+    const rows = await this.db.settings.findMany({
+      where: {
+        key: { startsWith: SEND_MODE_ORGANIZATION_PREFIX },
+        value: { path: ['transition', 'version'], equals: 1 },
+      },
+      select: { key: true },
+    });
+    const results = [];
+    for (const row of rows) {
+      const organizationId = row.key.slice(
+        SEND_MODE_ORGANIZATION_PREFIX.length
+      );
+      try {
+        results.push(
+          await sendTransaction(this.db, async (tx) => {
+            const state = await this.lockIn(tx, organizationId);
+            if (
+              !state.transition ||
+              state.transition.remainingCount !== 0 ||
+              state.transition.status !== 'DRAINING' ||
+              state.mode !== 'AUTONOMOUS' ||
+              !state.autonomousAllowed ||
+              !state.systemEnabled
+            )
+              return false;
+            if (state.revision >= 2147483647)
+              throw new ServiceUnavailableException(
+                'SEND_MODE_REVISION_EXHAUSTED'
+              );
+            await tx.settings.updateMany({
+              where: { key: row.key },
+              data: {
+                value: {
+                  mode: state.transition.targetMode,
+                  revision: state.revision + 1,
+                },
+              },
+            });
+            return true;
+          })
+        );
+      } catch (error) {
+        this.logger.error(
+          `Sending mode transition reconciliation failed for organization ${organizationId}`,
+          error instanceof Error ? error.stack : error
+        );
+        results.push(false);
+      }
+    }
+    return results;
   }
 
   // Both configuration writers and send authorizers acquire rows in this order.
@@ -309,12 +620,42 @@ export class SendModeService {
 
   async assertAutonomousIn(
     tx: Prisma.TransactionClient,
-    organizationId: string
+    organizationId: string,
+    existingPostIds?: string[]
   ) {
     const state = await this.lockIn(tx, organizationId);
     if (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed)
       throw new ConflictException('SEND_MODE_AUTONOMOUS_REQUIRED');
+    if (state.transition) {
+      const allowed = await this.autonomousDrainPostIdsIn(tx, organizationId);
+      if (
+        !existingPostIds?.length ||
+        existingPostIds.some((id) => !allowed!.includes(id))
+      )
+        throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
+    }
     return state;
+  }
+
+  async autonomousDrainPostIdsIn(
+    tx: Prisma.TransactionClient,
+    organizationId: string
+  ): Promise<string[] | null> {
+    const state = await this.lockIn(tx, organizationId);
+    if (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed)
+      throw new ConflictException('SEND_MODE_AUTONOMOUS_REQUIRED');
+    if (!state.transition) return null;
+    const row = await tx.settings.findUnique({
+      where: { key: organizationSendModeKey(organizationId) },
+    });
+    return this.parseOrganization(row?.value).transition!.eligiblePostIds;
+  }
+
+  async isTransitionPending(organizationId: string) {
+    return sendTransaction(
+      this.db,
+      async (tx) => !!(await this.stateIn(tx, organizationId)).transition
+    );
   }
 
   async isControlled(organizationId: string, tx?: Prisma.TransactionClient) {
@@ -353,7 +694,11 @@ export class SendModeService {
   }
 
   private validateMutation(
-    body: SaveSendModeDto | SaveSystemSendModeDto | ResolveAutonomousEffectDto
+    body:
+      | SaveSendModeDto
+      | CancelSendModeTransitionDto
+      | SaveSystemSendModeDto
+      | ResolveAutonomousEffectDto
   ) {
     if (
       !body ||
@@ -414,26 +759,129 @@ export class SendModeService {
         throw new ConflictException('SEND_MODE_REVISION_CONFLICT');
       if (body.mode === 'CONTROLLED' && !current.systemEnabled)
         throw new ServiceUnavailableException('ACCOUNT_BINDINGS_NOT_ENABLED');
-      const blocked =
-        body.mode === 'CONTROLLED'
-          ? current.blockers.legacyQueuedPosts +
-            current.blockers.legacyReplyDrafts +
-            current.blockers.legacyClaims +
-            current.blockers.autonomousEffects
-          : this.controlledObligations(current.blockers) +
-            current.blockers.autonomousEffects;
+      if (current.transition)
+        throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
+      let transition: PendingSendModeTransition | null = null;
       if (
-        (current.configuredMode !== body.mode && blocked > 0) ||
-        (body.mode === 'CONTROLLED' && current.blockers.autonomousEffects > 0)
-      )
+        body.mode === 'CONTROLLED' &&
+        current.configuredMode !== 'CONTROLLED'
+      ) {
+        const posts = await this.pendingPostsIn(tx, organizationId);
+        const effects = await this.pendingAutonomousIn(tx, organizationId);
+        const initialPendingCount = this.pendingCount(
+          posts.map((post) => post.id),
+          effects
+        );
+        if (initialPendingCount > 0) {
+          if (current.revision >= 2147483646)
+            throw new ServiceUnavailableException(
+              'SEND_MODE_REVISION_EXHAUSTED'
+            );
+          if (current.mode !== 'AUTONOMOUS' || !current.autonomousAllowed)
+            throw new ConflictException('SEND_MODE_SWITCH_UNSAFE');
+          transition = {
+            version: 1,
+            targetMode: 'CONTROLLED',
+            requestedAt: new Date().toISOString(),
+            requestedByUserId: userId,
+            eligiblePostIds: posts.map((post) => post.id),
+            eligiblePostOccurrences: Object.fromEntries(
+              posts.map((post) => [
+                post.id,
+                post.publishDate &&
+                Number.isFinite(new Date(post.publishDate).getTime())
+                  ? new Date(post.publishDate).toISOString()
+                  : null,
+              ])
+            ),
+            initialPendingCount,
+          };
+        }
+      } else if (
+        body.mode === 'AUTONOMOUS' &&
+        this.controlledObligations(current.blockers) +
+          current.blockers.autonomousEffects >
+          0 &&
+        current.configuredMode !== body.mode
+      ) {
         throw new ConflictException({
           code: 'SEND_MODE_SWITCH_UNSAFE',
           message: 'SEND_MODE_SWITCH_UNSAFE',
           blockers: current.blockers,
         });
+      } else if (
+        body.mode === 'CONTROLLED' &&
+        current.blockers.autonomousEffects > 0
+      ) {
+        throw new ConflictException({
+          code: 'SEND_MODE_SWITCH_UNSAFE',
+          message: 'SEND_MODE_SWITCH_UNSAFE',
+          blockers: current.blockers,
+        });
+      }
       await tx.settings.updateMany({
         where: { key: organizationSendModeKey(organizationId) },
-        data: { value: { mode: body.mode, revision: current.revision + 1 } },
+        data: {
+          value: sendJson({
+            mode: transition ? 'AUTONOMOUS' : body.mode,
+            revision: current.revision + 1,
+            ...(transition ? { transition } : {}),
+          }),
+        },
+      });
+      const result = {
+        ...(await this.stateIn(tx, organizationId)),
+        userId,
+        canManage: true,
+      };
+      await tx.sendMutationReceipt.create({
+        data: { ...key, requestHash, result: sendJson(result) },
+      });
+      return result;
+    });
+  }
+
+  async cancelTransition(
+    organizationId: string,
+    userId: string,
+    body: CancelSendModeTransitionDto
+  ) {
+    this.validateMutation(body);
+    if (
+      body.expectedOrganizationId !== organizationId ||
+      body.expectedUserId !== userId
+    )
+      throw new ForbiddenException('SEND_OWNER_CHANGED');
+    const requestHash = sendHash({ expectedRevision: body.expectedRevision });
+    return sendTransaction(this.db, async (tx) => {
+      const member = await this.memberIn(tx, organizationId, userId);
+      if (!['ADMIN', 'SUPERADMIN'].includes(member.role))
+        throw new ForbiddenException('ORGANIZATION_ADMIN_REQUIRED');
+      const key = {
+        organizationId,
+        userId,
+        operation: 'cancel-send-mode-transition',
+        requestId: body.requestId,
+      };
+      const receipt = await tx.sendMutationReceipt.findUnique({
+        where: { organizationId_userId_operation_requestId: key },
+      });
+      if (receipt) {
+        if (receipt.requestHash !== requestHash)
+          throw new ConflictException('REQUEST_ID_CONFLICT');
+        return receipt.result as unknown as SendModeState & {
+          canManage: boolean;
+          userId: string;
+        };
+      }
+      const current = await this.lockIn(tx, organizationId);
+      if (current.revision !== body.expectedRevision)
+        throw new ConflictException('SEND_MODE_REVISION_CONFLICT');
+      if (!current.transition)
+        throw new ConflictException('SEND_MODE_TRANSITION_NOT_PENDING');
+      await tx.settings.updateMany({
+        where: { key: organizationSendModeKey(organizationId) },
+        data: { value: { mode: 'AUTONOMOUS', revision: current.revision + 1 } },
       });
       const result = {
         ...(await this.stateIn(tx, organizationId)),
@@ -561,12 +1009,30 @@ export class SendModeService {
     )
       throw new ServiceUnavailableException('AUTONOMOUS_EFFECT_RECORD_INVALID');
     if (
+      value.source !== 'BROWSER' &&
       ['POST', 'COMMENT'].includes(value.action) &&
       (!value.postIds?.length ||
         typeof value.occurrenceKey !== 'string' ||
         !value.occurrenceKey ||
         value.occurrenceKey.length > 2048 ||
         typeof value.recurring !== 'boolean')
+    )
+      throw new ServiceUnavailableException('AUTONOMOUS_EFFECT_RECORD_INVALID');
+    if (
+      value.source !== undefined &&
+      (value.source !== 'BROWSER' ||
+        !['POST', 'COMMENT'].includes(value.action) ||
+        typeof value.platform !== 'string' ||
+        !/^[a-z][a-z0-9-]{0,63}$/.test(value.platform) ||
+        typeof value.browserUserId !== 'string' ||
+        !value.browserUserId ||
+        value.browserUserId.length > 128 ||
+        value.integrationId !==
+          `browser:${value.browserUserId}:${value.platform}` ||
+        (value.postIds !== undefined &&
+          (!value.postIds.length ||
+            typeof value.occurrenceKey !== 'string' ||
+            typeof value.recurring !== 'boolean')))
     )
       throw new ServiceUnavailableException('AUTONOMOUS_EFFECT_RECORD_INVALID');
     return value;
@@ -605,9 +1071,11 @@ export class SendModeService {
       !['POST', 'COMMENT', 'PLUG', 'INTERNAL_PLUG', 'THREAD_FINISHER'].includes(
         request.action
       ) ||
-      ((request.quotaWriteKind !== undefined || request.quotaUnits !== undefined) &&
+      ((request.quotaWriteKind !== undefined ||
+        request.quotaUnits !== undefined) &&
         (!['WRITE', 'REPLY'].includes(request.quotaWriteKind!) ||
-          !validRevision(request.quotaUnits) || request.quotaUnits === 0))
+          !validRevision(request.quotaUnits) ||
+          request.quotaUnits === 0))
     )
       throw new BadRequestException('INVALID_AUTONOMOUS_EFFECT');
     const requestId = sendHash(['autonomous-effect-v1', operationKey]);
@@ -638,6 +1106,18 @@ export class SendModeService {
       }
       if (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed)
         throw new ConflictException('SEND_MODE_AUTONOMOUS_REQUIRED');
+      if (state.transition) {
+        if (
+          !['POST', 'COMMENT'].includes(request.action) ||
+          !Array.isArray(request.postIds)
+        )
+          throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
+        await this.assertAutonomousIn(
+          tx,
+          organizationId,
+          request.postIds as string[]
+        );
+      }
       const integration = await tx.integration.findFirst({
         where: {
           id: request.integrationId,
@@ -716,6 +1196,23 @@ export class SendModeService {
           )
         )
           throw new ConflictException('AUTONOMOUS_EFFECT_CONTENT_CHANGED');
+        if (state.transition) {
+          const setting = await tx.settings.findUnique({
+            where: { key: organizationSendModeKey(organizationId) },
+          });
+          const captured = this.parseOrganization(setting?.value).transition!;
+          if (
+            posts.some(
+              (post) =>
+                captured.eligiblePostOccurrences[post.id] !==
+                (post.publishDate &&
+                Number.isFinite(new Date(post.publishDate).getTime())
+                  ? new Date(post.publishDate).toISOString()
+                  : null)
+            )
+          )
+            throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
+        }
         const first = posts.find((post) => post.id === postIds[0])!;
         if (
           (request.action === 'POST' && first.parentPostId) ||
@@ -849,7 +1346,10 @@ export class SendModeService {
         ...(request.action === 'THREAD_FINISHER'
           ? { quotaWriteKind: 'REPLY' as const, quotaUnits: 1 }
           : request.quotaWriteKind !== undefined
-          ? { quotaWriteKind: request.quotaWriteKind, quotaUnits: request.quotaUnits }
+          ? {
+              quotaWriteKind: request.quotaWriteKind,
+              quotaUnits: request.quotaUnits,
+            }
           : {}),
       };
       const receipt = await tx.sendMutationReceipt.create({
@@ -895,8 +1395,10 @@ export class SendModeService {
               status: 'CONFIRMED',
               revision: current.revision + 1,
               confirmedAt: new Date().toISOString(),
-              ...(current.action === 'PLUG' && returned === false &&
-                current.quotaWriteKind !== undefined && current.quotaUnits !== undefined
+              ...(current.action === 'PLUG' &&
+              returned === false &&
+              current.quotaWriteKind !== undefined &&
+              current.quotaUnits !== undefined
                 ? { quotaUnits: 0 }
                 : {}),
               hasResult: true,
@@ -941,6 +1443,316 @@ export class SendModeService {
     }
   }
 
+  private browserOwner(
+    organizationId: string,
+    userId: string,
+    body: { expectedOrganizationId: string; expectedUserId: string }
+  ) {
+    if (
+      !body ||
+      body.expectedOrganizationId !== organizationId ||
+      body.expectedUserId !== userId
+    )
+      throw new ForbiddenException('SEND_OWNER_CHANGED');
+  }
+
+  private browserPlatform(value: string) {
+    return (
+      (
+        {
+          twitter: 'x',
+          'dev.to': 'devto',
+          'hacker-news': 'hackernews',
+          'linkedin-page': 'linkedin',
+        } as Record<string, string>
+      )[value] ?? value
+    );
+  }
+
+  async beginBrowserWrite(
+    organizationId: string,
+    userId: string,
+    body: BeginBrowserWriteDto
+  ) {
+    this.browserOwner(organizationId, userId, body);
+    if (
+      typeof body.requestId !== 'string' ||
+      !body.requestId.trim() ||
+      body.requestId.length > 128 ||
+      typeof body.platform !== 'string' ||
+      !/^[a-z][a-z0-9.-]{0,63}$/.test(body.platform) ||
+      typeof body.contentHash !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(body.contentHash) ||
+      (body.postId !== undefined &&
+        (typeof body.postId !== 'string' ||
+          !body.postId.trim() ||
+          body.postId.length > 128)) ||
+      (body.sentReplyId !== undefined &&
+        (typeof body.sentReplyId !== 'string' ||
+          !body.sentReplyId.trim() ||
+          body.sentReplyId.length > 128)) ||
+      (body.postId && body.sentReplyId)
+    )
+      throw new BadRequestException('INVALID_BROWSER_WRITE');
+    const platform = this.browserPlatform(body.platform);
+    if (!/^[a-z][a-z0-9-]{0,63}$/.test(platform))
+      throw new BadRequestException('INVALID_BROWSER_WRITE');
+    const integrationId = `browser:${userId}:${platform}`;
+    const requestId = sendHash(['browser-write-v1', userId, body.requestId]);
+    const requestHash = sendHash({
+      platform,
+      postId: body.postId,
+      sentReplyId: body.sentReplyId,
+      contentHash: body.contentHash,
+    });
+    return sendTransaction(this.db, async (tx) => {
+      await this.memberIn(tx, organizationId, userId);
+      const state = await this.lockIn(tx, organizationId);
+      const prior = await tx.sendMutationReceipt.findUnique({
+        where: {
+          organizationId_userId_operation_requestId: {
+            organizationId,
+            userId,
+            operation: AUTONOMOUS_EFFECT_OPERATION,
+            requestId,
+          },
+        },
+      });
+      if (prior) {
+        if (prior.requestHash !== requestHash)
+          throw new ConflictException('AUTONOMOUS_EFFECT_REQUEST_CONFLICT');
+        const result = this.effectResult(prior.result);
+        if (result.source !== 'BROWSER' || result.browserUserId !== userId)
+          throw new ForbiddenException('BROWSER_WRITE_OWNER_REQUIRED');
+        return {
+          id: prior.id,
+          admitted: false,
+          status: result.status,
+          organizationId,
+          userId,
+        };
+      }
+      let storedPostId = body.postId;
+      let storedPlatform: string | null | undefined;
+      if (body.sentReplyId) {
+        const reply = await tx.engageSentReply.findFirst({
+          where: { id: body.sentReplyId, organizationId },
+          select: { postId: true, opportunityId: true },
+        });
+        if (!reply)
+          throw new ForbiddenException('BROWSER_WRITE_CONTENT_REQUIRED');
+        storedPostId = reply.postId;
+        storedPlatform = (
+          await tx.engageOpportunity.findUnique({
+            where: { id: reply.opportunityId },
+            select: { platform: true },
+          })
+        )?.platform;
+      }
+      const post = storedPostId
+        ? await tx.post.findFirst({
+            where: { id: storedPostId, organizationId, deletedAt: null },
+            select: {
+              id: true,
+              providerIdentifier: true,
+              integrationId: true,
+              state: true,
+              sendIntentId: true,
+              executionProtocol: true,
+              publishDate: true,
+              intervalInDays: true,
+            },
+          })
+        : null;
+      if (
+        storedPostId &&
+        (!post ||
+          !['DRAFT', 'QUEUE'].includes(post.state) ||
+          post.sendIntentId ||
+          !isLegacyExecution(post.executionProtocol))
+      )
+        throw new ForbiddenException('BROWSER_WRITE_CONTENT_REQUIRED');
+      if (post) {
+        storedPlatform ??= post.providerIdentifier;
+        if (!storedPlatform && post.integrationId)
+          storedPlatform = (
+            await tx.integration.findFirst({
+              where: { id: post.integrationId, organizationId },
+              select: { providerIdentifier: true },
+            })
+          )?.providerIdentifier;
+        if (!storedPlatform)
+          throw new ForbiddenException('BROWSER_WRITE_PLATFORM_CHANGED');
+        if (this.browserPlatform(storedPlatform) !== platform)
+          throw new ConflictException('BROWSER_WRITE_PLATFORM_CHANGED');
+      }
+      if (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed)
+        throw new ConflictException('SEND_MODE_AUTONOMOUS_REQUIRED');
+      if (state.transition) {
+        if (!post) throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
+        await this.assertAutonomousIn(tx, organizationId, [post.id]);
+        const setting = await tx.settings.findUnique({
+          where: { key: organizationSendModeKey(organizationId) },
+        });
+        const pending = this.parseOrganization(setting?.value).transition!;
+        const occurrence =
+          post.publishDate &&
+          Number.isFinite(new Date(post.publishDate).getTime())
+            ? new Date(post.publishDate).toISOString()
+            : null;
+        if (pending.eligiblePostOccurrences[post.id] !== occurrence)
+          throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
+      }
+      const records = await this.autonomousRecordsIn(tx, organizationId);
+      if (
+        records.some(
+          ({ result }) =>
+            !['CONFIRMED', 'NOT_SUBMITTED'].includes(result.status) &&
+            (result.integrationId === integrationId ||
+              (post && result.postIds?.includes(post.id)))
+        )
+      )
+        throw new ConflictException(
+          'AUTONOMOUS_EFFECT_RECONCILIATION_REQUIRED'
+        );
+      const recurring = !!post?.intervalInDays;
+      const occurrenceKey =
+        recurring && post ? new Date(post.publishDate).toISOString() : 'single';
+      if (
+        post &&
+        records.some(
+          ({ result }) =>
+            result.status !== 'NOT_SUBMITTED' &&
+            result.postIds?.includes(post.id) &&
+            !(
+              result.recurring === true &&
+              recurring &&
+              result.status === 'CONFIRMED' &&
+              result.occurrenceKey !== occurrenceKey
+            )
+        )
+      )
+        throw new ConflictException(
+          'AUTONOMOUS_EFFECT_CONTENT_ALREADY_ADMITTED'
+        );
+      const result: AutonomousEffectResult = {
+        source: 'BROWSER',
+        platform,
+        browserUserId: userId,
+        status: 'AUTHORIZED',
+        revision: 1,
+        action: body.sentReplyId ? 'COMMENT' : 'POST',
+        integrationId,
+        ...(post ? { postIds: [post.id], occurrenceKey, recurring } : {}),
+      };
+      const row = await tx.sendMutationReceipt.create({
+        data: {
+          organizationId,
+          userId,
+          operation: AUTONOMOUS_EFFECT_OPERATION,
+          requestId,
+          requestHash,
+          result: sendJson(result),
+        },
+      });
+      return {
+        id: row.id,
+        admitted: true,
+        status: result.status,
+        organizationId,
+        userId,
+      };
+    });
+  }
+
+  async settleBrowserWrite(
+    organizationId: string,
+    userId: string,
+    id: string,
+    body: BrowserWriteOutcomeDto
+  ) {
+    this.browserOwner(organizationId, userId, body);
+    if (
+      typeof id !== 'string' ||
+      !id ||
+      id.length > 128 ||
+      !['CONFIRMED', 'UNKNOWN', 'NOT_SUBMITTED'].includes(body.status) ||
+      (body.platformPostId !== undefined &&
+        (typeof body.platformPostId !== 'string' ||
+          !body.platformPostId.trim() ||
+          body.platformPostId.length > 2048)) ||
+      (body.url !== undefined &&
+        (typeof body.url !== 'string' ||
+          !/^https?:\/\//.test(body.url) ||
+          body.url.length > 4096))
+    )
+      throw new BadRequestException('INVALID_BROWSER_WRITE_OUTCOME');
+    return sendTransaction(this.db, async (tx) => {
+      await this.memberIn(tx, organizationId, userId);
+      await this.lockIn(tx, organizationId);
+      const row = await tx.sendMutationReceipt.findFirst({
+        where: { id, organizationId, operation: AUTONOMOUS_EFFECT_OPERATION },
+      });
+      if (!row || row.userId !== userId)
+        throw new ForbiddenException('BROWSER_WRITE_OWNER_REQUIRED');
+      const current = this.effectResult(row.result);
+      if (current.source !== 'BROWSER' || current.browserUserId !== userId)
+        throw new ForbiddenException('BROWSER_WRITE_OWNER_REQUIRED');
+      const result = {
+        ...(body.platformPostId ? { postId: body.platformPostId } : {}),
+        ...(body.url ? { url: body.url } : {}),
+      };
+      if (['CONFIRMED', 'NOT_SUBMITTED'].includes(current.status)) {
+        if (current.status !== body.status)
+          throw new ConflictException('BROWSER_WRITE_OUTCOME_CONFLICT');
+        if (body.status === 'CONFIRMED') {
+          if (current.hasResult === true) {
+            if (sendHash(current.result) !== sendHash(result))
+              throw new ConflictException('BROWSER_WRITE_OUTCOME_CONFLICT');
+          } else if (Object.keys(result).length > 0) {
+            const saved = await tx.sendMutationReceipt.updateMany({
+              where: {
+                id,
+                organizationId,
+                result: { equals: row.result as Prisma.InputJsonValue },
+              },
+              data: {
+                result: sendJson({
+                  ...current,
+                  revision: current.revision + 1,
+                  hasResult: true,
+                  result,
+                }),
+              },
+            });
+            if (saved.count !== 1) throw retryConflict();
+          }
+        }
+        return { id, status: current.status, organizationId, userId };
+      }
+      if (current.status === 'UNKNOWN' && body.status === 'NOT_SUBMITTED')
+        throw new ConflictException('BROWSER_WRITE_OUTCOME_CONFLICT');
+      const next = {
+        ...current,
+        status: body.status,
+        revision: current.revision + 1,
+        ...(body.status === 'CONFIRMED'
+          ? { confirmedAt: new Date().toISOString(), hasResult: true, result }
+          : {}),
+      };
+      const saved = await tx.sendMutationReceipt.updateMany({
+        where: {
+          id,
+          organizationId,
+          result: { equals: row.result as Prisma.InputJsonValue },
+        },
+        data: { result: sendJson(next) },
+      });
+      if (saved.count !== 1) throw retryConflict();
+      return { id, status: next.status, organizationId, userId };
+    });
+  }
+
   private effectView(
     row: { id: string; createdAt: Date },
     result: AutonomousEffectResult
@@ -949,6 +1761,9 @@ export class SendModeService {
       id: row.id,
       action: result.action,
       integrationId: result.integrationId,
+      ...(result.source
+        ? { source: result.source, platform: result.platform }
+        : {}),
       status: result.status,
       revision: result.revision,
       createdAt: row.createdAt.toISOString(),

@@ -5,6 +5,9 @@ import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.reque
 import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
 import { SendModeService } from '@gitroom/nestjs-libraries/extension/send-mode.service';
 import {
+  BeginBrowserWriteDto,
+  BrowserWriteOutcomeDto,
+  CancelSendModeTransitionDto,
   ResolveAutonomousEffectDto,
   SaveSendModeDto,
 } from '@gitroom/nestjs-libraries/extension/send-mode.dto';
@@ -28,7 +31,7 @@ export class SendModeController {
   @Post()
   @ApiOperation({
     summary:
-      'Safely switch organization sending mode without migrating existing content',
+      'Request an organization sending mode switch and drain existing autonomous work',
   })
   save(
     @GetOrgFromRequest() org: Organization,
@@ -36,6 +39,37 @@ export class SendModeController {
     @Body() body: SaveSendModeDto
   ) {
     return this.modes.save(org.id, user.id, body);
+  }
+
+  @Post('/transition/cancel')
+  @ApiOperation({
+    summary: 'Cancel a pending mode switch without cancelling existing sends',
+  })
+  cancelTransition(
+    @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
+    @Body() body: CancelSendModeTransitionDto
+  ) {
+    return this.modes.cancelTransition(org.id, user.id, body);
+  }
+
+  @Post('/browser-writes')
+  beginBrowserWrite(
+    @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
+    @Body() body: BeginBrowserWriteDto
+  ) {
+    return this.modes.beginBrowserWrite(org.id, user.id, body);
+  }
+
+  @Post('/browser-writes/:id/outcome')
+  settleBrowserWrite(
+    @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
+    @Param('id') id: string,
+    @Body() body: BrowserWriteOutcomeDto
+  ) {
+    return this.modes.settleBrowserWrite(org.id, user.id, id, body);
   }
 
   @Get('/autonomous-effects')

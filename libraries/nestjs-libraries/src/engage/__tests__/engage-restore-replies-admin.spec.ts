@@ -4,6 +4,8 @@ import {
   REPLIES_DISABLED_ERROR_PREFIX,
 } from '../engage.repository';
 
+vi.mock('../../redis/redis.service', () => ({ ioRedis: {} }));
+
 // The UNDO of a "replies disabled" verdict.
 //
 // The verdict itself is written on the word of a browser extension's platform
@@ -74,6 +76,8 @@ describe('EngageRepository.restoreOpportunityRepliesForAdmin', () => {
 
     expect(postUpdateMany.mock.calls[0][0].where).toEqual({
       id: { in: ['p1'] },
+      sendIntentId: null,
+      AND: [{ OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] }],
       state: 'ERROR',
       deletedAt: null,
       releaseURL: null,

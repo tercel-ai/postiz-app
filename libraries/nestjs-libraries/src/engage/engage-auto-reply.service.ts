@@ -773,6 +773,11 @@ export class EngageAutoReplyService implements OnModuleInit {
           continue;
         }
 
+        // Pending mode changes drain existing approvals without paying to produce more.
+        // Draft admission rechecks the mode lock if a transition starts after this read.
+        if (!coordinated && this._sendModes &&
+            await this._sendModes.isTransitionPending(org.id)) continue;
+
         // ── Gate that applies to GENERATION only ─────────────────────────────
         //
         // The plan budget bounds how much is PRODUCED. A queued reply was

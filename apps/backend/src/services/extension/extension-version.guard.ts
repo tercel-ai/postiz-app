@@ -137,7 +137,10 @@ export class ExtensionVersionGuard implements CanActivate {
     const path = (request.path || request.originalUrl || '').split('?')[0];
     const uuid = '[a-fA-F0-9]{8}-[a-fA-F0-9-]{27}';
     const read = request.method === 'GET' && (path === '/extension/send-protocol' || path === '/api/extension/send-protocol' || new RegExp(`^/(?:api/)?extension/send-attempts/${uuid}$`).test(path));
-    const settle = request.method === 'POST' && new RegExp(`^/(?:api/)?extension/send-attempts/${uuid}/segments/\\d+/(?:outcome|stop-confirmation)$`).test(path);
+    const settle = request.method === 'POST' && (
+      new RegExp(`^/(?:api/)?extension/send-attempts/${uuid}/segments/\\d+/(?:outcome|stop-confirmation)$`).test(path) ||
+      new RegExp(`^/(?:api/)?sending/mode/browser-writes/${uuid}/outcome$`).test(path)
+    );
     if (read || settle) return true;
 
 

@@ -187,4 +187,11 @@ describe('account-bound settlement remains available during an upgrade pause', (
     const { guard } = buildGuard('2.0.0');
     for (const path of ['/extension/send-attempts/claim', `/extension/send-attempts/${execution}/renew`, `/extension/send-attempts/${execution}/segments/0/preflight`, `/extension/send-attempts/${execution}/segments/0/start`, '/posts/publish-result']) await expect(guard.canActivate(requestContext('POST', path))).rejects.toMatchObject({ status: 426 });
   });
+  it('allows browser write outcomes but refuses new browser write admissions during an upgrade pause', async () => {
+    const { guard } = buildGuard('2.0.0');
+    for (const prefix of ['', '/api']) {
+      await expect(guard.canActivate(requestContext('POST', `${prefix}/sending/mode/browser-writes/${execution}/outcome`))).resolves.toBe(true);
+      await expect(guard.canActivate(requestContext('POST', `${prefix}/sending/mode/browser-writes`))).rejects.toMatchObject({ status: 426 });
+    }
+  });
 });

@@ -6,6 +6,8 @@ import { SendModeController } from '../../../../../apps/backend/src/api/routes/s
 import { AdminSettingsController } from '../../../../../apps/backend/src/admin-api/routes/admin-settings.controller';
 import { SettingsService } from '../../database/prisma/settings/settings.service';
 import {
+  BeginBrowserWriteDto,
+  BrowserWriteOutcomeDto,
   ResolveAutonomousEffectDto,
   SaveSendModeDto,
   SaveSystemSendModeDto,
@@ -16,6 +18,89 @@ import {
 } from '../send-mode.service';
 
 describe('sending mode API and Settings isolation', () => {
+  it('validates browser write ownership, stable content identities and safe outcome proof', async () => {
+    const owner = { expectedOrganizationId: 'org', expectedUserId: 'user' };
+    const begin = {
+      ...owner,
+      requestId: 'write',
+      platform: 'x',
+      contentHash: 'a'.repeat(64),
+    };
+    expect(
+      await validate(plainToInstance(BeginBrowserWriteDto, begin))
+    ).toEqual([]);
+    for (const patch of [
+      { contentHash: 'raw body' },
+      { expectedOrganizationId: undefined },
+      { requestId: '' },
+      { platform: '../x' },
+    ])
+      expect(
+        await validate(
+          plainToInstance(BeginBrowserWriteDto, { ...begin, ...patch })
+        )
+      ).not.toEqual([]);
+    expect(
+      await validate(
+        plainToInstance(BrowserWriteOutcomeDto, {
+          ...owner,
+          status: 'CONFIRMED',
+          platformPostId: 'remote',
+          url: 'https://x.com/user/status/remote',
+        })
+      )
+    ).toEqual([]);
+    expect(
+      await validate(
+        plainToInstance(BrowserWriteOutcomeDto, { ...owner, status: 'RETRY' })
+      )
+    ).not.toEqual([]);
+    expect(
+      await validate(
+        plainToInstance(BrowserWriteOutcomeDto, {
+          ...owner,
+          status: 'CONFIRMED',
+          url: 'javascript:alert(1)',
+        })
+      )
+    ).not.toEqual([]);
+  });
+  it('routes browser admissions and late outcomes through authenticated organization and user', async () => {
+    const modes = { beginBrowserWrite: vi.fn(), settleBrowserWrite: vi.fn() };
+    const controller = new SendModeController(modes as any);
+    const owner = { expectedOrganizationId: 'org', expectedUserId: 'user' };
+    const begin = {
+      ...owner,
+      requestId: 'write',
+      platform: 'x',
+      contentHash: 'a'.repeat(64),
+    };
+    const outcome = { ...owner, status: 'UNKNOWN' as const };
+    await controller.beginBrowserWrite(
+      { id: 'org' } as any,
+      { id: 'user' } as any,
+      begin
+    );
+    await controller.settleBrowserWrite(
+      { id: 'org' } as any,
+      { id: 'user' } as any,
+      'effect',
+      outcome
+    );
+    expect(modes.beginBrowserWrite).toHaveBeenCalledWith('org', 'user', begin);
+    expect(modes.settleBrowserWrite).toHaveBeenCalledWith(
+      'org',
+      'user',
+      'effect',
+      outcome
+    );
+    expect(Reflect.getMetadata('path', controller.beginBrowserWrite)).toBe(
+      '/browser-writes'
+    );
+    expect(Reflect.getMetadata('path', controller.settleBrowserWrite)).toBe(
+      '/browser-writes/:id/outcome'
+    );
+  });
   it('requires typed operator stop attestations and evidence for autonomous-effect resolution', async () => {
     const body = {
       decision: 'CONFIRMED',

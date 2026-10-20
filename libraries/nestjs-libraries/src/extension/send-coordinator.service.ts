@@ -87,9 +87,9 @@ export class SendCoordinatorService {
     return this.modes.assertControlledIn(tx, org);
   }
 
-  async autonomousTransaction<T>(org: string, work: (tx: Prisma.TransactionClient) => Promise<T>) {
+  async autonomousTransaction<T>(org: string, work: (tx: Prisma.TransactionClient) => Promise<T>, existingPostIds?: string[]) {
     return sendTransaction(this.db, async tx => {
-      await this.modes.assertAutonomousIn(tx, org);
+      await this.modes.assertAutonomousIn(tx, org, existingPostIds);
       return work(tx);
     });
   }
@@ -744,7 +744,7 @@ export class SendCoordinatorService {
 
   async assertLegacyPosts(org: string, posts: { id: string; projectId?: string | null; sendIntentId?: string | null; executionProtocol?: string | null }[]) {
     for (const post of posts) if (post.sendIntentId || post.executionProtocol === 'ACCOUNT_BOUND_V1') reject('SEND_COORDINATOR_REQUIRED');
-    await this.autonomousTransaction(org, async () => undefined);
+    await this.autonomousTransaction(org, async () => undefined, posts.map(post => post.id));
   }
 
   async assertProjectSendActive(org: string, executionId: string) {

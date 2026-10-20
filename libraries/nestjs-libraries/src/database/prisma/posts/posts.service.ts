@@ -2114,6 +2114,7 @@ export class PostsService {
     const isEditingExisting = body.posts.some((p) => p.value?.some((v) => !!v.id));
     if (group && isEditingExisting && allCreatedPostIds.length > 0) {
       await this._postRepository.softDeleteGroupPosts(group, {
+        organizationId: orgId,
         excludeIds: allCreatedPostIds,
       });
     }

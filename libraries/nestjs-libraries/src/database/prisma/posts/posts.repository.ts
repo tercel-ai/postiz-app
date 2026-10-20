@@ -876,21 +876,47 @@ export class PostsRepository {
    * PUBLISHED and ERROR posts are never touched — they are immutable history.
    * All group-level deletions (explicit delete, edit cleanup) must go through here.
    */
+  private async softDeleteLegacyPosts(
+    where: Prisma.PostWhereInput,
+    organizationId?: string,
+    preservePendingQueue = false
+  ): Promise<Prisma.BatchPayload> {
+    const remove = (client: Pick<Prisma.TransactionClient, 'post'>, scope = where) =>
+      client.post.updateMany({
+        where: scope,
+        data: { parentPostId: null, deletedAt: new Date() },
+      });
+    if (!this._sendModes) return remove(this._post.model);
+    if (!organizationId) throw new BadRequestException('SEND_ORGANIZATION_REQUIRED');
+    if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
+    return sendTransaction(this._tx.model, async client => {
+      const state = await this._sendModes!.lockIn(client, organizationId);
+      if (!state.transition) return remove(client);
+      if (preservePendingQueue) {
+        // Editor cleanup must not cancel a captured send or detach its thread.
+        return remove(client, { AND: [where, { state: 'DRAFT', releaseId: null }] });
+      }
+      const claimed = await client.post.findFirst({
+        where: { AND: [where, { state: { not: 'PUBLISHED' }, releaseId: { not: null } }] },
+        select: { id: true },
+      });
+      if (claimed) throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
+      return remove(client);
+    });
+  }
+
   async softDeleteGroupPosts(
     group: string,
     opts: { organizationId?: string; excludeIds?: string[] } = {}
   ) {
-    return this._post.model.post.updateMany({
-      where: {
-        group,
-        sendIntentId: null,
-        deletedAt: null,
-        state: { in: ['QUEUE', 'DRAFT'] },
-        ...(opts.organizationId ? { organizationId: opts.organizationId } : {}),
-        ...(opts.excludeIds?.length ? { id: { notIn: opts.excludeIds } } : {}),
-      },
-      data: { parentPostId: null, deletedAt: new Date() },
-    });
+    return this.softDeleteLegacyPosts({
+      group,
+      sendIntentId: null,
+      deletedAt: null,
+      state: { in: ['QUEUE', 'DRAFT'] },
+      ...(opts.organizationId ? { organizationId: opts.organizationId } : {}),
+      ...(opts.excludeIds?.length ? { id: { notIn: opts.excludeIds } } : {}),
+    }, opts.organizationId, true);
   }
 
   async deletePost(orgId: string, group: string) {
@@ -904,14 +930,10 @@ export class PostsRepository {
       select: { id: true },
     });
 
-    if (hasRecurring) {
-      await this.softDeleteGroupPosts(group, { organizationId: orgId });
-    } else {
-      await this._post.model.post.updateMany({
-        where: { organizationId: orgId, group, deletedAt: null, sendIntentId: null },
-        data: { parentPostId: null, deletedAt: new Date() },
-      });
-    }
+    await this.softDeleteLegacyPosts({
+      organizationId: orgId, group, deletedAt: null, sendIntentId: null,
+      ...(hasRecurring ? { state: { in: ['QUEUE', 'DRAFT'] as State[] } } : {}),
+    }, orgId);
 
     return this._post.model.post.findFirst({
       where: {
@@ -927,10 +949,9 @@ export class PostsRepository {
   }
 
   async deletePostById(orgId: string, id: string) {
-    const { count } = await this._post.model.post.updateMany({
-      where: { organizationId: orgId, id, deletedAt: null },
-      data: { parentPostId: null, deletedAt: new Date() },
-    });
+    const { count } = await this.softDeleteLegacyPosts({
+      organizationId: orgId, id, deletedAt: null,
+    }, orgId);
 
     return count > 0;
   }
@@ -1047,7 +1068,19 @@ export class PostsRepository {
     if (this._sendModes && !tx) {
       if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
       return sendTransaction(this._tx.model, async client => {
-        await this._sendModes!.assertAutonomousIn(client, originalPost.organizationId);
+        const drainIds = await this._sendModes!.autonomousDrainPostIdsIn(client, originalPost.organizationId);
+        if (drainIds) {
+          const existing = await client.post.findFirst({
+            where: {
+              organizationId: originalPost.organizationId,
+              group: originalPost.group,
+              publishDate: cyclePublishDate,
+              id: { in: drainIds, not: originalPost.id },
+            },
+            select: { id: true },
+          });
+          if (!existing) throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
+        }
         return this.findOrCreateCycleClone(originalPost, cyclePublishDate, claimToken, client);
       });
     }
@@ -1452,7 +1485,7 @@ export class PostsRepository {
       return sendTransaction(this._tx.model, async client => {
         const post = await client.post.findUnique({ where: { id }, select: { organizationId: true } });
         if (!post) return false;
-        await this._sendModes!.assertAutonomousIn(client, post.organizationId);
+        await this._sendModes!.assertAutonomousIn(client, post.organizationId, [id]);
         return this.claimPostForPublishing(id, claimToken, client);
       });
     }
@@ -2150,8 +2183,9 @@ export class PostsRepository {
     publishMethod?: PublishMethod,
     tx?: Prisma.TransactionClient,
     admissionMode?: 'AUTONOMOUS' | 'CONTROLLED'
-  ) {
-    if (admissionMode && this._sendModes) {
+  ): Promise<{ previousPost: string | undefined; posts: Post[] }> {
+    let restrictToUnclaimedDrafts = false;
+    if (this._sendModes && (admissionMode || state === 'draft')) {
       if (!tx) {
         if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
         return sendTransaction(this._tx.model, client => this.createOrUpdatePost(
@@ -2159,7 +2193,8 @@ export class PostsRepository {
         ));
       }
       if (admissionMode === 'CONTROLLED') await this._sendModes.assertControlledIn(tx, orgId);
-      else await this._sendModes.assertAutonomousIn(tx, orgId);
+      else if (state !== 'draft' || admissionMode === 'AUTONOMOUS') await this._sendModes.assertAutonomousIn(tx, orgId);
+      else restrictToUnclaimedDrafts = !!(await this._sendModes.lockIn(tx, orgId)).transition;
     }
     if ((body.accountSelectionMode === 'INHERIT' && body.integration?.id) ||
         (body.accountSelectionMode === 'EXPLICIT' && !body.integration?.id))
@@ -2181,6 +2216,11 @@ export class PostsRepository {
 
     for (const value of body.value) {
       const id = value.id || uuidv4();
+      if (restrictToUnclaimedDrafts && value.id) {
+        const existing = await tx!.post.findFirst({ where: { id, organizationId: orgId } });
+        if (existing && (existing.state !== 'DRAFT' || existing.sendIntentId || existing.releaseId))
+          throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
+      }
       if (clearSelection && value.id) {
         const existing = await tx!.post.findFirst({ where: { id, organizationId: orgId } });
         if (existing && (existing.state !== 'DRAFT' || existing.sendIntentId || existing.releaseId ||
@@ -2296,6 +2336,7 @@ export class PostsRepository {
           where: {
             id,
             organizationId: orgId,
+            ...(restrictToUnclaimedDrafts ? { state: 'DRAFT', releaseId: null } : {}),
             ...(clearSelection ? {
               state: 'DRAFT', sendIntentId: null, releaseId: null, routeRevision: body.expectedRouteRevision,
             } : admissionMode === 'CONTROLLED'
@@ -3143,17 +3184,18 @@ export class PostsRepository {
     leaseToken: string,
     leaseCutoff: Date,
     blockedPlatforms: string[] = [],
-    tx?: Prisma.TransactionClient
-  ) {
+    tx?: Prisma.TransactionClient,
+    drainPostIds?: string[] | null
+  ): Promise<Prisma.PostGetPayload<{ select: typeof PostsRepository.EXTENSION_DUE_SELECT }>[]> {
     if (this._sendModes && !tx) {
       if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
       return sendTransaction(this._tx.model, async client => {
-        await this._sendModes!.assertAutonomousIn(client, organizationId);
-        return this.claimDueExtensionPublishPosts(organizationId, providerIdentifiers, now, limit, leaseToken, leaseCutoff, blockedPlatforms, client);
+        const captured = await this._sendModes!.autonomousDrainPostIdsIn(client, organizationId);
+        return this.claimDueExtensionPublishPosts(organizationId, providerIdentifiers, now, limit, leaseToken, leaseCutoff, blockedPlatforms, client, captured);
       });
     }
     const available = PostsRepository.extensionLeaseAvailableWhere(leaseCutoff);
-    const dueWhere = { ...this.extensionDueWhere(organizationId, providerIdentifiers, now), ...(blockedPlatforms.length ? { NOT: { OR: [{ providerIdentifier: { in: blockedPlatforms } }, { integration: { providerIdentifier: { in: blockedPlatforms } } }] } } : {}) };
+    const dueWhere = { ...this.extensionDueWhere(organizationId, providerIdentifiers, now), ...(drainPostIds ? { id: { in: drainPostIds } } : {}), ...(blockedPlatforms.length ? { NOT: { OR: [{ providerIdentifier: { in: blockedPlatforms } }, { integration: { providerIdentifier: { in: blockedPlatforms } } }] } } : {}) };
 
     const candidates = await (tx?.post ?? this._post.model.post).findMany({
       where: { AND: [dueWhere, available] },
@@ -3504,7 +3546,7 @@ export class PostsRepository {
     publishMethod: PublishMethod,
     publishDate?: Date,
     tx?: Prisma.TransactionClient
-  ) {
+  ): Promise<Prisma.BatchPayload> {
     if (this._sendModes && !tx) {
       if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
       return sendTransaction(this._tx.model, async client => {

@@ -212,20 +212,19 @@ describe('organization sending mode', () => {
       'legacyClaims',
     ],
   ])(
-    'blocks enrollment for unfinished autonomous work in %s',
+    'captures unfinished autonomous work and preserves unclaimed drafts in %s',
     async (table, fields, blocker) => {
       vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true');
       const { db, service } = setup();
       db.seed(table, { organizationId: 'org', ...fields });
-      await expect(
-        service.save('org', 'admin', save('CONTROLLED'))
-      ).rejects.toMatchObject({
-        response: {
-          code: 'SEND_MODE_SWITCH_UNSAFE',
-          blockers: { [blocker]: 1 },
-        },
-      });
-      expect(db.rows('sendMutationReceipt')).toHaveLength(0);
+      const result = await service.save('org', 'admin', save('CONTROLLED'));
+      if (blocker === 'legacyReplyDrafts') {
+        expect(result).toMatchObject({ mode: 'CONTROLLED', transition: null });
+        expect(db.rows('post')[0].state).toBe('DRAFT');
+      } else {
+        expect(result).toMatchObject({ mode: 'AUTONOMOUS', transition: { remainingCount: 1 } });
+      }
+      expect(db.rows('sendMutationReceipt')).toHaveLength(1);
     }
   );
   it('allows inert calendar drafts and foreign organization work when enrolling', async () => {

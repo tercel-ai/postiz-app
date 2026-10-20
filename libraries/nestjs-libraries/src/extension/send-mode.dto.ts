@@ -2,6 +2,7 @@ import {
   IsBoolean,
   IsIn,
   IsInt,
+  IsOptional,
   IsString,
   Matches,
   Max,
@@ -21,7 +22,7 @@ class SendModeMutationDto {
   requestId!: string;
 }
 
-export class SaveSendModeDto extends SendModeMutationDto {
+export class CancelSendModeTransitionDto extends SendModeMutationDto {
   @IsString()
   @Matches(/\S/)
   @MaxLength(128)
@@ -31,7 +32,9 @@ export class SaveSendModeDto extends SendModeMutationDto {
   @Matches(/\S/)
   @MaxLength(128)
   expectedUserId!: string;
+}
 
+export class SaveSendModeDto extends CancelSendModeTransitionDto {
   @IsIn(['AUTONOMOUS', 'CONTROLLED'])
   mode!: 'AUTONOMOUS' | 'CONTROLLED';
 }
@@ -65,4 +68,60 @@ export class ResolveAutonomousEffectDto extends SendModeMutationDto {
   @Matches(/\S/)
   @MaxLength(2000)
   evidence!: string;
+}
+
+class BrowserWriteOwnerDto {
+  @IsString()
+  @Matches(/\S/)
+  @MaxLength(128)
+  expectedOrganizationId!: string;
+
+  @IsString()
+  @Matches(/\S/)
+  @MaxLength(128)
+  expectedUserId!: string;
+}
+
+export class BeginBrowserWriteDto extends BrowserWriteOwnerDto {
+  @IsString()
+  @Matches(/\S/)
+  @MaxLength(128)
+  requestId!: string;
+
+  @IsString()
+  @Matches(/^[a-z][a-z0-9.-]{0,63}$/)
+  platform!: string;
+
+  @IsString()
+  @Matches(/^[a-f0-9]{64}$/)
+  contentHash!: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/\S/)
+  @MaxLength(128)
+  postId?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/\S/)
+  @MaxLength(128)
+  sentReplyId?: string;
+}
+
+export class BrowserWriteOutcomeDto extends BrowserWriteOwnerDto {
+  @IsIn(['CONFIRMED', 'UNKNOWN', 'NOT_SUBMITTED'])
+  status!: 'CONFIRMED' | 'UNKNOWN' | 'NOT_SUBMITTED';
+
+  @IsOptional()
+  @IsString()
+  @Matches(/\S/)
+  @MaxLength(2048)
+  platformPostId?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^https?:\/\//)
+  @MaxLength(4096)
+  url?: string;
 }

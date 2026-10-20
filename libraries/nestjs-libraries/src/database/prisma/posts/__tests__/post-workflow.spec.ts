@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PostsService } from '../posts.service';
 import { PostsRepository } from '../posts.repository';
 
+vi.mock('../../../../redis/redis.service', () => ({ ioRedis: {} }));
+
 // ---------------------------------------------------------------------------
 // Mock factories
 // ---------------------------------------------------------------------------
