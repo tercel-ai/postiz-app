@@ -3,6 +3,7 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { SendBindingService } from '../send-binding.service';
 import { SaveSendingAccountsDto } from '../send-binding.dto';
+import { memorySendDatabase } from './support/memory-send-database';
 
 const actor = {
   id: 'x1',
@@ -63,6 +64,35 @@ function setup() {
 }
 
 describe('independent sending account resources', () => {
+  it('accepts account choices without client revisions', async () => {
+    expect(await validate(plainToInstance(SaveSendingAccountsDto, {
+      accounts: { x: { POST: { integrationId: 'x1' }, REPLY: { integrationId: null } } }, requestId: 'save',
+    }))).toEqual([]);
+  });
+  it('uses the current internal revision even when a legacy client supplies an old hint', async () => {
+    const { service, db } = setup();
+    db.projectSendBinding.findUnique.mockResolvedValue({ id: 'binding', revision: 8 });
+    const result = await service.saveDefaults('org', 'user', {
+      accounts: { x: { POST: choice('x1', 0) } }, requestId: 'save',
+    }, 'project');
+    expect(result.bindings[0].revision).toBe(9);
+    expect(db.projectSendBinding.updateMany).toHaveBeenCalledWith({
+      where: { id: 'binding', organizationId: 'org', revision: 8 },
+      data: { integrationId: 'x1', updatedByUserId: 'user', revision: { increment: 1 } },
+    });
+  });
+  it('retries internal contention without requiring a client revision refresh', async () => {
+    const { service, db } = setup();
+    db.projectSendBinding.findUnique.mockResolvedValueOnce({ id: 'binding', revision: 8 })
+      .mockResolvedValueOnce({ id: 'binding', revision: 9 });
+    db.projectSendBinding.updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
+    const result = await service.saveDefaults('org', 'user', {
+      accounts: { x: { POST: { integrationId: 'x1' } } }, requestId: 'save',
+    }, 'project');
+    expect(result.bindings[0].revision).toBe(10);
+    expect(db.$transaction).toHaveBeenCalledTimes(2);
+    expect(db.sendMutationReceipt.create).toHaveBeenCalledOnce();
+  });
   it('validates nested actions and requires a stable request ID', async () => {
     expect(
       await validate(
@@ -133,6 +163,9 @@ describe('independent sending account resources', () => {
     db.projectSendBinding.findUnique
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({ id: 'b', revision: 3 });
+    db.integrationProject.findFirst
+      .mockResolvedValueOnce({ integration: actor, disabled: false, engageEnabled: true })
+      .mockResolvedValueOnce({ integration: actor, disabled: false, engageEnabled: false });
     await expect(
       service.saveDefaults(
         'org',
@@ -143,7 +176,7 @@ describe('independent sending account resources', () => {
         },
         'project'
       )
-    ).rejects.toMatchObject({ status: 409 });
+    ).rejects.toMatchObject({ status: 403 });
     expect(db.projectSendBinding.create).not.toHaveBeenCalled();
     expect(db.sendMutationReceipt.create).not.toHaveBeenCalled();
   });
@@ -165,7 +198,7 @@ describe('independent sending account resources', () => {
     expect(projects.assertProjectActive).not.toHaveBeenCalled();
   });
 
-  it('replays before revision checks and isolates receipts by resource', async () => {
+  it('replays the original result and isolates receipts by resource', async () => {
     const { service, db } = setup();
     const body = { accounts: { x: { POST: choice() } }, requestId: 'save' };
     const result = await service.saveDefaults('org', 'user', body, 'project');
@@ -213,7 +246,7 @@ describe('independent sending account resources', () => {
     });
   });
 
-  it('refuses missing membership, foreign actors, invalid platforms, and lost CAS', async () => {
+  it('refuses missing membership, foreign actors, invalid platforms, and repeated internal contention', async () => {
     const { service, db } = setup();
     const body = { accounts: { x: { POST: choice() } }, requestId: 'save' };
     db.userOrganization.findUnique.mockResolvedValue(null);
@@ -241,9 +274,12 @@ describe('independent sending account resources', () => {
       revision: 0,
     });
     db.organizationSendBinding.updateMany.mockResolvedValue({ count: 0 });
+    db.$transaction.mockClear();
     await expect(
       service.saveDefaults('org', 'user', body)
-    ).rejects.toMatchObject({ status: 409 });
+    ).rejects.toMatchObject({ code: 'P2034' });
+    expect(db.$transaction).toHaveBeenCalledTimes(4);
+    expect(db.sendMutationReceipt.create).not.toHaveBeenCalled();
   });
 
   it('resolves explicit then project then organization, only inheriting when unset', async () => {
@@ -403,5 +439,68 @@ describe('independent sending account resources', () => {
     });
     expect(JSON.stringify(result)).not.toContain('secret');
     expect(db.integrationProject.findFirst).not.toHaveBeenCalled();
+  });
+});
+
+function persistedDefaults() {
+  const db = memorySendDatabase();
+  db.seed('userOrganization', { userId: 'user', organizationId: 'org', disabled: false });
+  for (const account of [actor, { ...actor, id: 'x2', internalId: '456' }]) {
+    db.seed('integration', account);
+    db.seed('integrationProject', {
+      id: `relation-${account.id}`, organizationId: 'org', projectId: 'project', integrationId: account.id,
+      disabled: false, engageEnabled: true, integration: account,
+    });
+  }
+  const projects = { assertProjectActive: vi.fn(), assertProjectAccess: vi.fn() };
+  return { db, service: new SendBindingService(db as any, projects as any) };
+}
+
+describe.each([undefined, 'project'])('last-write-wins defaults at scope %s', project => {
+  const body = (requestId: string, integrationId: string | null) => ({
+    accounts: { x: { POST: { integrationId } } }, requestId,
+  });
+  const table = project === undefined ? 'organizationSendBinding' : 'projectSendBinding';
+  it('retains the newest save when an older request is replayed after a lost response', async () => {
+    const { db, service } = persistedDefaults();
+    const first = await service.saveDefaults('org', 'user', body('a', 'x1'), project);
+    await service.saveDefaults('org', 'user', body('b', 'x2'), project);
+    expect(await service.saveDefaults('org', 'user', body('a', 'x1'), project)).toEqual(first);
+    expect(db.rows(table)).toHaveLength(1);
+    expect(db.rows(table)[0]).toMatchObject({ integrationId: 'x2', revision: 2 });
+    expect(db.rows('sendMutationReceipt')).toHaveLength(2);
+  });
+  it('rejects a changed body under an existing request id without changing the current account', async () => {
+    const { db, service } = persistedDefaults();
+    await service.saveDefaults('org', 'user', body('a', 'x1'), project);
+    await expect(service.saveDefaults('org', 'user', body('a', 'x2'), project)).rejects.toThrow('REQUEST_ID_CONFLICT');
+    expect(db.rows(table)[0]).toMatchObject({ integrationId: 'x1', revision: 1 });
+  });
+  it('deduplicates concurrent identical saves and accepts later distinct changes', async () => {
+    const { db, service } = persistedDefaults();
+    const results = await Promise.all(Array.from({ length: 5 }, () => service.saveDefaults('org', 'user', body('a', 'x1'), project)));
+    expect(results.every(result => result.bindings[0].revision === 1)).toBe(true);
+    await service.saveDefaults('org', 'user', body('b', 'x2'), project);
+    expect(db.rows(table)[0]).toMatchObject({ integrationId: 'x2', revision: 2 });
+    expect(db.rows('sendMutationReceipt')).toHaveLength(2);
+  });
+  it('keeps clearing tombstones and submitted action updates incremental without frontend versions', async () => {
+    const { db, service } = persistedDefaults();
+    await service.saveDefaults('org', 'user', { accounts: { x: { POST: { integrationId: 'x1' }, REPLY: { integrationId: 'x2' } } }, requestId: 'a' }, project);
+    await service.saveDefaults('org', 'user', body('b', null), project);
+    expect(db.rows(table).find((row: any) => row.action === 'POST')).toMatchObject({ integrationId: null, revision: 2 });
+    expect(db.rows(table).find((row: any) => row.action === 'REPLY')).toMatchObject({ integrationId: 'x2', revision: 1 });
+    await service.saveDefaults('org', 'user', body('c', 'x2'), project);
+    expect(db.rows(table).find((row: any) => row.action === 'POST').revision).toBe(3);
+  });
+  it('does not change frozen intents, execution ownership or quota settlement', async () => {
+    const { db, service } = persistedDefaults();
+    db.seed('sendIntent', { id: 'intent', organizationId: 'org', integrationId: 'x1', routeRevision: 3, contentRevision: 4, activeExecutionId: 'execution' });
+    db.seed('sendExecution', { id: 'execution', organizationId: 'org', status: 'SENDING', integrationId: 'x1' });
+    db.seed('sendQuotaReservation', { id: 'quota', organizationId: 'org', executionId: 'execution', heldUnits: 1, confirmedUnits: 0 });
+    const snapshot = ['sendIntent', 'sendExecution', 'sendQuotaReservation'].map(name => structuredClone(db.rows(name)));
+    await service.saveDefaults('org', 'user', body('a', 'x1'), project);
+    await service.saveDefaults('org', 'user', body('b', 'x2'), project);
+    expect(['sendIntent', 'sendExecution', 'sendQuotaReservation'].map(name => db.rows(name))).toEqual(snapshot);
   });
 });

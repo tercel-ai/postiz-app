@@ -1,5 +1,6 @@
 import { controlledReplySettings } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
 import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { needsSendSummary } from '@gitroom/nestjs-libraries/extension/send-business-summary';
 import { AutomaticSendProducerService } from '../extension/automatic-send-producer.service';
 import { isLegacyExecution } from '../extension/legacy-execution';
 import { AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
@@ -12,6 +13,7 @@ import {
   Logger,
   NotFoundException,
   OnApplicationBootstrap,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { EngageSentReply, Organization, State } from '@prisma/client';
 import { TemporalService } from 'nestjs-temporal-core';
@@ -22,6 +24,7 @@ import {
   GenerationHistoryEntry,
 } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
+import { CONTROLLED_SEND_PLATFORMS } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
@@ -64,10 +67,8 @@ dayjs.extend(utc);
 // capacity table — the cap VALUE is a Settings config; "sends so far" is a
 // live COUNT (EngageRepository.countAccountSentRepliesToday).
 /**
- * Platforms whose engage replies are published through a CONNECTED ACCOUNT, so
- * "which account replies" is a real choice. Everything else engage supports
- * replies through the extension's own browser session — no account is picked, so
- * those platforms never appear in the reply-accounts list.
+ * Legacy connected-account reply platforms. Controlled sending uses all seven
+ * supported platforms and requires actual project reply authorization.
  */
 export const ACCOUNT_REPLY_PLATFORMS = ['x'] as const;
 
@@ -1202,16 +1203,20 @@ export class EngageService implements OnApplicationBootstrap {
   /**
    * Connected accounts Engage may reply as, for this project.
    *
-   * Scoped to platforms whose replies go out through a connected ACCOUNT. Every
-   * other engage platform publishes through the extension's browser session,
-   * where no account is chosen — its policy is per-platform and lives in
-   * EngageConfig.replyPolicies (returned by GET /engage/config).
+   * Controlled candidates expose real project permissions on every supported
+   * platform. Legacy X enumeration retains its historical settings semantics.
    */
   async listReplyAccounts(org: Organization, projectId?: string | null) {
+    const controlled = isAccountBoundSendingEnabled();
+    if (controlled && projectId) {
+      if (!this._projectValidation) throw new ServiceUnavailableException('PROJECT_VALIDATION_UNAVAILABLE');
+      await this._projectValidation.assertProjectAccess(org.id, projectId);
+    }
     return this._engageRepository.listReplyAccountIntegrations(
       org.id,
       projectId,
-      ACCOUNT_REPLY_PLATFORMS
+      controlled ? [...CONTROLLED_SEND_PLATFORMS, 'linkedin-page'] : ACCOUNT_REPLY_PLATFORMS,
+      controlled
     );
   }
 
@@ -2306,8 +2311,9 @@ export class EngageService implements OnApplicationBootstrap {
 
   // Poll target for the in-browser extension reply loop: returns once the
   // extension has backfilled the permalink (replyUrl non-null).
-  async getSentReplyStatus(org: Organization, sentReplyId: string) {
-    return this._engageRepository.getSentReplyStatus(org.id, sentReplyId);
+  async getSentReplyStatus(org: Organization, sentReplyId: string, userId?: string) {
+    const result = await this._engageRepository.getSentReplyStatus(org.id, sentReplyId);
+    return userId && result.postId && needsSendSummary(result) ? { ...result, sending: await this._postsService.getSendingSummary(org.id, userId, result.postId) } : result;
   }
 
   async getSentReplyItemById(org: Organization, sentReplyId: string) {

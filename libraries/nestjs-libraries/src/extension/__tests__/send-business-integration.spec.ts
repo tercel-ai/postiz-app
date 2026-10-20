@@ -1,0 +1,335 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setupSend, sendNow } from './support/send-fixture';
+import { sendBusinessSummary } from '../send-business-summary';
+import { EngageRepository } from '../../engage/engage.repository';
+import { EngageService } from '../../engage/engage.service';
+import { IntegrationsController } from '../../../../../apps/backend/src/api/routes/integrations.controller';
+import { PostsController } from '../../../../../apps/backend/src/api/routes/posts.controller';
+import { CONTROLLED_SEND_PLATFORMS } from '../controlled-platforms';
+
+beforeEach(() => vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true'));
+afterEach(() => vi.unstubAllEnvs());
+
+async function draft() {
+  const fixture = setupSend();
+  await fixture.create();
+  fixture.bindings.resolveForEnqueueInTransaction.mockClear();
+  // Restore an unqueued, saved reply without replacing its content identity.
+  fixture.db.rows('sendIntent').length = 0;
+  Object.assign(fixture.db.rows('post')[0], {
+    sendIntentId: null, contentUnitId: null, state: 'DRAFT', source: 'engage',
+    integrationId: null, accountSelectionMode: null, routeRevision: 2, contentRevision: 3,
+  });
+  fixture.db.seed('engageSentReply', {
+    id: 'reply', organizationId: 'org', projectId: 'project', postId: 'root',
+    opportunityId: 'opp', opportunity: { externalPostId: 'target', externalPostUrl: 'https://x.com/u/status/target' },
+  });
+  fixture.db.seed('engageOpportunityState', {
+    id: 'opp-state', organizationId: 'org', projectId: 'project', opportunityId: 'opp',
+    status: 'NEW', matchedKeywords: [],
+  });
+  return fixture;
+}
+const selection = {
+  sentReplyId: 'reply', integrationId: 'account', requestId: 'selection-1',
+  expectedRouteRevision: 2, expectedContentRevision: 3,
+};
+
+describe('saved reply enqueue contract', () => {
+  it('atomically binds the same root and replays concurrent identical requests once', async () => {
+    const { db, service, bindings } = await draft();
+    const results = await Promise.all(Array.from({ length: 5 }, () => service.enqueueSavedReply('org', 'user', 'reply', selection)));
+    expect(results.every(row => row.id === 'root')).toBe(true);
+    expect(db.rows('post')).toHaveLength(1);
+    expect(db.rows('engageSentReply')).toHaveLength(1);
+    expect(db.rows('sendIntent')).toHaveLength(1);
+    expect(db.rows('sendMutationReceipt')).toHaveLength(1);
+    expect(db.rows('sendIntent')[0]).toMatchObject({ integrationId: 'account', routeRevision: 3, contentRevision: 3 });
+    expect(db.rows('post')[0]).toMatchObject({ accountSelectionMode: 'EXPLICIT', routeRevision: 3 });
+    expect(bindings.resolveForEnqueueInTransaction).toHaveBeenCalledTimes(1);
+    expect(db.rows('sendQuotaReservation')).toHaveLength(0);
+    expect(db.rows('sendExecution')).toHaveLength(0);
+    expect(db.rows('engageOpportunityState')[0].status).toBe('SCHEDULED');
+  });
+  it('rejects competing selections without changing the frozen root or target', async () => {
+    const { db, service } = await draft();
+    const results = await Promise.allSettled([
+      service.enqueueSavedReply('org', 'user', 'reply', selection),
+      service.enqueueSavedReply('org', 'user', 'reply', { ...selection, integrationId: 'other', requestId: 'selection-2' }),
+    ]);
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(db.rows('sendIntent')).toHaveLength(1);
+    expect(db.rows('post')[0].integrationId).toBe('account');
+  });
+  it('replays a lost response after completion, but rejects a different body for that request', async () => {
+    const { db, service } = await draft();
+    await service.enqueueSavedReply('org', 'user', 'reply', selection);
+    Object.assign(db.rows('post')[0], { state: 'PUBLISHED', releaseId: 'external' });
+    db.rows('sendIntent')[0].status = 'SUCCEEDED';
+    expect((await service.enqueueSavedReply('org', 'user', 'reply', selection)).state).toBe('PUBLISHED');
+    await expect(service.enqueueSavedReply('org', 'user', 'reply', { ...selection, integrationId: 'other' })).rejects.toThrow('REQUEST_ID_CONFLICT');
+    expect(db.rows('sendIntent')).toHaveLength(1);
+  });
+  it.each(['expectedRouteRevision', 'expectedContentRevision'] as const)('rejects stale %s', async field => {
+    const { db, service } = await draft();
+    await expect(service.enqueueSavedReply('org', 'user', 'reply', { ...selection, [field]: 1 })).rejects.toThrow('SEND_CONTENT_REVISION_CONFLICT');
+    expect(db.rows('sendIntent')).toHaveLength(0);
+    expect(db.rows('sendMutationReceipt')).toHaveLength(0);
+    expect(db.rows('post')[0].state).toBe('DRAFT');
+  });
+  it('requires versions and a request id for account selection', async () => {
+    const { service } = await draft();
+    await expect(service.enqueueSavedReply('org', 'user', 'reply', { sentReplyId: 'reply', integrationId: 'account' })).rejects.toThrow('SEND_SELECTION_VERSION_REQUIRED');
+  });
+  it('clears the draft choice and resolves defaults when integrationId is null', async () => {
+    const { db, service, bindings } = await draft();
+    Object.assign(db.rows('post')[0], { integrationId: 'old', accountSelectionMode: 'EXPLICIT' });
+    await service.enqueueSavedReply('org', 'user', 'reply', { ...selection, integrationId: null });
+    expect(bindings.resolveForEnqueueInTransaction.mock.calls[0][5]).toBeUndefined();
+    expect(db.rows('post')[0].accountSelectionMode).toBe('INHERIT');
+  });
+  it('supports a versioned request without a per-item account and preserves default resolution', async () => {
+    const { db, service, bindings } = await draft();
+    const { integrationId, ...body } = selection;
+    await service.enqueueSavedReply('org', 'user', 'reply', body);
+    await service.enqueueSavedReply('org', 'user', 'reply', body);
+    expect(bindings.resolveForEnqueueInTransaction.mock.calls[0][5]).toBeUndefined();
+    expect(db.rows('post')[0]).toMatchObject({ routeRevision: 2, accountSelectionMode: 'INHERIT' });
+    expect(db.rows('sendIntent')).toHaveLength(1);
+    expect(db.rows('sendMutationReceipt')).toHaveLength(1);
+  });
+  it('rolls back selection and target setup if project account validation fails', async () => {
+    const { db, service, bindings } = await draft();
+    bindings.resolveForEnqueueInTransaction.mockRejectedValueOnce(new Error('REPLY_ACCOUNT_DISABLED'));
+    await expect(service.enqueueSavedReply('org', 'user', 'reply', selection)).rejects.toThrow('REPLY_ACCOUNT_DISABLED');
+    expect(db.rows('post')[0]).toMatchObject({ routeRevision: 2, settings: '{}', state: 'DRAFT' });
+    expect(db.rows('sendIntent')).toHaveLength(0);
+    expect(db.rows('engageOpportunityState')[0].status).toBe('NEW');
+  });
+  it('enforces organization membership, record scope and project activation even for an existing intent', async () => {
+    const { service, projects, db } = await draft();
+    await expect(service.enqueueSavedReply('other-org', 'user', 'reply', selection)).rejects.toThrow('ORGANIZATION_MEMBERSHIP_REQUIRED');
+    await expect(service.enqueueSavedReply('org', 'user', 'missing', selection)).rejects.toThrow('SAVED_REPLY_NOT_FOUND');
+    await service.enqueueSavedReply('org', 'user', 'reply', selection);
+    projects.assertProjectActive.mockRejectedValueOnce(new Error('PROJECT_INACTIVE'));
+    await expect(service.enqueueSavedReply('org', 'user', 'reply')).rejects.toThrow('PROJECT_INACTIVE');
+    db.rows('userOrganization')[0].disabled = true;
+    await expect(service.enqueueSavedReply('org', 'user', 'reply', selection)).rejects.toThrow('ORGANIZATION_MEMBERSHIP_REQUIRED');
+  });
+});
+
+describe('ordinary user sending summary', () => {
+  it('whitelists public fields, exposes uncertainty and forbids all new sending for unknown work', async () => {
+    const { db, service, create } = setupSend();
+    await create();
+    const intent = db.rows('sendIntent')[0];
+    Object.assign(intent, { status: 'RECONCILING', activeExecutionId: 'execution', target: { id: '123', idNamespace: 'x.rest_id', credentialHash: 'secret' } });
+    db.seed('sendExecution', { id: 'execution', organizationId: 'org', sendIntentId: intent.id, status: 'RECONCILING', payload: { token: 'secret' }, leaseTokenHash: 'secret' });
+    db.seed('sendSegment', { executionId: 'execution', organizationId: 'org', segmentIndex: 0, status: 'UNKNOWN', permitHash: 'secret', result: { evidence: 'secret' } });
+    const result = await service.businessSummary('org', 'user', 'root');
+    expect(result.status).toBe('RECONCILING');
+    expect(Object.values(result.allowedActions).every(action => !action.allowed)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('secret');
+  });
+  it('checks membership and project ownership, including after the feature is disabled', async () => {
+    const { service, create, projects } = setupSend();
+    await create();
+    vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'false');
+    const result = await service.businessSummary('org', 'user', 'root');
+    expect(result).toMatchObject({ paused: true, protocol: 'ACCOUNT_BOUND_V1', allowedActions: { retry: { allowed: false } } });
+    expect(projects.assertProjectAccess).toHaveBeenCalledWith('org', 'project');
+    await expect(service.businessSummary('org', 'outsider', 'root')).rejects.toThrow('ORGANIZATION_MEMBERSHIP_REQUIRED');
+    projects.assertProjectAccess.mockRejectedValueOnce(new Error('PROJECT_NOT_FOUND'));
+    await expect(service.businessSummary('org', 'user', 'root')).rejects.toThrow('PROJECT_NOT_FOUND');
+  });
+  it.each(['QUEUED', 'RESERVED', 'SENDING', 'RECONCILING', 'SUCCEEDED'])('does not offer retry for %s', status => {
+    const result = sendBusinessSummary({ id: 'root', state: 'QUEUE' }, { status }, [], []);
+    expect(result.allowedActions.retry.allowed).toBe(false);
+    expect(result.allowedActions.selectAccount).toEqual({ allowed: false, reason: 'SEND_INTENT_IMMUTABLE' });
+    expect(result.allowedActions.reschedule.reason).toBe('SEND_INTENT_REQUIRES_CONTROLLED_RESCHEDULE');
+  });
+  it('only offers retry after a definite failure without active, uncertain or confirmed work', () => {
+    const intent = { status: 'FAILED_FINAL', activeExecutionId: null, hasConfirmedSegments: false };
+    const post = { id: 'root', state: 'ERROR', publishDate: sendNow };
+    expect(sendBusinessSummary(post, intent, [], [{ status: 'NOT_SUBMITTED' }]).allowedActions.retry.allowed).toBe(true);
+    for (const status of ['CONFIRMED', 'AUTHORIZED', 'UNKNOWN']) {
+      expect(sendBusinessSummary(post, intent, [], [{ status }]).allowedActions.retry.allowed).toBe(false);
+    }
+    expect(sendBusinessSummary(post, { ...intent, hasConfirmedSegments: true }, [], []).status).toBe('PARTIAL_SUCCESS');
+  });
+});
+
+describe('action-specific project account projections', () => {
+  function repository(rows: any[]) {
+    const findMany = vi.fn().mockResolvedValue(rows);
+    const repo = Object.create(EngageRepository.prototype) as any;
+    repo._integration = { model: { integration: { findMany } } };
+    return { repo, findMany };
+  }
+  const account = { id: 'account', internalId: '123', identityNamespace: 'x.rest_id', disabled: false, token: 'secret' };
+  it('does not grant reply permission to missing, disabled or opted-out project relations', async () => {
+    const { repo, findMany } = repository([
+      { ...account },
+      { ...account, id: 'disabled', integrationProjects: [{ disabled: true, engageEnabled: true }] },
+      { ...account, id: 'opted-out', integrationProjects: [{ disabled: false, engageEnabled: false }] },
+      { ...account, id: 'valid', integrationProjects: [{ disabled: false, engageEnabled: true }] },
+    ]);
+    const rows = await repo.listReplyAccountIntegrations('org', 'project', CONTROLLED_SEND_PLATFORMS, true);
+    expect(rows.map((row: any) => row.blockCode)).toEqual(['ACCOUNT_NOT_ASSIGNED', 'ACCOUNT_NOT_ASSIGNED', 'REPLY_ACCOUNT_DISABLED', null]);
+    expect(rows[0].engageEnabled).toBe(false);
+    expect(JSON.stringify(rows)).not.toContain('secret');
+    expect(findMany.mock.calls[0][0].include.integrationProjects.where).toEqual({ projectId: 'project', organizationId: 'org' });
+  });
+  it('keeps legacy X enumeration and no-binding defaults, while controlled queries enumerate seven platforms', async () => {
+    const { repo } = repository([{ ...account }]);
+    expect((await repo.listReplyAccountIntegrations('org', 'project'))[0].engageEnabled).toBe(true);
+    const service = Object.create(EngageService.prototype) as any;
+    service._engageRepository = { listReplyAccountIntegrations: vi.fn().mockResolvedValue([]) };
+    service._projectValidation = { assertProjectAccess: vi.fn() };
+    await service.listReplyAccounts({ id: 'org' }, 'project');
+    expect(service._engageRepository.listReplyAccountIntegrations.mock.calls[0][2]).toEqual([...CONTROLLED_SEND_PLATFORMS, 'linkedin-page']);
+    vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'false');
+    await service.listReplyAccounts({ id: 'org' }, 'project');
+    expect(service._engageRepository.listReplyAccountIntegrations.mock.calls[1][2]).toEqual(['x']);
+  });
+  it('projects REPLY node capability rather than POST capability in the project list', async () => {
+    const controller = Object.create(IntegrationsController.prototype) as any;
+    controller._integrationService = { listProjectIntegrations: vi.fn().mockResolvedValue([{ disabled: false, engageEnabled: true, integration: { ...account, providerIdentifier: 'x' } }]) };
+    controller._integrationManager = { getSocialIntegration: vi.fn().mockReturnValue({ editor: 'normal' }) };
+    controller._extensionNodes = { accountViews: vi.fn().mockResolvedValue(new Map([['account', { sendAvailability: 'WAITING_FOR_TERMINAL', terminals: [] }]])) };
+    const result = await controller.listProjectIntegrations({ id: 'org' }, 'project', { id: 'user' }, 'REPLY');
+    expect(controller._extensionNodes.accountViews.mock.calls[0][3]).toBe('reply');
+    expect(result.integrations[0]).toMatchObject({ engageEnabled: true, action: 'REPLY', projectAssigned: true, identityNamespace: 'x.rest_id' });
+    await expect(controller.listProjectIntegrations({ id: 'org' }, 'project', { id: 'user' }, 'wrong')).rejects.toThrow('SEND_ACTION_INVALID');
+  });
+});
+
+describe('business status wiring and retry admission', () => {
+  it('returns the canonical intent root when reading a controlled thread segment', async () => {
+    const { service, db, create } = setupSend();
+    await create();
+    db.seed('post', { ...db.rows('post')[0], id: 'child', parentPostId: 'root' });
+    expect(await service.businessSummary('org', 'user', 'child')).toMatchObject({ rootPostId: 'root' });
+  });
+  it.each(['REPLIED', 'SCHEDULED', 'EXPIRED', 'DISMISSED'])('does not enqueue a stored draft for a %s opportunity', async status => {
+    const { service, db } = await draft();
+    db.rows('engageOpportunityState')[0].status = status;
+    await expect(service.enqueueSavedReply('org', 'user', 'reply', selection)).rejects.toThrow('REPLY_OPPORTUNITY_NOT_ACTIONABLE');
+    expect(db.rows('sendIntent')).toHaveLength(0);
+    expect(db.rows('sendMutationReceipt')).toHaveLength(0);
+  });
+  it.each(['REPLIED', 'SCHEDULED', 'EXPIRED', 'DISMISSED'])('blocks generic enqueue from bypassing a %s saved reply opportunity', async status => {
+    const { service, db } = await draft();
+    db.rows('engageOpportunityState')[0].status = status;
+    await expect(service.enqueue('org', 'root', { userId: 'user', origin: 'MANUAL' }))
+      .rejects.toThrow('REPLY_OPPORTUNITY_NOT_ACTIONABLE');
+    expect(db.rows('post')[0]).toMatchObject({ state: 'DRAFT', sendIntentId: null, settings: '{}' });
+    expect(db.rows('engageOpportunityState')[0].status).toBe(status);
+    expect(db.rows('sendIntent')).toHaveLength(0);
+    expect(db.rows('sendQuotaReservation')).toHaveLength(0);
+  });
+  it('claims a saved reply opportunity through generic enqueue and replays the same intent', async () => {
+    const { service, db } = await draft();
+    const first = await service.enqueue('org', 'root', { userId: 'user', origin: 'MANUAL' });
+    const replay = await service.enqueue('org', 'root', { userId: 'user', origin: 'MANUAL' });
+    expect(replay.sendIntentId).toBe(first.sendIntentId);
+    expect(db.rows('engageOpportunityState')[0].status).toBe('SCHEDULED');
+    expect(db.rows('sendIntent')).toHaveLength(1);
+  });
+  it('creates one intent when generic and versioned saved reply entry points compete', async () => {
+    const { service, db } = await draft();
+    const results = await Promise.allSettled([
+      service.enqueue('org', 'root', { userId: 'user', origin: 'MANUAL' }),
+      service.enqueueSavedReply('org', 'user', 'reply', selection),
+    ]);
+    expect(results.some(result => result.status === 'fulfilled')).toBe(true);
+    expect(db.rows('post')).toHaveLength(1);
+    expect(db.rows('sendIntent')).toHaveLength(1);
+    expect(db.rows('engageOpportunityState')[0].status).toBe('SCHEDULED');
+    expect(db.rows('sendQuotaReservation')).toHaveLength(0);
+    expect(db.rows('sendExecution')).toHaveLength(0);
+  });
+  it.each([{ content: 'changed' }, { inputData: { strategy: 'AMPLIFY' } }])('rejects edits to a frozen reply through the legacy scheduled editor: %j', async data => {
+    const repo = Object.create(EngageRepository.prototype) as any;
+    const row = { id: 'reply', postId: 'root', post: { id: 'root', state: 'QUEUE', sendIntentId: 'intent', executionProtocol: 'ACCOUNT_BOUND_V1' } };
+    repo._sentReply = { model: { engageSentReply: { findFirst: vi.fn().mockResolvedValue(row) } } };
+    const update = vi.fn();
+    repo._tx = { model: { $transaction: async (work: any) => work({ post: { update }, engageSentReply: { update } }) } };
+    await expect(repo.updateScheduledReply('org', 'reply', data)).rejects.toThrow('SEND_INTENT_IMMUTABLE');
+    expect(update).not.toHaveBeenCalled();
+  });
+  it('rechecks the frozen boundary atomically if enqueue wins after the legacy editor read', async () => {
+    const repo = Object.create(EngageRepository.prototype) as any;
+    const row = { id: 'reply', postId: 'root', post: { id: 'root', state: 'QUEUE', sendIntentId: null, executionProtocol: 'LEGACY' } };
+    repo._sentReply = { model: { engageSentReply: { findFirst: vi.fn().mockResolvedValue(row) } } };
+    const update = vi.fn().mockRejectedValue({ code: 'P2025' });
+    const updateMetadata = vi.fn();
+    repo._tx = { model: { $transaction: async (work: any) => work({ post: { update }, engageSentReply: { update: updateMetadata } }) } };
+    await expect(repo.updateScheduledReply('org', 'reply', { inputData: { strategy: 'AMPLIFY' } })).rejects.toThrow('SEND_REPLY_CHANGED');
+    expect(update.mock.calls[0][0].where).toMatchObject({ id: 'root', organizationId: 'org', state: 'QUEUE', sendIntentId: null });
+    expect(updateMetadata).not.toHaveBeenCalled();
+  });
+  it('preserves legacy scheduled editing with a version increment and no account changes', async () => {
+    const repo = Object.create(EngageRepository.prototype) as any;
+    const row = { id: 'reply', postId: 'root', post: { id: 'root', state: 'QUEUE', sendIntentId: null, executionProtocol: 'LEGACY' } };
+    repo._sentReply = { model: { engageSentReply: { findFirst: vi.fn().mockResolvedValue(row) } } };
+    const update = vi.fn();
+    const updateMetadata = vi.fn();
+    repo._tx = { model: { $transaction: async (work: any) => work({ post: { update }, engageSentReply: { update: updateMetadata } }) } };
+    await repo.updateScheduledReply('org', 'reply', { content: 'edited', inputData: { strategy: 'AMPLIFY' } });
+    expect(update.mock.calls[0][0].data).toEqual({ content: 'edited', contentRevision: { increment: 1 } });
+    expect(updateMetadata).toHaveBeenCalledOnce();
+  });
+  it('adds the ordinary-user summary to both Post detail read routes', async () => {
+    const controller = Object.create(PostsController.prototype) as any;
+    const detail = { group: 'group', posts: [{ id: 'root', sendIntentId: 'intent', executionProtocol: 'ACCOUNT_BOUND_V1' }] };
+    controller._postsService = {
+      getPost: vi.fn().mockResolvedValue(detail), getPostsByGroup: vi.fn().mockResolvedValue(detail),
+      getSendingSummary: vi.fn().mockResolvedValue({ status: 'QUEUED' }),
+    };
+    expect(await controller.getPost({ id: 'org' }, 'root', undefined, { id: 'user' })).toMatchObject({ sending: { status: 'QUEUED' } });
+    expect(await controller.getPostsByGroup({ id: 'org' }, 'group', { id: 'user' })).toMatchObject({ sending: { status: 'QUEUED' } });
+    expect(controller._postsService.getSendingSummary).toHaveBeenCalledWith('org', 'user', 'root');
+  });
+  it('keeps inactive projects readable while disabling enqueue and retry', async () => {
+    const { service, projects, create } = setupSend();
+    await create();
+    projects.getActivationVerdict.mockResolvedValue('inactive');
+    const result = await service.businessSummary('org', 'user', 'root');
+    expect(result.allowedActions.retry).toEqual({ allowed: false, reason: 'PROJECT_INACTIVE' });
+    expect(result.allowedActions.enqueue.allowed).toBe(false);
+  });
+  it('enforces the same uncertainty guard during retry and never creates a new intent', async () => {
+    const { service, db, create } = setupSend();
+    await create();
+    const intent = db.rows('sendIntent')[0];
+    intent.status = 'FAILED_FINAL';
+    db.seed('sendExecution', { id: 'old', organizationId: 'org', sendIntentId: intent.id, status: 'FAILED_FINAL' });
+    db.seed('sendSegment', { executionId: 'old', organizationId: 'org', status: 'UNKNOWN' });
+    await expect(service.retry('org', 'root', 'user')).rejects.toThrow('SEND_RETRY_UNSAFE');
+    expect(db.rows('sendIntent')).toHaveLength(1);
+    expect(db.rows('sendIntent')[0].status).toBe('FAILED_FINAL');
+  });
+  it('retries the same root once under concurrent requests after definite non-submission', async () => {
+    const { service, db, create } = setupSend();
+    await create();
+    db.rows('sendIntent')[0].status = 'FAILED_FINAL';
+    const attempts = await Promise.allSettled([service.retry('org', 'root', 'user'), service.retry('org', 'root', 'user')]);
+    expect(attempts.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(db.rows('sendIntent')).toHaveLength(1);
+    expect(db.rows('post')).toHaveLength(1);
+    expect(db.rows('sendQuotaReservation')).toHaveLength(0);
+  });
+  it('adds the sanitized summary to ordinary Reply polling when controlled, including paused intents', async () => {
+    const service = Object.create(EngageService.prototype) as any;
+    service._engageRepository = { getSentReplyStatus: vi.fn().mockResolvedValue({ id: 'reply', postId: 'root', state: 'QUEUE', sendIntentId: 'intent', executionProtocol: 'ACCOUNT_BOUND_V1' }) };
+    service._postsService = { getSendingSummary: vi.fn().mockResolvedValue({ status: 'RECONCILING', allowedActions: { retry: { allowed: false } } }) };
+    vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'false');
+    expect(await service.getSentReplyStatus({ id: 'org' }, 'reply', 'user')).toMatchObject({ sending: { status: 'RECONCILING' } });
+    expect(service._postsService.getSendingSummary).toHaveBeenCalledWith('org', 'user', 'root');
+    service._engageRepository.getSentReplyStatus.mockResolvedValue({ id: 'reply', postId: 'root', executionProtocol: 'LEGACY' });
+    service._postsService.getSendingSummary.mockClear();
+    expect(await service.getSentReplyStatus({ id: 'org' }, 'reply', 'user')).not.toHaveProperty('sending');
+    expect(service._postsService.getSendingSummary).not.toHaveBeenCalled();
+  });
+});

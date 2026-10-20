@@ -89,7 +89,7 @@ Account explicitly selected on content with accountSelectionMode=EXPLICIT
 
 Each level inherits only when unconfigured. An explicit account that is disabled, unresolved, on the wrong platform, unassigned to the project, or blocked from replies by engageEnabled immediately produces an error; it does not fall back. Global defaults do not grant project permissions.
 
-Organization-wide defaults are independently optional for each platform and POST/REPLY action. Users may leave them entirely unconfigured or clear them with integrationId:null and the current expectedRevision. Saving an explicit content account or a Project default does not populate an Organization default. With no Organization default, account selection is simply explicit Post/Reply account → Project default; no other account is automatically selected. If both are absent, REQUIRED rejects enqueue with SEND_BINDING_REQUIRED, while an eligible OPTIONAL task may await verified CURRENT_SESSION first binding under §3.3. An existing queued task keeps its frozen account when a default is cleared.
+Organization-wide defaults are independently optional for each platform and POST/REPLY action. Users may leave them entirely unconfigured or clear them with integrationId:null and a fresh requestId; no client expectedRevision is required. Saving an explicit content account or a Project default does not populate an Organization default. With no Organization default, account selection is simply explicit Post/Reply account → Project default; no other account is automatically selected. If both are absent, REQUIRED rejects enqueue with SEND_BINDING_REQUIRED, while an eligible OPTIONAL task may await verified CURRENT_SESSION first binding under §3.3. An existing queued task keeps its frozen account when a default is cleared.
 
 INHERIT drafts may preview the effective account and source, but that preview is not a frozen identity. The enqueue transaction rereads required defaults and versions, verifies permissions, and writes integrationId, sendTarget, bindingSource=EXPLICIT/PROJECT/ORGANIZATION, source revision, and routeRevision to Post and SendIntent consistently across every thread node. Reading outside the transaction and writing QUEUE without version protection is forbidden.
 
@@ -208,11 +208,11 @@ For all seven platforms in the table, POST/REPLY connect to the controlled submi
 
 What the product calls an "account global default" is defined in the backend as the current Organization default; no cross-tenant bare User default account is added. A user's personal preference only controls the preselection requirement and does not change the tenant owning the default account. Both resources store integrationId?, revision, updatedByUserId, and updatedAt keyed by platform/action=POST or REPLY. The Organization key is (organizationId, platform, action); the Project key is (organizationId, projectId, platform, action). The existing ProjectSendBinding continues to be reused, an organization-level resource is added, and organization-level uniqueness must not rely on an ordinary unique key containing a nullable projectId.
 
-A configuration that was never created, or integrationId=null, means that level is INHERIT and does not forbid sending. Clearing keeps the record and increments revision, avoiding delete-and-recreate ABA. expectedRevision=0 means only that no record was ever created; the revision after clearing is still used for the next save. Platforms/actions not submitted keep their existing values.
+A configuration that was never created, or integrationId=null, means that level is INHERIT and does not forbid sending. Clearing keeps the record and increments its internal revision, avoiding delete-and-recreate ABA. Default-account clients do not submit expectedRevision; distinct saves use last-write-wins in transaction commit order. Internal revisions remain available for audit and frozen binding provenance. Platforms/actions not submitted keep their existing values.
 
 A Project binding must verify IntegrationProject; an Organization binding allows only valid accounts of this organization and cannot grant project permissions. An invalid configuration shows the reason and does not auto-delete and fall back to another account. Disabled-account permissions are expressed through IntegrationProject.disabled/engageEnabled, not by a null default configuration.
 
-Within one save request, permission/version validation of all submitted items, configuration persistence, and the requestId receipt complete atomically; if any item fails, nothing in the request is changed and a success must not be returned after saving only half. The idempotency scope includes organization, authenticated user, action, and resource ID (projectId for the Project level); the same key with the same digest replays the original result, replay is checked before the old expectedRevision, and the same key with a different digest returns 409. Account configuration is not stored in replyPolicies or the LLM planPayload.
+Within one default-account save request, permission validation of all submitted items, configuration persistence, internal revision increments and the requestId receipt complete atomically; if any item fails, nothing in the request is changed. The idempotency scope includes organization, authenticated user, operation and resource ID (projectId for the Project level). The same key and digest replay the original result without writing again, including when a newer configuration has already been saved; a changed digest returns 409 REQUEST_ID_CONFLICT. Internal contention is retried server-side. Legacy expectedRevision fields remain accepted as validated compatibility hints but are ignored by these two default-account save endpoints. The legacy Automation compatibility adapter retains its existing optimistic revision contract. Account configuration is not stored in replyPolicies or the LLM planPayload.
 
 Reads distinguish the configured layer from the effective layer, returning bindingRevision, effectiveIntegrationId, source=EXPLICIT/PROJECT/ORGANIZATION/CURRENT_SESSION/UNBOUND, and the source revision/inexecutability reason. A draft's effective-account preview is not an execution snapshot; terminals[] is still computed by the unified session projection.
 
@@ -340,6 +340,8 @@ New write operations prefer POST, and existing PATCH/PUT/DELETE are not deleted 
 
 ### 7.1 Two-Level Default Account and Product Policy API
 
+Frontend initialization uses the read-only `GET /projects/:projectId/sending-context` aggregate: mode, current manual preselection policy, supported account choices and reported plugin terminals, project action permissions and effective defaults are read from one database transaction. Account selection uses actual Integration IDs; unrecognized reported sessions remain visible and non-selectable. This does not grant permissions or alter existing send intents. The configuration resources below remain the canonical stores and save endpoints.
+
 The two independent configuration resources each provide a read-only query and a POST create/modify; these are two business resources and two save entry points, and a read is not disguised as a POST with claim side effects.
 
 ```http
@@ -349,14 +351,14 @@ GET  /projects/:projectId/sending-accounts
 POST /projects/:projectId/sending-accounts/save
 ```
 
-The Organization comes from the authentication context, and a Project path must verify ownership. POST saves incrementally by platform/action; the client passes only the account ID, expectedRevision, and requestId, never targetAccount, nodeId, or canonicalAccountKey. The example is identical at both levels:
+The Organization comes from the authentication context, and a Project path must verify ownership. POST saves incrementally by platform/action; the client passes only account selections and requestId, with no expectedRevision requirement, never targetAccount, nodeId, or canonicalAccountKey. The example is identical at both levels:
 
 ```json
 {
   "accounts": {
     "x": {
-      "POST": { "integrationId": "account_x1", "expectedRevision": 0 },
-      "REPLY": { "integrationId": "account_x2", "expectedRevision": 3 }
+      "POST": { "integrationId": "account_x1" },
+      "REPLY": { "integrationId": "account_x2" }
     }
   },
   "requestId": "save_accounts_001"
@@ -563,7 +565,7 @@ This design guarantees controlled claiming and sending authorization; it cannot 
 3. New controlled enqueue uniformly saves publishMethod=EXTENSION, accepting legacy request fields but returning the actual extension route. Replies enter reply-due and ordinary Posts enter publish-due; existing API Intents still do not enter the extension pool, and a failed route read must not guess the other execution method. source=engage does not equal API; an OPTIONAL single reply may omit integrationId, while REQUIRED is still rejected by enqueue policy. QUEUED must not be wrapped as a platform-confirmed success.
 4. New controlled tasks use ACCOUNT_BOUND_V1 and the shared content protection under both REQUIRED and OPTIONAL. Legacy requests without a node may only access the still-open LEGACY pool; the client header alone cannot decide the pool, and authentication plus the persisted task protocol must be verified. Turning off an organization's legacy execution must also return an upgrade requirement when the version header is missing.
 5. Historical LEGACY callbacks settle under the restricted legacy rules; a new task arriving through an old PATCH/POST entry point must also verify the same attempt/content intent and cannot bypass via a changed method, missing fields, URL backfill, or a public nodeId. The safe exception is removing old credential output, while the original non-sensitive array/object wrappers are kept.
-6. Retryable configuration/edit/create/claim uses requestId/business ID/report sequence and revision; the receipt is replayed before the old revision is checked, and the same key with a different digest returns 409. expectedRevision alone is insufficient to recover a lost response. The claim receipt is short-term encrypted or equivalently recoverable and replays only RESERVED information; when expired it returns a recovery state, and a start retry never replays a submission permit.
+6. Default-account configuration saves use requestId with last-write-wins and internal revisions; versioned policy/edit/create/claim operations retain requestId/business ID/report sequence and revision; the receipt is replayed before the old revision is checked, and the same key with a different digest returns 409. expectedRevision alone is insufficient to recover a lost response. The claim receipt is short-term encrypted or equivalently recoverable and replays only RESERVED information; when expired it returns a recovery state, and a start retry never replays a submission permit.
 7. A session POST may fall back to the legacy PATCH for diagnostic reporting only on a confirmed 404/405; a timeout/5xx/426 must not guess that the protocol changed and resend. When the old backend does not support coordination, an upgrade requirement is shown and dedup must not be claimed.
 8. CORS/OpenAPI add the real node/protocol headers while keeping legacy methods. The extension's backendCall, request util, and direct fetch are adapted together; a 426 stops new claim/start/submit, but authenticated results, stop confirmations, and historical queries still work. An invalid user/revoked node is imported through restricted reconciliation and does not regain execution rights via settlement.
 9. An ordinary GET does not claim; the legacy status probe does not replace attempt history. A same-path POST alias is added to an existing PATCH/PUT only when the new editing flow actually needs it, and unrelated legacy routes such as keywords, group, and plug are not renamed.
@@ -730,7 +732,7 @@ This matrix describes subsequent implementation requirements and does not mean t
 | P02 | System/user relaxation does not downgrade existing tasks; a tightening racing with first binding converges by version, rapid tighten-then-relax drops no task, and already-bound targets hold |
 | P03 | OPTIONAL lets a person raise the preselection requirement; manual/automatic tasks use the server-determined owner snapshot, and the extension registrant's preference cannot lower a task's requirement |
 | B01 | EXPLICIT outranks Project outranks Organization; independent per platform/POST/REPLY; no fallback when an account is invalid |
-| B02 | Clearing the current level restores inheritance and keeps a tombstone revision; unsubmitted items are unchanged; the old expectedRevision conflicts |
+| B02 | Clearing the current level restores inheritance and keeps an internal tombstone revision; unsubmitted items are unchanged; fresh default saves do not require client versions and the last committed save wins |
 | B03 | An organization default cannot cross tenants or automatically grant a project; missing relationship/disabled/engageEnabled=false each reject the corresponding action |
 | B04 | A draft INHERIT only previews; the enqueue transaction reads consistent defaults and revisions; a later default change does not alter QUEUE |
 | B05 | Two new POSTs with the same key where the response was lost return the original save on retry, and a different digest returns 409; the legacy Automation compatibility write is only the same single binding |

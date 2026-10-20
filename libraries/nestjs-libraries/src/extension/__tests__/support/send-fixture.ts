@@ -46,6 +46,7 @@ export function setupSend() {
   const projects = {
     assertProjectActive: vi.fn(),
     assertProjectAccess: vi.fn(),
+    getActivationVerdict: vi.fn().mockResolvedValue('active'),
   };
   const bindings = {
     resolveForEnqueueInTransaction: vi

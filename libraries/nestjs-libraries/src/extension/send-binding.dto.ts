@@ -8,8 +8,12 @@ import {
 import { EXTENSION_PUBLISHABLE_PLATFORMS } from '@gitroom/helpers/extension/post-publish';
 
 export type SendAction = 'POST' | 'REPLY';
-export interface AccountBindingInput {
+export interface SendingAccountInput {
   integrationId: string | null;
+  /** Deprecated compatibility input; ignored by default-account saves. */
+  expectedRevision?: number;
+}
+export interface AccountBindingInput extends SendingAccountInput {
   expectedRevision: number;
 }
 export type AccountBindingMap = Record<string, AccountBindingInput>;
@@ -17,6 +21,10 @@ export type AccountBindingMap = Record<string, AccountBindingInput>;
 export function isAccountBindingMap(
   value: unknown
 ): value is AccountBindingMap {
+  return validBindingMap(value, true);
+}
+
+function validBindingMap(value: unknown, requireRevision: boolean): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const entries = Object.entries(value);
   if (entries.length > EXTENSION_PUBLISHABLE_PLATFORMS.length) return false;
@@ -35,16 +43,17 @@ export function isAccountBindingMap(
         (typeof item.integrationId === 'string' &&
           item.integrationId.trim().length > 0 &&
           item.integrationId.length <= 128)) &&
-      Number.isSafeInteger(item.expectedRevision) &&
-      (item.expectedRevision as number) >= 0 &&
-      (item.expectedRevision as number) < 2147483647
+      ((!requireRevision && item.expectedRevision === undefined) ||
+        (Number.isSafeInteger(item.expectedRevision) &&
+          (item.expectedRevision as number) >= 0 &&
+          (item.expectedRevision as number) < 2147483647))
     );
   });
 }
 
 export type SendingAccountMap = Record<
   string,
-  Partial<Record<SendAction, AccountBindingInput>>
+  Partial<Record<SendAction, SendingAccountInput>>
 >;
 
 export function isSendingAccountMap(
@@ -63,7 +72,7 @@ export function isSendingAccountMap(
         items.every(
           ([action, choice]) =>
             ['POST', 'REPLY'].includes(action) &&
-            isAccountBindingMap({ [platform]: choice })
+            validBindingMap({ [platform]: choice }, false)
         )
       );
     })
@@ -79,7 +88,7 @@ export class SaveSendingAccountsDto {
       validator: {
         validate: isSendingAccountMap,
         defaultMessage: () =>
-          'accounts must map supported platforms and POST/REPLY actions to versioned account selections',
+          'accounts must map supported platforms and POST/REPLY actions to account selections',
       },
     }))
   accounts!: SendingAccountMap;

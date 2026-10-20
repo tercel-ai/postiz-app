@@ -31,7 +31,7 @@ import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/po
 export class SendIntentsController {
   constructor(private readonly posts: PostsService, private readonly coordinator: SendCoordinatorService) {}
   @Post('/reply')
-  reply(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User, @Body() body: QueueStoredReplyDto) { return this.coordinator.enqueueSavedReply(org.id, user.id, body.sentReplyId); }
+  reply(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User, @Body() body: QueueStoredReplyDto) { return this.coordinator.enqueueSavedReply(org.id, user.id, body.sentReplyId, body); }
   @Post()
   enqueue(
     @GetOrgFromRequest() org: Organization,

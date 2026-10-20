@@ -159,6 +159,7 @@ Modules with a dedicated, parameter-level API reference:
 
 | Method | Path | Controller |
 | --- | --- | --- |
+| GET | `/projects/:projectId/sending-context` | [sending-context.controller.ts](../apps/backend/src/api/routes/sending-context.controller.ts); shared Project/Post/Reply account picker, defaults and reported plugin terminals |
 | GET | `/extension/send-protocol` | [send-executions.controller.ts](../apps/backend/src/api/routes/send-executions.controller.ts) |
 | GET | `/sending-accounts` | [sending-accounts.controller.ts](../apps/backend/src/api/routes/sending-accounts.controller.ts) |
 | POST | `/sending-accounts/save` | Same |
@@ -180,7 +181,11 @@ Modules with a dedicated, parameter-level API reference:
 | GET | `/sending/executions/:id` | Same; super-admin reconciliation view |
 | POST | `/sending/executions/:id/segments/:index/reconcile` | Same; super-admin reconciliation mutation |
 
-Ordinary web clients use business creation/enqueue APIs and do not obtain node credentials, execution leases or submission permits. A normal-user controlled-status summary is still a backend integration dependency, not an existing `/sending/intents/:id` endpoint.
+Frontend initialization now uses `GET /projects/:projectId/sending-context` once, rather than assembling protocol, preferences, account/project permissions, node sessions and defaults from separate reads. The shared account list includes seven-platform plugin reports, action-specific permission and node availability, and unrecognized sessions that are visible but never selectable.
+
+Project and Organization default-account saves require only `accounts` and a stable `requestId`; each choice is `{ integrationId }` (nullable to clear). Distinct saves use last-write-wins; GET/response revisions remain read-only metadata. Legacy expectedRevision hints are accepted but ignored on these endpoints. Replaying an older receipt never overwrites a newer save. Send-task content/route versions, policy versions and execution protections remain unchanged.
+
+Ordinary web clients use business creation/enqueue APIs and do not obtain node credentials, execution leases or submission permits. Controlled `GET /posts/:id`, `GET /posts/group/:group`, and `GET /engage/sent/:id/status` now include a credential-free `sending` summary with intent/execution/segment states, revisions and server-derived `allowedActions`. These reads enforce organization membership and project access; inactive projects remain readable with mutations disabled. There is no ordinary-user `/sending/intents/:id` endpoint. Saved Reply enqueue accepts an optional versioned account choice and stable request ID; see the integration guide for replay and immutability rules.
 
 ### [autopost.controller.ts](../apps/backend/src/api/routes/autopost.controller.ts) — `/autopost`
 📝 No dedicated API reference yet.

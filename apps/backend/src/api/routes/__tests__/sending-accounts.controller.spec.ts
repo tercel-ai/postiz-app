@@ -10,7 +10,7 @@ describe('sending account endpoints', () => {
     const org = { id: 'org' } as any;
     const user = { id: 'user' } as any;
     const body = {
-      accounts: { x: { POST: { integrationId: 'x1', expectedRevision: 0 } } },
+      accounts: { x: { POST: { integrationId: 'x1' } } },
       requestId: 'save',
     };
     await controller.organization(org, user);

@@ -2272,6 +2272,7 @@ export class PostsRepository {
           create: { id, ...updateData('create') },
           update: {
             ...updateData('update'),
+            contentRevision: { increment: 1 },
             ...(clearSelection ? {
               accountSelectionMode: 'INHERIT', integration: { disconnect: true },
               sendTarget: Prisma.DbNull, bindingSource: null, bindingSourceRevision: null,

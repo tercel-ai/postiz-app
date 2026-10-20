@@ -52,6 +52,7 @@ import {
   Sections,
 } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
 import { GetTimezone } from '@gitroom/nestjs-libraries/user/timezone.from.request';
+import { needsSendSummary } from '@gitroom/nestjs-libraries/extension/send-business-summary';
 
 @ApiTags('Posts')
 @Controller('/posts')
@@ -296,8 +297,10 @@ export class PostsController {
   }
 
   @Get('/group/:group')
-  getPostsByGroup(@GetOrgFromRequest() org: Organization, @Param('group') group: string) {
-    return this._postsService.getPostsByGroup(org.id, group);
+  async getPostsByGroup(@GetOrgFromRequest() org: Organization, @Param('group') group: string,
+    @GetUserFromRequest() user?: User) {
+    const result = await this._postsService.getPostsByGroup(org.id, group);
+    return user && result.posts[0] && needsSendSummary(result.posts[0]) ? { ...result, sending: await this._postsService.getSendingSummary(org.id, user.id, result.posts[0].id) } : result;
   }
 
   /**
@@ -340,12 +343,14 @@ export class PostsController {
   }
 
   @Get('/:id')
-  getPost(
+  async getPost(
     @GetOrgFromRequest() org: Organization,
     @Param('id') id: string,
-    @Query('projectId') projectId?: string
+    @Query('projectId') projectId?: string,
+    @GetUserFromRequest() user?: User
   ) {
-    return this._postsService.getPost(org.id, id, false, projectId);
+    const result = await this._postsService.getPost(org.id, id, false, projectId);
+    return user && result.posts[0] && needsSendSummary(result.posts[0]) ? { ...result, sending: await this._postsService.getSendingSummary(org.id, user.id, result.posts[0].id) } : result;
   }
 
   @Post('/')
@@ -426,9 +431,10 @@ export class PostsController {
   @Post('/:id/retry')
   retryPost(
     @GetOrgFromRequest() org: Organization,
-    @Param('id') id: string
+    @Param('id') id: string,
+    @GetUserFromRequest() user?: User
   ) {
-    return this._postsService.retryPost(org.id, id);
+    return this._postsService.retryPost(org.id, id, user?.id);
   }
 
   @Put('/:id/date')

@@ -556,7 +556,7 @@ export class EngageController {
   // ─── Reply Accounts ───────────────────────────────────────────────────────
 
   @ApiOperation({
-    summary: "List this org's X integrations with Engage reply settings",
+    summary: "List reply accounts with project permissions and action-specific availability",
   })
   @Get('/reply-accounts')
   async listReplyAccounts(
@@ -566,8 +566,8 @@ export class EngageController {
   ) {
     const accounts = await this._engageService.listReplyAccounts(org, projectId);
     if (!user || !isAccountBoundSendingEnabled() || !this._extensionNodes) return accounts;
-    const views = await this._extensionNodes.accountViews(org.id, user.id, accounts.map(account => ({ id: account.id as string, disabled: account.disabled === true || account.engageEnabled === false })), 'reply');
-    return accounts.map(account => ({ ...account, ...views.get(account.id as string) }));
+    const views = await this._extensionNodes.accountViews(org.id, user.id, accounts.map(account => ({ id: account.id as string, disabled: account.disabled === true || account.engageEnabled === false || !!account.blockCode })), 'reply');
+    return accounts.map(account => ({ ...account, ...views.get(account.id as string), ...(account.blockCode ? { sendAvailability: account.blockCode } : {}) }));
   }
 
   @ApiOperation({
@@ -1463,9 +1463,10 @@ export class EngageController {
   @Get('/sent/:id/status')
   getSentReplyStatus(
     @GetOrgFromRequest() org: Organization,
-    @Param('id') id: string
+    @Param('id') id: string,
+    @GetUserFromRequest() user?: User
   ) {
-    return this._engageService.getSentReplyStatus(org, id);
+    return this._engageService.getSentReplyStatus(org, id, user?.id);
   }
 
   @ApiOperation({

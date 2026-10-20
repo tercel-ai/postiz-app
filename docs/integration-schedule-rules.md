@@ -698,3 +698,10 @@ The calendar day-view (`calendar.tsx`) filters schedule rules to show only those
 | `apps/frontend/.../time.table.tsx` | Schedule rule editor UI |
 | `apps/frontend/.../calendar.tsx` | Day-view filtering by rule type |
 | `libraries/.../prisma/schema.prisma` | `postingTimes` column default (V2 format) |
+
+
+## Controlled action-specific account projection
+
+`GET /integrations/integration-project/list?projectId=...&action=POST|REPLY` defaults to POST and rejects other actions with `SEND_ACTION_INVALID`. The list now includes the stored `engageEnabled`, `projectAssigned`, `projectDisabled` and `identityNamespace`. When ACCOUNT_BOUND_V1 is enabled, `action`, `blockCode`, `sendAvailability` and `terminals` reflect the requested action's node capability. REPLY requires an enabled project relation and `engageEnabled=true`; a POST-capable node alone does not establish reply capability. Disabled relations, disabled accounts and unresolved identities cannot be presented as available senders. Live permissions and quota are checked again at enqueue/execution. See the [AIsee frontend integration guide](../../aisee-app/docs/aisee-app-multi-node-integration.md) for the controlled contract.
+
+Frontend Project settings and Post/Reply pickers should prefer `GET /projects/:projectId/sending-context`. It returns one common account shape, per-action canSelect/reason/availability, recent plugin terminals and simplified project defaults; the individual integration lists remain compatible low-level reads.

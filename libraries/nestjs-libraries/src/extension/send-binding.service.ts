@@ -1,3 +1,4 @@
+import { accountBindingError } from './account-binding-error';
 import { canonicalSendAccount } from './send-coordination.utils';
 import {
   BadRequestException,
@@ -5,7 +6,7 @@ import {
   ForbiddenException,
   Injectable,
 } from '@nestjs/common';
-import { Integration, Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { EXTENSION_PUBLISHABLE_PLATFORMS } from '@gitroom/helpers/extension/post-publish';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../database/prisma/prisma.service';
@@ -15,7 +16,7 @@ import {
   type EngageConfigMetadata,
 } from '../engage/engage-config-metadata';
 import {
-  AccountBindingInput,
+  SendingAccountInput,
   AccountBindingMap,
   SaveSendingAccountsDto,
   SendingAccountMap,
@@ -50,8 +51,6 @@ function canonical(value: unknown): string {
 }
 const digest = (value: unknown) =>
   createHash('sha256').update(canonical(value)).digest('hex');
-const canonicalPlatform = (provider: string) =>
-  provider === 'linkedin-page' ? 'linkedin' : provider.toLowerCase();
 
 @Injectable()
 export class SendBindingService {
@@ -130,52 +129,6 @@ export class SendBindingService {
       throw new ForbiddenException('ORGANIZATION_MEMBERSHIP_REQUIRED');
   }
 
-  private accountError(
-    account:
-      | Pick<
-          Integration,
-          | 'organizationId'
-          | 'disabled'
-          | 'deletedAt'
-          | 'inBetweenSteps'
-          | 'providerIdentifier'
-          | 'identityNamespace'
-          | 'internalId'
-        >
-      | undefined,
-    relation: { disabled: boolean; engageEnabled: boolean } | undefined,
-    org: string,
-    project: string | undefined,
-    platform: string,
-    action: SendAction
-  ): string | null {
-    if (project !== undefined && (!relation || relation.disabled))
-      return 'ACCOUNT_NOT_ASSIGNED';
-    if (
-      !account ||
-      account.organizationId !== org ||
-      account.disabled ||
-      account.deletedAt ||
-      account.inBetweenSteps
-    )
-      return 'ACCOUNT_DISABLED';
-    if (
-      project !== undefined &&
-      action === 'REPLY' &&
-      relation!.engageEnabled !== true
-    )
-      return 'REPLY_ACCOUNT_DISABLED';
-    if (canonicalPlatform(account.providerIdentifier) !== platform)
-      return 'ACCOUNT_PLATFORM_MISMATCH';
-    if (
-      !account.internalId ||
-      !account.identityNamespace ||
-      account.identityNamespace === 'legacy'
-    )
-      return 'ACCOUNT_IDENTITY_UNRESOLVED';
-    return null;
-  }
-
   private async account(
     tx: Prisma.TransactionClient,
     org: string,
@@ -202,7 +155,7 @@ export class SendBindingService {
         : await tx.integration.findFirst({
             where: { id, organizationId: org },
           });
-    const code = this.accountError(
+    const code = accountBindingError(
       account,
       relation,
       org,
@@ -448,7 +401,7 @@ export class SendBindingService {
               : 'UNBOUND',
             sourceRevision: id ? effective!.revision : null,
             blockCode: id
-              ? this.accountError(
+              ? accountBindingError(
                   byActor.get(id),
                   byRelation.get(id),
                   org,
@@ -484,7 +437,8 @@ export class SendBindingService {
         ? `sending-accounts:project:${project}`
         : 'sending-accounts:organization',
       body.requestId,
-      body.accounts
+      body.accounts,
+      'LAST_WRITE_WINS'
     );
     return { saved: result.saved, bindings: result.bindings };
   }
@@ -531,6 +485,7 @@ export class SendBindingService {
       `automation:${project}:${action}`,
       requestId,
       { accounts, requestPayload },
+      'OPTIMISTIC',
       updateSettings
     );
     return {
@@ -550,6 +505,7 @@ export class SendBindingService {
     operation: string,
     requestId: string | undefined,
     payload: unknown,
+    mode: 'LAST_WRITE_WINS' | 'OPTIMISTIC',
     updateSettings?: (
       settings: EngageConfigMetadata
     ) => EngageConfigMetadata & { scanEnabled?: boolean }
@@ -593,7 +549,7 @@ export class SendBindingService {
       const validated: Array<{
         platform: string;
         action: SendAction;
-        change: AccountBindingInput;
+        change: SendingAccountInput;
         prior: { id: string; revision: number } | null;
       }> = [];
       for (const [platform, actions] of Object.entries(accounts).sort(
@@ -616,7 +572,7 @@ export class SendBindingService {
               : await tx.organizationSendBinding.findUnique({
                   where: { organizationId_platform_action: tuple },
                 });
-          if ((prior?.revision ?? 0) !== change.expectedRevision)
+          if (mode === 'OPTIMISTIC' && (prior?.revision ?? 0) !== change.expectedRevision)
             throw new ConflictException('BINDING_REVISION_CONFLICT');
           if (change.integrationId !== null)
             await this.account(
@@ -646,14 +602,18 @@ export class SendBindingService {
           const where = {
             id: prior.id,
             organizationId: org,
-            revision: change.expectedRevision,
+            revision: prior.revision,
           };
           const result =
             project !== undefined
               ? await tx.projectSendBinding.updateMany({ where, data })
               : await tx.organizationSendBinding.updateMany({ where, data });
-          if (result.count !== 1)
+          if (result.count !== 1) {
+            // Retry the internal race without requiring a client configuration version.
+            if (mode === 'LAST_WRITE_WINS')
+              throw Object.assign(new Error('Concurrent sending-account configuration update'), { code: 'P2034' });
             throw new ConflictException('BINDING_REVISION_CONFLICT');
+          }
         } else {
           const data = {
             organizationId: org,
@@ -673,7 +633,7 @@ export class SendBindingService {
           platform,
           action,
           integrationId: change.integrationId,
-          revision: change.expectedRevision + 1,
+          revision: (prior?.revision ?? 0) + 1,
         });
       }
       if (updateSettings) {

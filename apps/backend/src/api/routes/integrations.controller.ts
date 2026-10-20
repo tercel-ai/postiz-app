@@ -564,17 +564,19 @@ export class IntegrationsController {
   async listProjectIntegrations(
     @GetOrgFromRequest() org: Organization,
     @Query('projectId') projectId: string,
-    @GetUserFromRequest() user?: User
+    @GetUserFromRequest() user?: User,
+    @Query('action') action: 'POST' | 'REPLY' = 'POST'
   ) {
     if (!projectId) {
       throw new HttpException('projectId is required', 400);
     }
+    if (!['POST', 'REPLY'].includes(action)) throw new HttpException('SEND_ACTION_INVALID', 400);
     const rows = await this._integrationService.listProjectIntegrations(
       org.id,
       projectId
     );
     const views = user && isAccountBoundSendingEnabled() && this._extensionNodes
-      ? await this._extensionNodes.accountViews(org.id, user.id, rows.map(row => ({ id: row.integration.id, disabled: row.integration.disabled || row.disabled })))
+      ? await this._extensionNodes.accountViews(org.id, user.id, rows.map(row => ({ id: row.integration.id, disabled: row.integration.disabled || row.disabled || (action === 'REPLY' && !row.engageEnabled) })), action === 'REPLY' ? 'reply' : 'post')
       : undefined;
     return {
       integrations: rows.map((row) => {
@@ -582,13 +584,21 @@ export class IntegrationsController {
         const findIntegration = this._integrationManager.getSocialIntegration(
           p.providerIdentifier
         );
+        const blockCode = row.disabled ? 'ACCOUNT_NOT_ASSIGNED'
+          : p.disabled || p.inBetweenSteps ? 'ACCOUNT_DISABLED'
+          : action === 'REPLY' && !row.engageEnabled ? 'REPLY_ACCOUNT_DISABLED'
+          : !p.internalId || !p.identityNamespace || p.identityNamespace === 'legacy' ? 'ACCOUNT_IDENTITY_UNRESOLVED' : null;
         return {
           name: p.name,
           id: p.id,
           internalId: p.internalId,
           disabled: p.disabled,
           projectDisabled: row.disabled,
+          engageEnabled: row.engageEnabled,
+          projectAssigned: true,
+          identityNamespace: p.identityNamespace,
           ...(views?.get(p.id) ?? {}),
+          ...(isAccountBoundSendingEnabled() ? { action, blockCode, ...(blockCode ? { sendAvailability: blockCode } : {}) } : {}),
           editor: findIntegration.editor,
           picture: p.picture || '/no-picture.jpg',
           identifier: p.providerIdentifier,

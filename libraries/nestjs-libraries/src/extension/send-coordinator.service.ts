@@ -2,6 +2,7 @@ import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extensio
 import { CONTROLLED_SEND_PLATFORMS, canonicalControlledPlatform, controlledReplySettings, hasControlledReplyTarget } from './controlled-platforms';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { hashSecret } from './extension-node.protocol';
+import { sendBusinessSummary } from './send-business-summary';
 import {
   BadRequestException,
   ConflictException,
@@ -51,6 +52,13 @@ export interface EnqueueSend {
   explicitIntegrationId?: string;
   publishMethod?: 'API' | 'EXTENSION';
   publishDate?: Date;
+  sentReplyId?: string;
+  selection?: {
+    integrationId?: string | null;
+    expectedRouteRevision: number;
+    expectedContentRevision: number;
+    requestId: string;
+  };
 }
 const active = ['RESERVED', 'SENDING', 'RECONCILING'];
 const reject = (message: string): never => {
@@ -70,6 +78,44 @@ export class SendCoordinatorService {
   enabled() {
     if (!isAccountBoundSendingEnabled())
       throw new ServiceUnavailableException('SEND_COORDINATION_NOT_ENABLED');
+  }
+
+  private async assertMember(tx: Prisma.TransactionClient, org: string, user: string) {
+    if (!user) throw new ForbiddenException('AUTHENTICATED_USER_REQUIRED');
+    const member = await tx.userOrganization.findUnique({
+      where: { userId_organizationId: { userId: user, organizationId: org } },
+    });
+    if (!member || member.disabled) throw new ForbiddenException('ORGANIZATION_MEMBERSHIP_REQUIRED');
+  }
+
+  async businessSummary(org: string, user: string, postId: string) {
+    await this.assertMember(this.db, org, user);
+    const scope = await this.db.post.findFirst({ where: { id: postId, organizationId: org, deletedAt: null } });
+    if (!scope) throw new NotFoundException('SEND_ROOT_NOT_FOUND');
+    if (scope.projectId) await this.projects.assertProjectAccess(org, scope.projectId);
+    const activation = scope.projectId ? await this.projects.getActivationVerdict(org, scope.projectId) : 'inactive';
+    const operationBlockCode = !scope.projectId ? 'SEND_PROJECT_REQUIRED' : activation === 'active' ? null
+      : activation === 'inactive' ? 'PROJECT_INACTIVE' : 'PROJECT_VALIDATION_UNAVAILABLE';
+    return sendTransaction(this.db, async tx => {
+      await this.assertMember(tx, org, user);
+      const post = await tx.post.findFirst({ where: { id: postId, organizationId: org, projectId: scope.projectId, deletedAt: null } });
+      if (!post) throw new NotFoundException('SEND_ROOT_NOT_FOUND');
+      const intent = post.sendIntentId ? await tx.sendIntent.findFirst({
+        where: { id: post.sendIntentId, organizationId: org, projectId: post.projectId! },
+      }) : null;
+      if (post.sendIntentId && !intent) reject('SEND_INTENT_SCOPE_MISMATCH');
+      const root = intent && intent.rootPostId !== post.id ? await tx.post.findFirst({
+        where: { id: intent.rootPostId, organizationId: org, projectId: post.projectId, sendIntentId: intent.id, parentPostId: null, deletedAt: null },
+      }) : post;
+      if (!root) reject('SEND_INTENT_SCOPE_MISMATCH');
+      const executions = intent ? await tx.sendExecution.findMany({
+        where: { organizationId: org, sendIntentId: intent.id }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      }) : [];
+      const segments = executions.length ? await tx.sendSegment.findMany({
+        where: { organizationId: org, executionId: { in: executions.map(e => e.id) } }, orderBy: { segmentIndex: 'asc' },
+      }) : [];
+      return sendBusinessSummary(root, intent, executions, segments, operationBlockCode);
+    });
   }
 
   verifyPolicyIn(tx: Prisma.TransactionClient) {
@@ -189,6 +235,22 @@ export class SendCoordinatorService {
     return sendTransaction(this.db, async (tx) => {
       const posts = await this.chain(tx, org, rootId);
       const first = posts[0];
+      const selection = options.selection;
+      const receiptKey = {
+        organizationId: org, userId: options.userId,
+        operation: `queue-reply:${rootId}`, requestId: selection?.requestId ?? '',
+      };
+      const fingerprint = selection ? sendHash({ rootId, selection }) : '';
+      if (selection || options.sentReplyId) await this.assertMember(tx, org, options.userId);
+      if (selection) {
+        const receipt = await tx.sendMutationReceipt.findUnique({
+          where: { organizationId_userId_operation_requestId: receiptKey },
+        });
+        if (receipt) {
+          if (receipt.requestHash !== fingerprint) reject('REQUEST_ID_CONFLICT');
+          return first;
+        }
+      }
       if (first.intervalInDays)
         throw new BadRequestException(
           'CONTROLLED_RECURRING_OCCURRENCE_REQUIRED'
@@ -223,6 +285,7 @@ export class SendCoordinatorService {
       });
       if (existing) {
         if (existing.rootPostId !== first.id) reject('CONTENT_ROOT_CONFLICT');
+        if (selection) reject('SEND_INTENT_IMMUTABLE');
         if (existing.status !== 'QUEUED')
           reject('SEND_INTENT_REQUIRES_EXPLICIT_RETRY');
         return first;
@@ -236,6 +299,17 @@ export class SendCoordinatorService {
         )
       )
         reject('CONTENT_NOT_ENQUEUEABLE');
+      if (selection) {
+        if (first.state !== 'DRAFT') reject('CONTENT_NOT_ENQUEUEABLE');
+        if (first.routeRevision !== selection.expectedRouteRevision ||
+            first.contentRevision !== selection.expectedContentRevision)
+          reject('SEND_CONTENT_REVISION_CONFLICT');
+        if (selection.integrationId !== undefined) {
+          first.accountSelectionMode = selection.integrationId === null ? 'INHERIT' : 'EXPLICIT';
+          first.integrationId = selection.integrationId;
+          first.routeRevision++;
+        }
+      }
       const action =
         options.action ?? (first.source === 'engage' ? 'REPLY' : 'POST');
       if (reply) {
@@ -265,6 +339,18 @@ export class SendCoordinatorService {
             },
           })
         : null;
+      // Both saved-reply and generic Post entry points must claim the opportunity.
+      if (options.sentReplyId || (reply && options.origin === 'MANUAL')) {
+        if (options.sentReplyId && reply?.id !== options.sentReplyId) reject('REPLY_SCOPE_MISMATCH');
+        if (!replyState || !['NEW', 'AUTO_QUEUED'].includes(replyState.status))
+          reject('REPLY_OPPORTUNITY_NOT_ACTIONABLE');
+        const claimed = await tx.engageOpportunityState.updateMany({
+          where: { id: replyState.id, organizationId: org, projectId: first.projectId,
+            opportunityId: reply!.opportunityId, status: { in: ['NEW', 'AUTO_QUEUED'] } },
+          data: { status: 'SCHEDULED' },
+        });
+        if (claimed.count !== 1) reject('REPLY_OPPORTUNITY_NOT_ACTIONABLE');
+      }
       if (
         first.integrationId &&
         first.accountSelectionMode == null &&
@@ -356,6 +442,7 @@ export class SendCoordinatorService {
           accountResolution: route ? 'RESOLVED' : 'AWAITING_CURRENT_ACTOR',
           bindingSource: route?.bindingSource ?? 'CURRENT_SESSION',
           bindingSourceRevision: route?.bindingRevision ?? null,
+          routeRevision: first.routeRevision,
           state: 'QUEUE',
           ...(options.publishDate ? { publishDate: options.publishDate } : {}),
           sendOrigin: options.origin,
@@ -370,6 +457,9 @@ export class SendCoordinatorService {
         },
       });
       if (queued.count !== posts.length) reject('SEND_CONTENT_CHANGED');
+      if (selection) await tx.sendMutationReceipt.create({
+        data: { ...receiptKey, requestHash: fingerprint, result: { rootPostId: rootId, sendIntentId: intent.id } },
+      });
       return tx.post.findUniqueOrThrow({ where: { id: rootId } });
     });
   }
@@ -515,20 +605,40 @@ export class SendCoordinatorService {
     return tx.sendIntent.findUniqueOrThrow({ where: { id: intent.id } });
   }
 
-  async enqueueSavedReply(org: string, userId: string, sentReplyId: string) {
+  async enqueueSavedReply(org: string, userId: string, sentReplyId: string,
+    options: import('./send-execution.dto').QueueStoredReplyDto = { sentReplyId }) {
+    this.enabled();
+    await this.assertMember(this.db, org, userId);
     const reply = await this.db.engageSentReply.findFirst({
       where: { id: sentReplyId, organizationId: org },
     });
     if (!reply) throw new NotFoundException('SAVED_REPLY_NOT_FOUND');
+    if (!reply.projectId) throw new BadRequestException('SEND_PROJECT_REQUIRED');
+    await this.projects.assertProjectActive(org, reply.projectId);
     const existing = await this.db.post.findFirst({
       where: { id: reply.postId, organizationId: org },
     });
-    if (existing?.sendIntentId) return existing;
+    if (!existing || existing.source !== 'engage' || existing.projectId !== reply.projectId || existing.deletedAt)
+      throw new NotFoundException('SAVED_REPLY_NOT_FOUND');
+    const versioned = options.integrationId !== undefined || options.requestId !== undefined ||
+      options.expectedRouteRevision !== undefined || options.expectedContentRevision !== undefined;
+    if (versioned && (!options.requestId?.trim() || options.requestId.length > 128 ||
+        !Number.isSafeInteger(options.expectedRouteRevision) || options.expectedRouteRevision! < 0 ||
+        !Number.isSafeInteger(options.expectedContentRevision) || options.expectedContentRevision! < 1 ||
+        (options.integrationId != null && !options.integrationId.trim())))
+      throw new BadRequestException('SEND_SELECTION_VERSION_REQUIRED');
+    if (existing.sendIntentId && !versioned) return existing;
     return this.enqueue(org, reply.postId, {
       userId,
       origin: 'MANUAL',
       action: 'REPLY',
+      sentReplyId,
       publishMethod: 'EXTENSION',
+      ...(versioned ? { selection: {
+        integrationId: options.integrationId, requestId: options.requestId!,
+        expectedRouteRevision: options.expectedRouteRevision!,
+        expectedContentRevision: options.expectedContentRevision!,
+      } } : {}),
     });
   }
 
@@ -1545,19 +1655,30 @@ export class SendCoordinatorService {
 
   async retry(org: string, rootId: string, userId: string, now = new Date()) {
     this.enabled();
+    await this.assertMember(this.db, org, userId);
+    const scope = await this.db.post.findFirst({ where: { id: rootId, organizationId: org, deletedAt: null } });
+    if (!scope?.projectId) reject('SEND_RETRY_UNSAFE');
+    await this.projects.assertProjectActive(org, scope.projectId!);
     return sendTransaction(this.db, async (tx) => {
+      await this.assertMember(tx, org, userId);
       const post = await tx.post.findFirst({
-        where: { organizationId: org, id: rootId, deletedAt: null },
+        where: { organizationId: org, id: rootId, projectId: scope.projectId, parentPostId: null, deletedAt: null },
       });
       const intent =
         post?.sendIntentId &&
-        (await tx.sendIntent.findUnique({ where: { id: post.sendIntentId } }));
+        (await tx.sendIntent.findFirst({ where: { id: post.sendIntentId, organizationId: org, projectId: post.projectId!, rootPostId: post.id } }));
       if (
         !intent ||
         intent.status !== 'FAILED_FINAL' ||
         intent.activeExecutionId ||
         intent.hasConfirmedSegments
       )
+        reject('SEND_RETRY_UNSAFE');
+      const executions = await tx.sendExecution.findMany({ where: { organizationId: org, sendIntentId: intent.id } });
+      const segments = executions.length ? await tx.sendSegment.findMany({
+        where: { organizationId: org, executionId: { in: executions.map(e => e.id) } },
+      }) : [];
+      if (!sendBusinessSummary(post!, intent, executions, segments).allowedActions.retry.allowed)
         reject('SEND_RETRY_UNSAFE');
       await tx.sendIntent.update({
         where: { id: intent.id },

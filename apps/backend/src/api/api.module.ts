@@ -1,4 +1,6 @@
 import { SendExecutionsController, SendIntentsController, SendReconciliationController, SendProtocolController } from './routes/send-executions.controller';
+import { SendingContextController } from './routes/sending-context.controller';
+import { SendingContextService } from '@gitroom/backend/services/sending-context.service';
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { AuthController } from '@gitroom/backend/api/routes/auth.controller';
 import { AuthService } from '@gitroom/backend/services/auth/auth.service';
@@ -62,6 +64,7 @@ const authenticatedController = [
   SendReconciliationController,
   SendProtocolController,
   SendingAccountsController,
+  SendingContextController,
   SendPreferencesController,
 ];
 @Module({
@@ -76,6 +79,7 @@ const authenticatedController = [
     ...authenticatedController,
   ],
   providers: [
+    SendingContextService,
     AuthService,
     StripeService,
     OpenaiService,

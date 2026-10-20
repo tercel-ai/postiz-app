@@ -42,7 +42,7 @@ Engage spans 8 new Prisma models, 4 Temporal workflows, 25+ API endpoints, a loc
 - `libraries/nestjs-libraries/src/engage/dtos/engage.dto.ts` — all DTO classes
 - `apps/backend/src/app.module.ts` — register EngageModule
 
-**Key API endpoints**: `GET/POST /config`, `POST/DELETE/PATCH /keywords`, `GET/POST/PATCH/DELETE /monitored-channels`, `GET/POST/PATCH/DELETE /tracked-accounts`, `GET/PATCH /reply-accounts`
+**Key API endpoints**: `GET/POST /config`, `POST/DELETE/PATCH /keywords`, `GET/POST/PATCH/DELETE /monitored-channels`, `GET/POST/PATCH/DELETE /tracked-accounts`, `GET /reply-accounts`, `POST /reply-accounts/:integrationId`
 
 **Dependencies**: F1  
 **Can run in parallel with**: nothing yet (F3, F4 depend on this)

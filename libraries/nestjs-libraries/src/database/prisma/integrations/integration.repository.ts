@@ -1109,6 +1109,7 @@ export class IntegrationRepository {
       select: {
         postingTimes: true,
         disabled: true,
+        engageEnabled: true,
         integration: {
           include: {
             customer: true,

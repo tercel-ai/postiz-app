@@ -1,4 +1,4 @@
-import { legacyExecutionWhere } from '../extension/legacy-execution';
+import { isLegacyExecution, legacyExecutionWhere } from '../extension/legacy-execution';
 import {
   BadRequestException,
   ConflictException,
@@ -2021,24 +2021,25 @@ export class EngageRepository {
   async listReplyAccountIntegrations(
     organizationId: string,
     projectId: string | null = null,
-    platforms: readonly string[] = ['x']
+    platforms: readonly string[] = ['x'],
+    controlled = false
   ) {
     const integrations = await this._integration.model.integration.findMany({
       where: {
         organizationId,
         providerIdentifier: { in: [...platforms] },
         deletedAt: null,
-        disabled: false,
+        ...(!controlled ? { disabled: false } : {}),
         type: 'social',
       },
-      // The project binding carries engageEnabled. Absent binding = never
-      // excluded, so it reads as enabled (see the default above).
+      // Controlled candidates report actual project authorization. Legacy X
+      // settings retain their historical absent-binding default.
       include: {
         ...(projectId
           ? {
               integrationProjects: {
-                where: { projectId },
-                select: { engageEnabled: true },
+                where: { projectId, organizationId },
+                select: { engageEnabled: true, disabled: true },
               },
             }
           : {}),
@@ -2047,7 +2048,20 @@ export class EngageRepository {
     });
     return integrations.map(({ integrationProjects, ...integration }: any) => ({
       ...publicIntegration(integration),
-      engageEnabled: integrationProjects?.[0]?.engageEnabled ?? true,
+      engageEnabled: controlled
+        ? !!projectId && integrationProjects?.[0]?.engageEnabled === true
+        : integrationProjects?.[0]?.engageEnabled ?? true,
+      ...(controlled ? {
+        projectAssigned: !!projectId && !!integrationProjects?.[0],
+        projectDisabled: integrationProjects?.[0]?.disabled ?? null,
+        action: 'REPLY',
+        blockCode: !projectId ? 'SEND_PROJECT_REQUIRED'
+          : !integrationProjects?.[0] || integrationProjects[0].disabled ? 'ACCOUNT_NOT_ASSIGNED'
+          : integration.disabled || integration.inBetweenSteps ? 'ACCOUNT_DISABLED'
+          : !integrationProjects[0].engageEnabled ? 'REPLY_ACCOUNT_DISABLED'
+          : !integration.internalId || !integration.identityNamespace || integration.identityNamespace === 'legacy'
+          ? 'ACCOUNT_IDENTITY_UNRESOLVED' : null,
+      } : {}),
     }));
   }
 
@@ -3931,6 +3945,7 @@ export class EngageRepository {
           where: { sendIntentId: null, id: existing.postId },
           data: {
             content: data.content,
+            contentRevision: { increment: 1 },
             ...(data.coordinatedAutomatic ? { executionProtocol: 'ACCOUNT_BOUND_V1', sendOrigin: 'AUTOMATION' } : {}),
             // Re-stamp the platform on every save, so a row written before this
             // was fixed repairs itself the next time its draft is edited rather
@@ -3950,7 +3965,7 @@ export class EngageRepository {
           where: { id: existing.id },
           data: { inputData: data.inputData as Prisma.InputJsonValue },
           include: {
-            post: { select: { id: true, content: true, state: true } },
+            post: { select: { id: true, content: true, state: true, routeRevision: true, contentRevision: true, integrationId: true, accountSelectionMode: true } },
           },
         });
       }
@@ -3992,7 +4007,7 @@ export class EngageRepository {
           postId: post.id,
           inputData: data.inputData as Prisma.InputJsonValue,
         },
-        include: { post: { select: { id: true, content: true, state: true } } },
+        include: { post: { select: { id: true, content: true, state: true, routeRevision: true, contentRevision: true, integrationId: true, accountSelectionMode: true } } },
       });
     });
   }
@@ -6379,9 +6394,11 @@ export class EngageRepository {
   ) {
     const reply = await this._sentReply.model.engageSentReply.findFirst({
       where: { id, organizationId },
-      include: { post: { select: { id: true, state: true } } },
+      include: { post: { select: { id: true, state: true, sendIntentId: true, executionProtocol: true } } },
     });
     if (!reply) throw new NotFoundException('Sent reply not found');
+    if (reply.post.sendIntentId || !isLegacyExecution(reply.post.executionProtocol))
+      throw new ConflictException('SEND_INTENT_IMMUTABLE');
     if (reply.post.state !== 'QUEUE') {
       throw new BadRequestException(
         'Reply has already been sent — cannot edit'
@@ -6392,15 +6409,18 @@ export class EngageRepository {
     // published post content and the stored generation inputData diverged.
     if (data.content !== undefined || data.inputData !== undefined) {
       await this._tx.model.$transaction(async (tx) => {
-        if (data.content !== undefined) {
+        try {
           await tx.post.update({
-            where: { id: reply.postId },
-            data: { content: data.content },
+            where: { id: reply.postId, organizationId, state: 'QUEUE', sendIntentId: null, AND: [legacyExecutionWhere()] },
+            data: { ...(data.content !== undefined ? { content: data.content } : {}), contentRevision: { increment: 1 } },
           });
+        } catch (error) {
+          if ((error as { code?: string }).code === 'P2025') throw new ConflictException('SEND_REPLY_CHANGED');
+          throw error;
         }
         if (data.inputData !== undefined) {
           await tx.engageSentReply.update({
-            where: { id },
+            where: { id, organizationId, postId: reply.postId },
             data: { inputData: data.inputData },
           });
         }
@@ -6997,13 +7017,19 @@ export class EngageRepository {
         // claimedAt/releaseId) moves it — a failure from forty minutes ago would
         // read "just now". The exact time of each attempt lives in the Errors
         // table, which is where precision is actually needed.
-        post: { select: { state: true, releaseURL: true, error: true } },
+        post: { select: { id: true, state: true, releaseURL: true, error: true,
+          executionProtocol: true, sendIntentId: true, routeRevision: true, contentRevision: true } },
         opportunity: { select: { externalPostUrl: true } },
       },
     });
     if (!reply) throw new NotFoundException('Sent reply not found');
     return {
       id: reply.id,
+      postId: reply.post?.id ?? null,
+      executionProtocol: reply.post?.executionProtocol ?? 'LEGACY',
+      sendIntentId: reply.post?.sendIntentId ?? null,
+      routeRevision: reply.post?.routeRevision ?? null,
+      contentRevision: reply.post?.contentRevision ?? null,
       state: reply.post?.state ?? null,
       replyUrl: reply.post?.releaseURL ?? null,
       lastError: reply.post?.error ?? null,

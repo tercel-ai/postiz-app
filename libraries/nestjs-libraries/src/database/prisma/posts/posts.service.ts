@@ -2155,6 +2155,11 @@ export class PostsService {
     return this._sendCoordinator.hasContentIntent(orgId, contentUnitId);
   }
 
+  async getSendingSummary(orgId: string, userId: string, postId: string) {
+    if (!this._sendCoordinator) throw new ServiceUnavailableException('SEND_COORDINATION_NOT_ENABLED');
+    return this._sendCoordinator.businessSummary(orgId, userId, postId);
+  }
+
   async queueStoredSend(orgId: string, rootId: string, userId: string, publishMethod?: 'API' | 'EXTENSION') {
     if (!this._sendCoordinator) throw new ServiceUnavailableException('SEND_COORDINATION_NOT_ENABLED');
     const existing = await this._postRepository.getPostById(rootId, orgId);
@@ -2164,15 +2169,15 @@ export class PostsService {
     return { postId: post.id, sendIntentId: post.sendIntentId, state: post.state, publishMethod: post.publishMethod };
   }
 
-  async retryPost(orgId: string, postId: string) {
+  async retryPost(orgId: string, postId: string, userId?: string) {
     const post = await this._postRepository.getPostById(postId, orgId);
     if (!post) {
       throw new BadRequestException('Post not found');
     }
     if (post.sendIntentId) {
       if (!this._sendCoordinator) throw new ServiceUnavailableException('SEND_COORDINATION_NOT_ENABLED');
-      await this._sendCoordinator.retry(orgId, postId, '');
-      await this.startWorkflow(getSocialTaskQueue(post.providerIdentifier!), postId, orgId, true);
+      await this._sendCoordinator.retry(orgId, postId, userId ?? '');
+      if (post.publishMethod === 'API') await this.startWorkflow(getSocialTaskQueue(post.providerIdentifier!), postId, orgId, true);
       return { postId, state: 'QUEUE' };
     }
     if (!post.integration) {

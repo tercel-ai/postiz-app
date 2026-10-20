@@ -34,6 +34,7 @@ The paths below omit the existing public API prefix; the original URL, method al
 | POST `/sending/intents/reply` | Still restores the server-side saved reply target by sentReplyId; may enter OPTIONAL first binding |
 | Original single Reply send-now/schedule endpoint | In controlled mode integrationId may be omitted; a valid default wins, otherwise OPTIONAL waits for the first qualifying actor. The LEGACY path still requires integrationId; supplying an error type/empty value is still rejected |
 | POST `/posts/publish-due`, `/engage/reply-due` | V1 performs first binding server-side, then returns an execution manifest with the account already pinned; the extension does not rewrite the target on its own. Legacy requests without a node keep their original wrapping/pooling |
+| GET/POST project and Organization sending-accounts resources | Default saves require accounts/requestId only; last-write-wins, internal revisions and idempotent receipts are retained, with no client expectedRevision requirement |
 | GET/POST `/user/send-preferences` | Keeps expectedRevision/requestId; users may raise the requirement to mandatory preselection, but cannot lower a system REQUIRED requirement |
 | GET/POST `/admin/settings/sending.account_selection_policy` | Keeps the system policy resource; only the system super admin may modify it, preserving the revision and lastRequiredRevision barrier |
 

@@ -25,6 +25,9 @@ async function save(integration?: { id: string }) {
   return upsert.mock.calls[0][0];
 }
 describe('draft account selection provenance', () => {
+  it('invalidates the draft content version on every generic edit', async () => {
+    expect((await save()).update.contentRevision).toEqual({ increment: 1 });
+  });
   it('records a caller-selected draft account as EXPLICIT', async () => {
     const saved = await save({ id: 'account' });
     expect(saved.create.accountSelectionMode).toBe('EXPLICIT');

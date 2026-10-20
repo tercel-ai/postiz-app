@@ -1,6 +1,6 @@
 # Engage Module — Frontend API Reference
 
-For ACCOUNT_BOUND_V1 account selection, current enqueue bodies, the X-only legacy account-list limitation and remaining frontend/backend dependencies, use [AIsee app multi-node integration](../../../aisee-app/docs/aisee-app-multi-node-integration.md). Backend business paths are `/engage/...`; the existing aisee-app HTTP client handles its configured proxy prefix. Keep the legacy manual confirmation and link-backfill flows separate from controlled submission.
+For ACCOUNT_BOUND_V1 account selection, versioned saved-draft enqueue, seven-platform controlled candidates and ordinary-user sending summaries, use [AIsee app multi-node integration](../../../aisee-app/docs/aisee-app-multi-node-integration.md). Backend business paths are `/engage/...`; the existing aisee-app HTTP client handles its configured proxy prefix. Keep the legacy manual confirmation and link-backfill flows separate from controlled submission.
 
 **Version**: 1.0  
 **Date**: 2026-07-16
@@ -254,13 +254,10 @@ config table until the rework this doc reflects:
 
 | | Grain | Applies to | Lives on |
 | --- | --- | --- | --- |
-| **Reply account** — may this connected account send Engage replies, in this project? | (integration, project) | Platforms that reply through a connected account (**X** today) | `IntegrationProject.engageEnabled` |
+| **Reply account** — may this connected account send Engage replies, in this project? | (integration, project) | All seven controlled platforms; X only in LEGACY | `IntegrationProject.engageEnabled` |
 | **Reply policy** — is this platform auto-replied to, and where/when? | (project, platform) | Every engage platform, including extension-published ones (Reddit, …) | `EngageConfig.replyPolicies` (see `POST /config` above) |
 
-A platform that publishes replies through the browser extension's own session
-(Reddit and friends) has no "which account" question to answer — nothing picks
-an account for it — so it never appears in `GET /reply-accounts`; its only
-control is the reply policy.
+Under ACCOUNT_BOUND_V1, browser-executed replies also bind an Integration and require its project-level reply permission. LEGACY keeps its X-only account list and browser-session routing on other platforms. Per-platform automation policy remains separate from account authorization and default selection.
 
 ```typescript
 // GET /reply-accounts returns Integration objects with a flat engageEnabled —
@@ -268,12 +265,11 @@ control is the reply policy.
 interface Integration {
   id: string;
   name: string;
-  providerIdentifier: 'x';   // scoped to ACCOUNT_REPLY_PLATFORMS (['x'] today)
+  providerIdentifier: string; // Seven controlled platforms, plus linkedin-page; X only in LEGACY
   picture: string | null;
   // Other Integration fields...
-  // May Engage reply as this account, for the requested project. Absent binding
-  // (account not bound to the project, or no projectId given) reads as `true` —
-  // opt-OUT, not opt-in: a connected account is usable until excluded.
+  // The stored project reply flag. Controlled callers must also inspect
+  // projectAssigned, projectDisabled and blockCode; absence never authorizes.
   engageEnabled: boolean;
 }
 
@@ -1227,11 +1223,7 @@ Delete a tracked account (historical Feed records are preserved).
 ## Reply Accounts — Reply Accounts
 
 > Reply accounts are **our connected accounts** (Integration table) that Engage
-> may reply AS, scoped to platforms that reply through a connected account (**X**
-> today — see `ACCOUNT_REPLY_PLATFORMS`). Completely independent from tracked
-> accounts (which are scan *targets*, not senders). For platforms that reply
-> through the extension's own browser session (Reddit, …), see `replyPolicies`
-> on `POST /config` instead — there is no account to choose there.
+> may reply AS. ACCOUNT_BOUND_V1 exposes all seven supported platforms and actual project permissions; LEGACY keeps the X-only list. This is independent from tracked accounts (scan targets), per-platform automation policies and project default senders.
 
 ### GET `/api/engage/reply-accounts`
 
@@ -1242,7 +1234,7 @@ enabled for this project.
 
 | Parameter | Type | Description |
 |---|---|---|
-| `projectId` | string | Optional project scope. Omit for the org-wide view (every binding reads as enabled — see below). |
+| `projectId` | string | Project scope. Controlled org-wide listing without it is read-only: all candidates report `SEND_PROJECT_REQUIRED` and `engageEnabled=false`. |
 
 **Response** `200 OK` — `Integration[]`, flat `engageEnabled` (no nested config object)
 
@@ -1259,13 +1251,11 @@ enabled for this project.
 ```
 
 > `engageEnabled` reflects `IntegrationProject.engageEnabled` for THIS project.
-> An account not (yet) bound to the project — or no `projectId` given — reads as
-> `true`: opt-OUT, not opt-in. A connected account is usable until explicitly
-> excluded.
+> LEGACY retains its historical X-only, absent-binding `true` default. Under ACCOUNT_BOUND_V1, candidates cover X, Reddit, LinkedIn (including company integrations), Medium, Quora, Hacker News and Dev.to. `projectAssigned`, nullable `projectDisabled`, `engageEnabled`, `identityNamespace`, `action=REPLY`, `blockCode`, `sendAvailability` and `terminals` describe actual project authorization and REPLY node capability. An absent project/binding never grants reply permission. Missing or disabled project relations report `ACCOUNT_NOT_ASSIGNED`; opted-out relations report `REPLY_ACCOUNT_DISABLED`. No project reports `SEND_PROJECT_REQUIRED`. Account listing remains a preview; enqueue and execution revalidate permissions and quota.
 
 ---
 
-### PATCH `/api/engage/reply-accounts/:integrationId`
+### POST `/api/engage/reply-accounts/:integrationId`
 
 Set whether Engage may reply as this account, for one project.
 
@@ -1289,7 +1279,7 @@ per-account) — this endpoint no longer accepts them.
 
 **Response** `200 OK` — `{ "integrationId": string, "projectId": string, "engageEnabled": boolean }`
 
-**Error** `404` — Integration not found / not this organization's, or not bound to the given project (bind it first via the project's integration settings).
+**Error** `404` — Integration not found / not this organization's. The existing upsert can create the project relation; updating reply permission does not clear a disabled relation or configure a default sender.
 
 ---
 
@@ -2859,3 +2849,28 @@ reddit_impressions = (score + num_comments) × 20
 // Reddit Traffic Index
 reddit_traffic = score×1.0 + num_comments×3.0
 ```
+
+
+## Controlled saved Reply enqueue and ordinary-user status
+
+`POST /sending/intents/reply` preserves the existing `sentReplyId` and Post root. A draft account choice is accepted atomically at enqueue:
+
+```json
+{
+  "sentReplyId": "22222222-2222-4222-8222-222222222222",
+  "integrationId": "integration-id",
+  "expectedRouteRevision": 2,
+  "expectedContentRevision": 3,
+  "requestId": "stable-enqueue-request"
+}
+```
+
+`integrationId=null` clears the draft's explicit choice and resolves Project → optional Organization defaults. Omitting the field keeps the original choice/default behavior. Supplying a choice or any version/idempotency metadata requires both revisions and a non-empty stable request ID. A versioned request may omit integrationId to preserve the current choice/defaults without increasing routeRevision. Draft-save responses expose the revisions under `post`; re-saving content or editing through the generic Post endpoint increments `contentRevision`. Stored draft enqueue requires the exact organization/project opportunity state to be NEW or AUTO_QUEUED and atomically changes it to SCHEDULED in the same serializable transaction as the intent and receipt. This guard also applies when manually enqueueing a saved reply through the generic `POST /sending/intents` entry point. Already replied, scheduled, expired, dismissed or missing states return `REPLY_OPPORTUNITY_NOT_ACTIONABLE`; replay of an existing receipt does not claim the opportunity again. Replaying the identical body returns the original Post, including after completion; another body with the same request ID returns `REQUEST_ID_CONFLICT`. Stale draft versions return `SEND_CONTENT_REVISION_CONFLICT`; missing selection metadata returns `SEND_SELECTION_VERSION_REQUIRED`. An existing intent cannot be rebound with a new request ID (`SEND_INTENT_IMMUTABLE`). Permission failure rolls back the entire enqueue. No duplicate reply/root or quota debit is created by replay.
+
+`GET /engage/sent/:id/status` retains its existing fields and adds `postId`, `executionProtocol`, `sendIntentId`, `routeRevision`, `contentRevision`. While controlled sending is enabled, or for an already controlled record after pause, the authenticated response also includes `sending`. The same summary appears on `GET /posts/:id` and `GET /posts/group/:group`.
+
+`sending` contains `rootPostId`, protocol/pause information, intent status/revision, account selection and route/content revisions, an allowlisted target identity, the latest/active execution's id/status/resolutionRevision, segment statuses/public result links, and `allowedActions` (`enqueue`, `selectAccount`, `reschedule`, `retry`; each has `allowed` and nullable `reason`). No node tokens, leases, permits, payloads, credential hashes or raw outcome evidence are returned. Organization membership and stored-project ownership are checked; inactive projects remain inspectable with actions disabled; unavailable ownership validation fails closed. These actions express state safety and project admission, not a promise that account permissions, live policy or quota will pass a later mutation.
+
+`RECONCILING`, unknown segments, confirmed partial work, active executions and all statuses other than a definite final failure prohibit retry. A safe retry uses the same intent/root and re-checks project activation and membership. Account changes and rescheduling of already queued controlled content remain unavailable: expose `SEND_INTENT_IMMUTABLE` / `SEND_INTENT_REQUIRES_CONTROLLED_RESCHEDULE` and preserve the original task rather than canceling/recreating it.
+
+The legacy `PATCH /engage/sent/:id` editor now rejects controlled replies with `SEND_INTENT_IMMUTABLE`, including metadata-only edits. Its transactional Post write also predicates on organization, QUEUE state, no intent and a legacy protocol so concurrent enrollment cannot bypass the initial check; a lost write race returns `SEND_REPLY_CHANGED`. Reading a controlled thread segment returns the intent's canonical root identity and root revisions in `sending`.
