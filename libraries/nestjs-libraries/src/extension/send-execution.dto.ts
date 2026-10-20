@@ -45,6 +45,7 @@ export class ReconcileSendDto extends SendOutcomeDto {
 export class QueueStoredReplyDto {
   @IsUUID() sentReplyId: string;
   @IsOptional() @IsString() @MaxLength(128) integrationId?: string | null;
+  // Optional legacy optimistic-concurrency metadata; simple callers only send the reply and account IDs.
   @IsOptional() @IsInt() @Min(0) expectedRouteRevision?: number;
   @IsOptional() @IsInt() @Min(1) expectedContentRevision?: number;
   @IsOptional() @IsString() @MaxLength(128) requestId?: string;

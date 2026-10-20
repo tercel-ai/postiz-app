@@ -1,6 +1,6 @@
 # POST /posts — Publish API
 
-For ACCOUNT_BOUND_V1, see [AIsee app multi-node integration](../../aisee-app/docs/aisee-app-multi-node-integration.md#6-post-保留界面并调整请求与数据) for request identity, optional per-item accounts, draft clearing/version rules and asynchronous extension-only enqueue. The API/Temporal and synchronous publication descriptions below concern legacy execution and must not be applied to new controlled sends.
+For ACCOUNT_BOUND_V1, see [AIsee app multi-node integration](../../aisee-app/docs/aisee-app-multi-node-integration-reference.md#post) for request identity, optional per-item accounts, draft clearing/version rules and asynchronous extension-only enqueue. The API/Temporal and synchronous publication descriptions below concern legacy execution and must not be applied to new controlled sends.
 
 ## Overview
 

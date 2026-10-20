@@ -55,9 +55,9 @@ export interface EnqueueSend {
   sentReplyId?: string;
   selection?: {
     integrationId?: string | null;
-    expectedRouteRevision: number;
-    expectedContentRevision: number;
-    requestId: string;
+    expectedRouteRevision?: number;
+    expectedContentRevision?: number;
+    requestId?: string;
   };
 }
 const active = ['RESERVED', 'SENDING', 'RECONCILING'];
@@ -255,9 +255,10 @@ export class SendCoordinatorService {
         organizationId: org, userId: options.userId,
         operation: `queue-reply:${rootId}`, requestId: selection?.requestId ?? '',
       };
-      const fingerprint = selection ? sendHash({ rootId, selection }) : '';
+      const receiptRequestId = selection?.requestId;
+      const fingerprint = receiptRequestId ? sendHash({ rootId, selection }) : '';
       if (selection || options.sentReplyId) await this.assertMember(tx, org, options.userId);
-      if (selection) {
+      if (receiptRequestId) {
         const receipt = await tx.sendMutationReceipt.findUnique({
           where: { organizationId_userId_operation_requestId: receiptKey },
         });
@@ -282,8 +283,8 @@ export class SendCoordinatorService {
         (reply.organizationId !== org || reply.projectId !== first.projectId)
       )
         reject('REPLY_SCOPE_MISMATCH');
-      if (first.state === 'PUBLISHED' || first.releaseId)
-        reject('CONTENT_ALREADY_SUBMITTED');
+      if (options.sentReplyId && reply?.id !== options.sentReplyId)
+        reject('REPLY_SCOPE_MISMATCH');
       const unit =
         first.contentUnitId ??
         options.contentUnitId ??
@@ -298,8 +299,21 @@ export class SendCoordinatorService {
           },
         },
       });
+      if (existing && existing.rootPostId !== first.id) reject('CONTENT_ROOT_CONFLICT');
+      // The saved reply itself is the idempotency key. A replay never grants
+      // another execution, changes the frozen actor, or touches quota ledgers.
+      if (existing && options.sentReplyId && !receiptRequestId) {
+        if (first.sendIntentId !== existing.id || existing.action !== 'REPLY')
+          reject('SEND_CONTENT_CHANGED');
+        const requestedAccount = selection?.integrationId;
+        if ((typeof requestedAccount === 'string' && requestedAccount !== existing.integrationId) ||
+            (requestedAccount === null && first.accountSelectionMode === 'EXPLICIT'))
+          reject('SEND_INTENT_IMMUTABLE');
+        return first;
+      }
+      if (first.state === 'PUBLISHED' || first.releaseId)
+        reject('CONTENT_ALREADY_SUBMITTED');
       if (existing) {
-        if (existing.rootPostId !== first.id) reject('CONTENT_ROOT_CONFLICT');
         if (selection) reject('SEND_INTENT_IMMUTABLE');
         if (existing.status !== 'QUEUED')
           reject('SEND_INTENT_REQUIRES_EXPLICIT_RETRY');
@@ -316,8 +330,8 @@ export class SendCoordinatorService {
         reject('CONTENT_NOT_ENQUEUEABLE');
       if (selection) {
         if (first.state !== 'DRAFT') reject('CONTENT_NOT_ENQUEUEABLE');
-        if (first.routeRevision !== selection.expectedRouteRevision ||
-            first.contentRevision !== selection.expectedContentRevision)
+        if ((selection.expectedRouteRevision !== undefined && first.routeRevision !== selection.expectedRouteRevision) ||
+            (selection.expectedContentRevision !== undefined && first.contentRevision !== selection.expectedContentRevision))
           reject('SEND_CONTENT_REVISION_CONFLICT');
         if (selection.integrationId !== undefined) {
           first.accountSelectionMode = selection.integrationId === null ? 'INHERIT' : 'EXPLICIT';
@@ -356,7 +370,6 @@ export class SendCoordinatorService {
         : null;
       // Both saved-reply and generic Post entry points must claim the opportunity.
       if (options.sentReplyId || (reply && options.origin === 'MANUAL')) {
-        if (options.sentReplyId && reply?.id !== options.sentReplyId) reject('REPLY_SCOPE_MISMATCH');
         if (!replyState || !['NEW', 'AUTO_QUEUED'].includes(replyState.status))
           reject('REPLY_OPPORTUNITY_NOT_ACTIONABLE');
         const claimed = await tx.engageOpportunityState.updateMany({
@@ -472,7 +485,7 @@ export class SendCoordinatorService {
         },
       });
       if (queued.count !== posts.length) reject('SEND_CONTENT_CHANGED');
-      if (selection) await tx.sendMutationReceipt.create({
+      if (receiptRequestId) await tx.sendMutationReceipt.create({
         data: { ...receiptKey, requestHash: fingerprint, result: { rootPostId: rootId, sendIntentId: intent.id } },
       });
       return tx.post.findUniqueOrThrow({ where: { id: rootId } });
@@ -636,14 +649,16 @@ export class SendCoordinatorService {
     });
     if (!existing || existing.source !== 'engage' || existing.projectId !== reply.projectId || existing.deletedAt)
       throw new NotFoundException('SAVED_REPLY_NOT_FOUND');
-    const versioned = options.integrationId !== undefined || options.requestId !== undefined ||
+    const versioned = options.requestId !== undefined ||
       options.expectedRouteRevision !== undefined || options.expectedContentRevision !== undefined;
     if (versioned && (!options.requestId?.trim() || options.requestId.length > 128 ||
         !Number.isSafeInteger(options.expectedRouteRevision) || options.expectedRouteRevision! < 0 ||
         !Number.isSafeInteger(options.expectedContentRevision) || options.expectedContentRevision! < 1 ||
         (options.integrationId != null && !options.integrationId.trim())))
       throw new BadRequestException('SEND_SELECTION_VERSION_REQUIRED');
-    if (existing.sendIntentId && !versioned) return existing;
+    if (options.integrationId != null &&
+        (typeof options.integrationId !== 'string' || !options.integrationId.trim()))
+      throw new BadRequestException('INVALID_SEND_ACCOUNT_SELECTION');
     return this.enqueue(org, reply.postId, {
       userId,
       origin: 'MANUAL',
@@ -654,7 +669,8 @@ export class SendCoordinatorService {
         integrationId: options.integrationId, requestId: options.requestId!,
         expectedRouteRevision: options.expectedRouteRevision!,
         expectedContentRevision: options.expectedContentRevision!,
-      } } : {}),
+      } } : options.integrationId !== undefined
+        ? { selection: { integrationId: options.integrationId } } : {}),
     });
   }
 

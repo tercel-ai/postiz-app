@@ -6,6 +6,9 @@ import { EngageService } from '../../engage/engage.service';
 import { IntegrationsController } from '../../../../../apps/backend/src/api/routes/integrations.controller';
 import { PostsController } from '../../../../../apps/backend/src/api/routes/posts.controller';
 import { CONTROLLED_SEND_PLATFORMS } from '../controlled-platforms';
+import { validateSync } from 'class-validator';
+import { QueueStoredReplyDto } from '../send-execution.dto';
+import { SendIntentsController } from '../../../../../apps/backend/src/api/routes/send-executions.controller';
 
 beforeEach(() => vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true'));
 afterEach(() => vi.unstubAllEnvs());
@@ -77,9 +80,9 @@ describe('saved reply enqueue contract', () => {
     expect(db.rows('sendMutationReceipt')).toHaveLength(0);
     expect(db.rows('post')[0].state).toBe('DRAFT');
   });
-  it('requires versions and a request id for account selection', async () => {
+  it('requires complete metadata only when a legacy caller supplies a request id', async () => {
     const { service } = await draft();
-    await expect(service.enqueueSavedReply('org', 'user', 'reply', { sentReplyId: 'reply', integrationId: 'account' })).rejects.toThrow('SEND_SELECTION_VERSION_REQUIRED');
+    await expect(service.enqueueSavedReply('org', 'user', 'reply', { sentReplyId: 'reply', integrationId: 'account', requestId: 'partial-legacy' })).rejects.toThrow('SEND_SELECTION_VERSION_REQUIRED');
   });
   it('clears the draft choice and resolves defaults when integrationId is null', async () => {
     const { db, service, bindings } = await draft();
@@ -115,6 +118,147 @@ describe('saved reply enqueue contract', () => {
     await expect(service.enqueueSavedReply('org', 'user', 'reply')).rejects.toThrow('PROJECT_INACTIVE');
     db.rows('userOrganization')[0].disabled = true;
     await expect(service.enqueueSavedReply('org', 'user', 'reply', selection)).rejects.toThrow('ORGANIZATION_MEMBERSHIP_REQUIRED');
+  });
+});
+
+describe('simple saved reply business idempotency', () => {
+  const simple = { sentReplyId: 'reply', integrationId: 'account' };
+
+  it('accepts a real two-field controller request without frontend revisions or request ids', async () => {
+    const { service, db } = await draft();
+    const id = '22222222-2222-4222-8222-222222222222';
+    db.rows('engageSentReply')[0].id = id;
+    const body = Object.assign(new QueueStoredReplyDto(), { sentReplyId: id, integrationId: 'account' });
+    expect(validateSync(body)).toEqual([]);
+    const controller = new SendIntentsController({} as any, service);
+    expect(await controller.reply({ id: 'org' } as any, { id: 'user' } as any, body))
+      .toMatchObject({ id: 'root', state: 'QUEUE', integrationId: 'account' });
+  });
+
+  it('creates only one task for concurrent two-field requests and never reserves quota at enqueue', async () => {
+    const { service, db, bindings } = await draft();
+    const results = await Promise.all(Array.from({ length: 5 }, () => service.enqueueSavedReply('org', 'user', 'reply', simple)));
+    expect(new Set(results.map(row => row.sendIntentId)).size).toBe(1);
+    expect(db.rows('sendIntent')).toHaveLength(1);
+    expect(db.rows('post')).toHaveLength(1);
+    expect(db.rows('engageSentReply')).toHaveLength(1);
+    expect(db.rows('post')[0]).toMatchObject({ accountSelectionMode: 'EXPLICIT', routeRevision: 3, contentRevision: 3 });
+    expect(db.rows('engageOpportunityState')[0].status).toBe('SCHEDULED');
+    expect(bindings.resolveForEnqueueInTransaction).toHaveBeenCalledTimes(1);
+    expect(db.rows('sendExecution')).toHaveLength(0);
+    expect(db.rows('sendQuotaReservation')).toHaveLength(0);
+  });
+
+  it.each([['account', 'other'], ['other', 'account']])('lets only the first of competing %s / %s account choices enqueue', async (first, second) => {
+    const { service, db, bindings } = await draft();
+    bindings.resolveForEnqueueInTransaction.mockImplementation(async (...args: any[]) => ({
+      integrationId: args[5], canonicalAccountKey: 'account-key', providerIdentifier: 'x',
+      bindingSource: 'EXPLICIT', bindingRevision: null, targetAccount: { id: '123', idNamespace: 'x.rest_id' },
+    }));
+    const results = await Promise.allSettled([
+      service.enqueueSavedReply('org', 'user', 'reply', { ...simple, integrationId: first }),
+      service.enqueueSavedReply('org', 'user', 'reply', { ...simple, integrationId: second }),
+    ]);
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.find(result => result.status === 'rejected')).toMatchObject({ reason: { message: 'SEND_INTENT_IMMUTABLE' } });
+    expect(db.rows('sendIntent')).toHaveLength(1);
+    expect(db.rows('sendIntent')[0].integrationId).toBe(first);
+    expect(bindings.resolveForEnqueueInTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the latest stored draft read inside admission rather than an earlier precheck snapshot', async () => {
+    const { service, db } = await draft();
+    // Cache the harness delegate so this spy intercepts the actual precheck read.
+    const posts = db.post;
+    db.post = posts;
+    const read = posts.findFirst.bind(posts);
+    vi.spyOn(posts, 'findFirst').mockImplementationOnce(async (query: any) => {
+      const stale = await read(query);
+      Object.assign(db.rows('post')[0], { content: 'Latest saved body', contentRevision: 4, routeRevision: 5 });
+      return stale;
+    });
+    await service.enqueueSavedReply('org', 'user', 'reply', simple);
+    expect(db.rows('sendIntent')[0]).toMatchObject({ contentRevision: 4, routeRevision: 6 });
+    expect(db.rows('post')[0].content).toBe('Latest saved body');
+  });
+
+  it.each([undefined, null])('keeps the first resolved default frozen on replay (%s)', async integrationId => {
+    const { service, db, bindings } = await draft();
+    if (integrationId === null) Object.assign(db.rows('post')[0], { integrationId: 'old', accountSelectionMode: 'EXPLICIT' });
+    const body = integrationId === undefined ? { sentReplyId: 'reply' } : { sentReplyId: 'reply', integrationId };
+    const first = await service.enqueueSavedReply('org', 'user', 'reply', body);
+    const before = structuredClone(db.rows('sendIntent')[0]);
+    bindings.resolveForEnqueueInTransaction.mockRejectedValue(new Error('DEFAULT_CHANGED'));
+    const replay = await service.enqueueSavedReply('org', 'user', 'reply', body);
+    expect(replay.sendIntentId).toBe(first.sendIntentId);
+    expect(db.rows('sendIntent')).toEqual([before]);
+    expect(bindings.resolveForEnqueueInTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('forbids clearing a frozen explicit account', async () => {
+    const { service, db } = await draft();
+    await service.enqueueSavedReply('org', 'user', 'reply', simple);
+    await expect(service.enqueueSavedReply('org', 'user', 'reply', { sentReplyId: 'reply', integrationId: null }))
+      .rejects.toThrow('SEND_INTENT_IMMUTABLE');
+    expect(db.rows('post')[0]).toMatchObject({ accountSelectionMode: 'EXPLICIT', integrationId: 'account' });
+    expect(db.rows('sendIntent')).toHaveLength(1);
+  });
+
+  it('replays across active members without creating another task', async () => {
+    const { service, db } = await draft();
+    const first = await service.enqueueSavedReply('org', 'user', 'reply', simple);
+    db.seed('userOrganization', { userId: 'other-user', organizationId: 'org', disabled: false });
+    const replay = await service.enqueueSavedReply('org', 'other-user', 'reply', simple);
+    expect(replay.sendIntentId).toBe(first.sendIntentId);
+    expect(db.rows('sendIntent')).toHaveLength(1);
+    expect(db.rows('sendQuotaReservation')).toHaveLength(0);
+  });
+
+  it('does not return a stale linked task after the reply no longer matches its stored root', async () => {
+    const { service, db } = await draft();
+    await service.enqueueSavedReply('org', 'user', 'reply', simple);
+    db.rows('post')[0].sendIntentId = 'unrelated-task';
+    await expect(service.enqueueSavedReply('org', 'user', 'reply', simple)).rejects.toThrow('SEND_CONTENT_CHANGED');
+    expect(db.rows('sendIntent')).toHaveLength(1);
+  });
+
+  it('does not bypass failed project/account validation when metadata is omitted', async () => {
+    const { service, db, bindings } = await draft();
+    bindings.resolveForEnqueueInTransaction.mockRejectedValueOnce(new Error('REPLY_ACCOUNT_DISABLED'));
+    await expect(service.enqueueSavedReply('org', 'user', 'reply', simple)).rejects.toThrow('REPLY_ACCOUNT_DISABLED');
+    expect(db.rows('sendIntent')).toHaveLength(0);
+    expect(db.rows('post')[0]).toMatchObject({ state: 'DRAFT', routeRevision: 2 });
+    expect(db.rows('engageOpportunityState')[0].status).toBe('NEW');
+  });
+
+  it('preserves held/unknown/confirmed settlement facts across repeated enqueue calls', async () => {
+    vi.stubEnv('SEND_EXECUTION_CREDENTIAL_KEY', 'simple-reply-credential-key-at-least-thirty-two-characters');
+    const { service, db } = await draft();
+    await service.enqueueSavedReply('org', 'user', 'reply', simple);
+    const execution = await service.reserveApi('org', 'root', 'worker', sendNow);
+    await service.authorizeApiSegment('org', execution.id, 0, { id: '123', idNamespace: 'x.rest_id' }, sendNow);
+    const facts = () => structuredClone({
+      executions: db.rows('sendExecution'), segments: db.rows('sendSegment'),
+      buckets: db.rows('sendQuotaBucket'), reservations: db.rows('sendQuotaReservation'),
+      events: db.rows('sendOutcomeEvent'), accounts: db.rows('accountWriteState'),
+    });
+    const held = facts();
+    await service.enqueueSavedReply('org', 'user', 'reply', simple);
+    expect(facts()).toEqual(held);
+    await service.apiOutcome('org', execution.id, 0, { eventId: 'uncertain', status: 'unknown' }, sendNow);
+    const uncertain = facts();
+    await service.enqueueSavedReply('org', 'user', 'reply', simple);
+    expect(facts()).toEqual(uncertain);
+    await expect(service.reserveApi('org', 'root', 'second-worker', sendNow)).rejects.toThrow();
+    const outcome = { eventId: 'confirmed', status: 'confirmed' as const, platformId: 'external', url: 'https://x.com/u/status/external' };
+    await service.apiOutcome('org', execution.id, 0, outcome, sendNow);
+    await service.apiOutcome('org', execution.id, 0, outcome, sendNow);
+    const confirmed = facts();
+    expect((await service.enqueueSavedReply('org', 'user', 'reply', simple)).state).toBe('PUBLISHED');
+    expect(facts()).toEqual(confirmed);
+    expect(db.rows('sendIntent')).toHaveLength(1);
+    expect(db.rows('sendExecution')).toHaveLength(1);
+    expect(db.rows('sendQuotaBucket')[0]).toMatchObject({ heldUnits: 0, confirmedUnits: 1 });
   });
 });
 

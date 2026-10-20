@@ -1,6 +1,6 @@
 # Engage Module — Frontend API Reference
 
-For ACCOUNT_BOUND_V1 account selection, versioned saved-draft enqueue, seven-platform controlled candidates and ordinary-user sending summaries, use [AIsee app multi-node integration](../../../aisee-app/docs/aisee-app-multi-node-integration.md). Backend business paths are `/engage/...`; the existing aisee-app HTTP client handles its configured proxy prefix. Keep the legacy manual confirmation and link-backfill flows separate from controlled submission.
+For ACCOUNT_BOUND_V1 account selection, idempotent saved-draft enqueue, seven-platform controlled candidates and ordinary-user sending summaries, use [AIsee app multi-node integration](../../../aisee-app/docs/aisee-app-multi-node-integration.md). Backend business paths are `/engage/...`; the existing aisee-app HTTP client handles its configured proxy prefix. Keep the legacy manual confirmation and link-backfill flows separate from controlled submission.
 
 **Version**: 1.0  
 **Date**: 2026-07-16
@@ -2853,19 +2853,22 @@ reddit_traffic = score×1.0 + num_comments×3.0
 
 ## Controlled saved Reply enqueue and ordinary-user status
 
-`POST /sending/intents/reply` preserves the existing `sentReplyId` and Post root. A draft account choice is accepted atomically at enqueue:
+`POST /sending/intents/reply` preserves the existing `sentReplyId` and Post root. The current public request only needs the saved Reply ID and an optional account:
 
 ```json
 {
   "sentReplyId": "22222222-2222-4222-8222-222222222222",
-  "integrationId": "integration-id",
-  "expectedRouteRevision": 2,
-  "expectedContentRevision": 3,
-  "requestId": "stable-enqueue-request"
+  "integrationId": "integration-id"
 }
 ```
 
-`integrationId=null` clears the draft's explicit choice and resolves Project → optional Organization defaults. Omitting the field keeps the original choice/default behavior. Supplying a choice or any version/idempotency metadata requires both revisions and a non-empty stable request ID. A versioned request may omit integrationId to preserve the current choice/defaults without increasing routeRevision. Draft-save responses expose the revisions under `post`; re-saving content or editing through the generic Post endpoint increments `contentRevision`. Stored draft enqueue requires the exact organization/project opportunity state to be NEW or AUTO_QUEUED and atomically changes it to SCHEDULED in the same serializable transaction as the intent and receipt. This guard also applies when manually enqueueing a saved reply through the generic `POST /sending/intents` entry point. Already replied, scheduled, expired, dismissed or missing states return `REPLY_OPPORTUNITY_NOT_ACTIONABLE`; replay of an existing receipt does not claim the opportunity again. Replaying the identical body returns the original Post, including after completion; another body with the same request ID returns `REQUEST_ID_CONFLICT`. Stale draft versions return `SEND_CONTENT_REVISION_CONFLICT`; missing selection metadata returns `SEND_SELECTION_VERSION_REQUIRED`. An existing intent cannot be rebound with a new request ID (`SEND_INTENT_IMMUTABLE`). Permission failure rolls back the entire enqueue. No duplicate reply/root or quota debit is created by replay.
+The first successful enqueue reads the current persisted draft in its serializable admission transaction; it does not promise the content version previously displayed by the client. Save edits before enqueueing. Omit integrationId to retain the draft choice/default resolution; null clears an explicit draft choice before first enqueue and resolves Project → optional Organization defaults. The normal request does not need client revisions or requestId.
+
+The scoped saved Reply/root and unique content-unit intent provide business idempotency. Concurrent identical requests return the same task, including after authorization, unknown outcomes, or completion. Replays do not grant an execution, re-resolve a changed default, or mutate quota/outcome ledgers. A different account or clearing a frozen explicit choice returns SEND_INTENT_IMMUTABLE. Membership, project activation, organization mode, root consistency and record scope are checked; admission failure rolls back all mutations. Existing unknown or failed tasks are not automatically retried by enqueue.
+
+Legacy callers may still supply requestId, expectedRouteRevision and expectedContentRevision together for optimistic concurrency. These three fields remain optional compatibility metadata, not requirements for the simple account request. Partial legacy metadata returns SEND_SELECTION_VERSION_REQUIRED; stale supplied versions return SEND_CONTENT_REVISION_CONFLICT. Original request receipts still replay, and another body with the same supplied requestId returns REQUEST_ID_CONFLICT. A new versioned request cannot rebind an existing intent.
+
+For first admission, the stored organization/project opportunity state must be NEW or AUTO_QUEUED and becomes SCHEDULED in the same transaction as task creation. Already replied, scheduled, expired, dismissed or missing states return REPLY_OPPORTUNITY_NOT_ACTIONABLE unless the request is only returning its already-created task. This opportunity guard also applies to generic manual enqueue. No duplicate Reply/root, platform submission or quota debit is created by enqueue replay.
 
 `GET /engage/sent/:id/status` retains its existing fields and adds `postId`, `executionProtocol`, `sendIntentId`, `routeRevision`, `contentRevision`. While controlled sending is enabled, or for an already controlled record after pause, the authenticated response also includes `sending`. The same summary appears on `GET /posts/:id` and `GET /posts/group/:group`.
 
