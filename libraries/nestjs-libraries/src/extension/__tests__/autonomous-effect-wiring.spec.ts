@@ -12,6 +12,21 @@ const posts = [{ id: 'root', content: 'body', settings: '{}', image: '[]', execu
 const modes = () => ({ autonomousEffect: vi.fn().mockRejectedValue(new Error('SEND_MODE_AUTONOMOUS_REQUIRED')) });
 
 describe('durable autonomous account-write admission', () => {
+  it.each([false, true])('checks thread finisher account policy without inventing saved post IDs (blocked=%s)', async blocked => {
+    const network = vi.fn().mockResolvedValue([]);
+    const assertLegacyAccount = blocked
+      ? vi.fn().mockRejectedValue(new Error('SEND_MODE_AUTONOMOUS_REQUIRED'))
+      : vi.fn().mockResolvedValue(undefined);
+    const activity = Object.assign(Object.create(PostActivity.prototype), {
+      _sendCoordinator: { assertLegacyAccount },
+      _integrationManager: { getSocialIntegration: () => ({ comment: network }) },
+    });
+    const work = activity.postThreadFinisher('remote-parent', 'remote-last', integration, 'text', 'https://x.com/u/status/remote-parent');
+    if (blocked) await expect(work).rejects.toThrow('SEND_MODE_AUTONOMOUS_REQUIRED');
+    else await expect(work).resolves.toBeUndefined();
+    expect(assertLegacyAccount).toHaveBeenCalledExactlyOnceWith('org', 'actor');
+    expect(network).toHaveBeenCalledTimes(blocked ? 0 : 1);
+  });
   it.each(['postSocial', 'postComment', 'postThreadFinisher'] as const)('guards %s before calling the platform', async method => {
     const effects = modes();
     const network = vi.fn().mockResolvedValue([]);

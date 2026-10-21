@@ -370,7 +370,7 @@ export class PostActivity {
     finisherText: string,
     releaseURL: string
   ) {
-    if (!this._sendModes) await this._sendCoordinator?.assertLegacyAccount(integration.organizationId, integration.id, posts.map(post => post.id));
+    if (!this._sendModes) await this._sendCoordinator?.assertLegacyAccount(integration.organizationId, integration.id);
     const getIntegration = this._integrationManager.getSocialIntegration(
       integration.providerIdentifier
     );
