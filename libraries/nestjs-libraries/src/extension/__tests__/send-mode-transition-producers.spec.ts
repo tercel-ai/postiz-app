@@ -59,7 +59,7 @@ function setup() {
 }
 it('admin restore preserves the producer fence while repairing shared opportunities', async () => {
   const { db, modes, engage, post, save } = setup();
-  post('captured');
+  post('captured', { releaseId: 'lease', claimedAt: new Date() });
   post('errored', {
     state: 'ERROR',
     releaseURL: null,
@@ -135,9 +135,11 @@ it.each(['group', 'id'] as const)(
 it('explicit deletion can cancel unclaimed queued work during transition', async () => {
   const { db, modes, posts, post, save } = setup();
   post('captured');
-  await save();
+  post('active', { group: 'active-group', releaseId: 'lease', claimedAt: new Date() });
+  expect(await save()).toMatchObject({ mode: 'AUTONOMOUS', transition: { remainingCount: 1 } });
   await posts.deletePostById('org', 'captured');
   expect(db.rows('post')[0].deletedAt).toBeInstanceOf(Date);
+  db.rows('post').find((row: any) => row.id === 'active').state = 'PUBLISHED';
   await modes.reconcilePendingTransitions();
   expect(await modes.get('org', 'admin')).toMatchObject({
     mode: 'CONTROLLED',
@@ -207,7 +209,7 @@ it('admin restore leaves account-bound terminal replies unchanged in autonomous 
 });
 it('draft cleanup remains scoped to the authenticated organization', async () => {
   const { db, posts, post, save } = setup();
-  post('captured');
+  post('captured', { releaseId: 'lease', claimedAt: new Date() });
   post('draft', { state: 'DRAFT' });
   db.seed('post', {
     id: 'foreign',

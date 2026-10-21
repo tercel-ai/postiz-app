@@ -7,8 +7,12 @@ describe('sending mode transition reconciliation lifecycle', () => {
     vi.useFakeTimers();
     const modes = {
       reconcilePendingTransitions: vi.fn().mockResolvedValue([]),
+      pendingReallocations: vi.fn().mockResolvedValue([]),
     };
-    const service = new SendModeTransitionReconciliationService(modes as any);
+    const service = new SendModeTransitionReconciliationService(
+      modes as any,
+      {} as any
+    );
     service.onApplicationBootstrap();
     expect(modes.reconcilePendingTransitions).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(30_000);
@@ -21,6 +25,7 @@ describe('sending mode transition reconciliation lifecycle', () => {
     vi.useFakeTimers();
     let complete!: () => void;
     const modes = {
+      pendingReallocations: vi.fn().mockResolvedValue([]),
       reconcilePendingTransitions: vi.fn(
         () =>
           new Promise<void>((resolve) => {
@@ -28,7 +33,10 @@ describe('sending mode transition reconciliation lifecycle', () => {
           })
       ),
     };
-    const service = new SendModeTransitionReconciliationService(modes as any);
+    const service = new SendModeTransitionReconciliationService(
+      modes as any,
+      {} as any
+    );
     service.onApplicationBootstrap();
     await vi.advanceTimersByTimeAsync(30_000);
     expect(modes.reconcilePendingTransitions).toHaveBeenCalledTimes(1);
@@ -37,4 +45,60 @@ describe('sending mode transition reconciliation lifecycle', () => {
     expect(modes.reconcilePendingTransitions).toHaveBeenCalledTimes(2);
     service.onApplicationShutdown();
   });
+});
+
+it('reallocates pending organizations after mode reconciliation and persists their actionable issues', async () => {
+  vi.useFakeTimers();
+  const issues = [{ postId: 'root', code: 'SEND_PROJECT_REQUIRED' }];
+  const modes = {
+    reconcilePendingTransitions: vi.fn().mockResolvedValue([]),
+    pendingReallocations: vi
+      .fn()
+      .mockResolvedValue([{ organizationId: 'org', userId: 'admin' }]),
+    recordReallocationIssues: vi.fn(),
+  };
+  const coordinator = {
+    reallocateUnsentLegacy: vi.fn().mockResolvedValue(issues),
+  };
+  const service = new SendModeTransitionReconciliationService(
+    modes as any,
+    coordinator as any
+  );
+  service.onApplicationBootstrap();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(coordinator.reallocateUnsentLegacy).toHaveBeenCalledWith(
+    'org',
+    'admin'
+  );
+  expect(modes.recordReallocationIssues).toHaveBeenCalledWith('org', issues);
+  expect(
+    modes.reconcilePendingTransitions.mock.invocationCallOrder[0]
+  ).toBeLessThan(modes.pendingReallocations.mock.invocationCallOrder[0]);
+  service.onApplicationShutdown();
+});
+it('keeps processing other organizations when one reallocation fails', async () => {
+  vi.useFakeTimers();
+  const modes = {
+    reconcilePendingTransitions: vi.fn().mockResolvedValue([]),
+    pendingReallocations: vi.fn().mockResolvedValue([
+      { organizationId: 'broken', userId: 'admin' },
+      { organizationId: 'healthy', userId: 'admin' },
+    ]),
+    recordReallocationIssues: vi.fn(),
+  };
+  const coordinator = {
+    reallocateUnsentLegacy: vi.fn(async (org: string) => {
+      if (org === 'broken') throw new Error('temporarily unavailable');
+      return [];
+    }),
+  };
+  const service = new SendModeTransitionReconciliationService(
+    modes as any,
+    coordinator as any
+  );
+  service.onApplicationBootstrap();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(coordinator.reallocateUnsentLegacy).toHaveBeenCalledTimes(2);
+  expect(modes.recordReallocationIssues).toHaveBeenCalledWith('healthy', []);
+  service.onApplicationShutdown();
 });

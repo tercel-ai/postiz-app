@@ -66,13 +66,21 @@ export interface SendModeBlockers {
   autonomousEffects: number;
 }
 interface PendingSendModeTransition {
-  version: 1;
+  version: 1 | 2;
   targetMode: 'CONTROLLED';
   requestedAt: string;
   requestedByUserId: string;
   eligiblePostIds: string[];
   eligiblePostOccurrences: Record<string, string | null>;
   initialPendingCount: number;
+}
+interface PendingReallocation {
+  version: 1;
+  requestedAt: string;
+  requestedByUserId: string;
+  initialCount: number;
+  blockedPostIds?: string[];
+  issues: Array<{ postId: string; code: string }>;
 }
 export interface SendModeTransitionState {
   targetMode: OrganizationSendingMode;
@@ -104,6 +112,8 @@ export interface SendModeState {
   autonomousAllowed: boolean;
   blockers: SendModeBlockers;
   transition: SendModeTransitionState | null;
+  reallocation: { remainingCount: number; completedCount: number; blockedCount: number;
+    issues: Array<{ postId: string; code: string }> } | null;
 }
 const validRevision = (value: unknown): value is number =>
   Number.isInteger(value) &&
@@ -160,7 +170,7 @@ export class SendModeService {
     if (
       pending != null &&
       (value.mode !== 'AUTONOMOUS' ||
-        pending.version !== 1 ||
+        ![1, 2].includes(pending.version) ||
         pending.targetMode !== 'CONTROLLED' ||
         typeof pending.requestedAt !== 'string' ||
         !Number.isFinite(Date.parse(pending.requestedAt)) ||
@@ -363,6 +373,7 @@ export class SendModeService {
             system.effectiveEnabled
           )
         : null,
+      reallocation: await this.reallocationStateIn(tx, organizationId, row?.value),
     };
   }
 
@@ -385,6 +396,7 @@ export class SendModeService {
           {
             OR: [
               { state: 'QUEUE' },
+              { state: 'DRAFT', parentPostId: { not: null } },
               {
                 state: { not: 'PUBLISHED' },
                 releaseId: { not: null },
@@ -402,12 +414,139 @@ export class SendModeService {
         claimedAt: true,
         intervalInDays: true,
         source: true,
+        parentPostId: true,
+        releaseURL: true,
+        createdAt: true,
       },
       take: 5001,
     });
     if (posts.length > 5000)
       throw new ConflictException('SEND_MODE_TRANSITION_TOO_LARGE');
+    const records = await this.autonomousRecordsIn(tx, organizationId);
+    const byId = new Map(posts.map(post => [post.id, post]));
+    const missingParentIds = [...new Set(posts.map(post => post.parentPostId)
+      .filter((id): id is string => !!id && !byId.has(id)))];
+    // Absence from the work query does not mean a thread has already started:
+    // ordinary draft and failed roots are deliberately outside that query.
+    const parents = missingParentIds.length ? await tx.post.findMany({
+      where: { organizationId, deletedAt: null, id: { in: missingParentIds } },
+      select: { id: true, state: true, releaseId: true, releaseURL: true,
+        publishDate: true, executionProtocol: true, sendIntentId: true },
+    }) : [];
+    const parentById = new Map(parents.map(post => [post.id, post]));
+    const active = new Set(posts.filter(post => {
+      if (post.releaseId || post.releaseURL) return true;
+      if (!post.parentPostId || byId.has(post.parentPostId)) return false;
+      const parent = parentById.get(post.parentPostId);
+      return !parent || parent.state === 'PUBLISHED' || !!parent.releaseId || !!parent.releaseURL ||
+        !!parent.sendIntentId || !isLegacyExecution(parent.executionProtocol);
+    }).map(post => post.id));
+    for (const { result } of records) {
+      if (result.status === 'NOT_SUBMITTED') continue;
+      for (const id of result.postIds ?? []) {
+        const post = byId.get(id) ?? parentById.get(id);
+        if (post && (!result.recurring || Date.parse(result.occurrenceKey ?? '') === new Date(post.publishDate).getTime()))
+          active.add(id);
+      }
+    }
+    // Keep an already started thread with its original executor and account.
+    const neighbors = new Map<string, string[]>();
+    for (const post of posts) {
+      if (!post.parentPostId) continue;
+      neighbors.set(post.id, [...(neighbors.get(post.id) ?? []), post.parentPostId]);
+      neighbors.set(post.parentPostId, [...(neighbors.get(post.parentPostId) ?? []), post.id]);
+    }
+    const queue = [...active];
+    for (let index = 0; index < queue.length; index++) {
+      for (const id of neighbors.get(queue[index]) ?? []) {
+        if (!active.has(id)) { active.add(id); queue.push(id); }
+      }
+    }
+    return posts.filter(post => active.has(post.id));
+  }
+
+  private parseReallocation(raw: unknown): PendingReallocation | null {
+    const marker = (raw as { reallocation?: PendingReallocation } | null)?.reallocation;
+    if (marker == null) return null;
+    if (marker.version !== 1 || typeof marker.requestedByUserId !== 'string' || !marker.requestedByUserId ||
+      marker.requestedByUserId.length > 128 || typeof marker.requestedAt !== 'string' || !Number.isFinite(Date.parse(marker.requestedAt)) ||
+      !validRevision(marker.initialCount) || marker.initialCount > 5000 ||
+      (marker.blockedPostIds !== undefined && (!Array.isArray(marker.blockedPostIds) || marker.blockedPostIds.length > 5000 ||
+        marker.blockedPostIds.some(id => typeof id !== 'string' || !id || id.length > 128))) || !Array.isArray(marker.issues) || marker.issues.length > 100 ||
+      marker.issues.some(issue => !issue || typeof issue.postId !== 'string' || typeof issue.code !== 'string' ||
+        !issue.postId || issue.postId.length > 128 || !/^[A-Z][A-Z0-9_]{2,100}$/.test(issue.code)))
+      throw new ServiceUnavailableException('SEND_MODE_REALLOCATION_INVALID');
+    return marker;
+  }
+
+  private async reallocationPostsIn(tx: Prisma.TransactionClient, organizationId: string) {
+    const posts = await tx.post.findMany({ where: { organizationId, deletedAt: null,
+      sendIntentId: null, state: 'QUEUE', OR: [{ executionProtocol: null },
+        { executionProtocol: { not: 'ACCOUNT_BOUND_V1' } }] }, select: { id: true, parentPostId: true }, take: 5001 });
+    if (posts.length > 5000) throw new ConflictException('SEND_MODE_REALLOCATION_TOO_LARGE');
     return posts;
+  }
+
+  private async newReallocationIn(tx: Prisma.TransactionClient, organizationId: string, userId: string): Promise<PendingReallocation | null> {
+    const posts = await this.reallocationPostsIn(tx, organizationId);
+    return posts.length ? { version: 1 as const, requestedAt: new Date().toISOString(),
+      requestedByUserId: userId, initialCount: posts.length, issues: [] } : null;
+  }
+
+  private async reallocationStateIn(tx: Prisma.TransactionClient, organizationId: string, raw: unknown) {
+    const marker = this.parseReallocation(raw);
+    if (!marker) return null;
+    const posts = await this.reallocationPostsIn(tx, organizationId);
+    const ids = new Set(posts.map(post => post.id));
+    const owner = await tx.userOrganization.findUnique({ where: { userId_organizationId: {
+      organizationId, userId: marker.requestedByUserId,
+    } } });
+    const issues = !owner || owner.disabled
+      ? posts.slice(0, 100).map(post => ({ postId: post.id, code: 'ORGANIZATION_MEMBERSHIP_REQUIRED' }))
+      : marker.issues.filter(issue => ids.has(issue.postId));
+    const blocked = new Set(marker.blockedPostIds ?? marker.issues.map(issue => issue.postId));
+    const children = new Map<string, string[]>();
+    for (const post of posts) {
+      if (post.parentPostId) children.set(post.parentPostId, [...(children.get(post.parentPostId) ?? []), post.id]);
+    }
+    // Progress uses queued post rows, including every segment of a blocked root.
+    const queue = [...blocked];
+    for (let index = 0; index < queue.length; index++) {
+      for (const id of children.get(queue[index]) ?? []) {
+        if (!blocked.has(id)) { blocked.add(id); queue.push(id); }
+      }
+    }
+    return { remainingCount: posts.length, completedCount: Math.max(0, marker.initialCount - posts.length),
+      blockedCount: !owner || owner.disabled ? posts.length : posts.filter(post => blocked.has(post.id)).length, issues };
+  }
+
+  async pendingReallocations() {
+    const rows = await this.db.settings.findMany({ where: { key: { startsWith: SEND_MODE_ORGANIZATION_PREFIX },
+      value: { path: ['reallocation', 'version'], equals: 1 } } });
+    return rows.flatMap(row => {
+      const marker = this.parseReallocation(row.value);
+      const config = this.parseOrganization(row.value);
+      return marker && config.mode === 'CONTROLLED' ? [{
+        organizationId: row.key.slice(SEND_MODE_ORGANIZATION_PREFIX.length), userId: marker.requestedByUserId,
+      }] : [];
+    });
+  }
+
+  async recordReallocationIssues(organizationId: string, issues: Array<{ postId: string; code: string }>) {
+    return sendTransaction(this.db, async tx => {
+      await this.lockIn(tx, organizationId);
+      const row = await tx.settings.findUnique({ where: { key: organizationSendModeKey(organizationId) } });
+      const marker = this.parseReallocation(row?.value);
+      if (!marker || this.parseOrganization(row?.value).mode !== 'CONTROLLED') return;
+      const posts = await this.reallocationPostsIn(tx, organizationId);
+      const ids = new Set(posts.map(post => post.id));
+      const { reallocation: _old, ...value } = row!.value as Prisma.JsonObject;
+      const currentIssues = issues.filter(issue => ids.has(issue.postId));
+      await tx.settings.updateMany({ where: { key: row!.key }, data: { value: sendJson({ ...value,
+        ...(posts.length ? { reallocation: { ...marker,
+          blockedPostIds: [...new Set(currentIssues.map(issue => issue.postId))], issues: currentIssues.slice(0, 100) } } : {}),
+      }) } });
+    });
   }
 
   private pendingCount(
@@ -459,7 +598,13 @@ export class SendModeService {
     );
     const replyLeaseMinutes = Number.isFinite(configuredReplyLease) && configuredReplyLease > 0
       ? configuredReplyLease : 30;
+    const receipts = await this.autonomousRecordsIn(tx, organizationId);
     const needsReconciliation =
+      remainingPosts.some(post =>
+        !!post.releaseURL ||
+        (post.parentPostId && !remainingPosts.some(parent => parent.id === post.parentPostId)) ||
+        receipts.some(({ result }) => result.status === 'CONFIRMED' && result.postIds?.includes(post.id) &&
+          !(result.recurring && result.occurrenceKey !== new Date(post.publishDate).toISOString()))) ||
       effects.some(
         ({ result, row }) =>
           result.status === 'UNKNOWN' ||
@@ -481,31 +626,18 @@ export class SendModeService {
       !owner ||
       owner.disabled ||
       !['ADMIN', 'SUPERADMIN'].includes(owner.role);
-    const futureDates = remainingPosts
-      .map((post) => new Date(post.publishDate).getTime())
-      .filter((value) => Number.isFinite(value) && value > Date.now());
-    const scheduledNotBefore = futureDates.length
-      ? new Date(Math.max(...futureDates)).toISOString()
-      : null;
-    const recurringSchedule = remainingPosts.some(
-      (post) =>
-        typeof post.intervalInDays === 'number' && post.intervalInDays > 0
-    );
+    const scheduledNotBefore: string | null = null;
     const waitReason = !systemEnabled
       ? 'SYSTEM_DISABLED'
       : needsReconciliation
       ? 'RECONCILIATION_REQUIRED'
-      : recurringSchedule
-      ? 'RECURRING_SCHEDULE'
-      : scheduledNotBefore
-      ? 'SCHEDULED_WORK'
       : remainingCount
       ? 'IN_FLIGHT'
       : null;
     return {
       targetMode: pending.targetMode,
       status:
-        !systemEnabled || needsReconciliation || recurringSchedule
+        !systemEnabled || needsReconciliation
           ? 'NEEDS_ATTENTION'
           : 'DRAINING',
       requestedAt: pending.requestedAt,
@@ -532,7 +664,7 @@ export class SendModeService {
     const rows = await this.db.settings.findMany({
       where: {
         key: { startsWith: SEND_MODE_ORGANIZATION_PREFIX },
-        value: { path: ['transition', 'version'], equals: 1 },
+        value: { path: ['transition', 'targetMode'], equals: 'CONTROLLED' },
       },
       select: { key: true },
     });
@@ -544,7 +676,63 @@ export class SendModeService {
       try {
         results.push(
           await sendTransaction(this.db, async (tx) => {
-            const state = await this.lockIn(tx, organizationId);
+            let state = await this.lockIn(tx, organizationId);
+            const stored = await tx.settings.findUnique({ where: { key: row.key } });
+            const previous = this.parseOrganization(stored?.value).transition;
+            if (previous?.version === 1) {
+              const activePosts = await this.pendingPostsIn(tx, organizationId);
+              const active = new Map(activePosts.map(post => [post.id, post]));
+              const eligible = previous.eligiblePostIds.filter(id => active.has(id));
+              const captured = new Set(eligible);
+              const anchors = new Set(eligible.filter(id => {
+                const post = active.get(id)!;
+                return previous.eligiblePostOccurrences[id] ===
+                  (post.publishDate ? new Date(post.publishDate).toISOString() : null);
+              }));
+              const completedAncestors = await tx.post.findMany({
+                where: { organizationId, deletedAt: null, state: 'PUBLISHED',
+                  id: { in: previous.eligiblePostIds.filter(id => !active.has(id)) } },
+                select: { id: true, publishDate: true, intervalInDays: true },
+              });
+              const facts = await this.autonomousRecordsIn(tx, organizationId);
+              for (const ancestor of completedAncestors) {
+                const sameOccurrence = previous.eligiblePostOccurrences[ancestor.id] ===
+                  new Date(ancestor.publishDate).toISOString();
+                const confirmedSingle = !ancestor.intervalInDays && facts.some(({ result }) =>
+                  result.status === 'CONFIRMED' && result.recurring === false &&
+                  result.occurrenceKey === 'single' && result.postIds?.includes(ancestor.id));
+                if (sameOccurrence || confirmedSingle) anchors.add(ancestor.id);
+              }
+              const occurrences = Object.fromEntries(eligible.map(id => [id, previous.eligiblePostOccurrences[id]]));
+              // v1 captured queue rows, but its executor also expanded existing
+              // draft continuations. Recover only that already recorded chain.
+              for (const post of activePosts) {
+                if (post.state !== 'DRAFT' || !post.parentPostId || captured.has(post.id) ||
+                    new Date(post.createdAt).getTime() > Date.parse(previous.requestedAt)) continue;
+                let ancestor = post.parentPostId;
+                const seen = new Set([post.id]);
+                while (!anchors.has(ancestor)) {
+                  if (seen.has(ancestor)) break;
+                  seen.add(ancestor);
+                  const parent = active.get(ancestor);
+                  if (!parent?.parentPostId || new Date(parent.createdAt).getTime() > Date.parse(previous.requestedAt)) break;
+                  ancestor = parent.parentPostId;
+                }
+                if (!anchors.has(ancestor)) continue;
+                captured.add(post.id);
+                anchors.add(post.id);
+                eligible.push(post.id);
+                occurrences[post.id] = post.publishDate ? new Date(post.publishDate).toISOString() : null;
+              }
+              const effects = await this.pendingAutonomousIn(tx, organizationId);
+              await tx.settings.updateMany({ where: { key: row.key }, data: { value: sendJson({
+                mode: 'AUTONOMOUS', revision: state.revision,
+                transition: { ...previous, version: 2, eligiblePostIds: eligible,
+                  eligiblePostOccurrences: occurrences,
+                  initialPendingCount: this.pendingCount(eligible, effects) },
+              }) } });
+              state = await this.stateIn(tx, organizationId);
+            }
             if (
               !state.transition ||
               state.transition.remainingCount !== 0 ||
@@ -558,13 +746,17 @@ export class SendModeService {
               throw new ServiceUnavailableException(
                 'SEND_MODE_REVISION_EXHAUSTED'
               );
+            const setting = await tx.settings.findUnique({ where: { key: row.key } });
+            const requestedBy = this.parseOrganization(setting?.value).transition!.requestedByUserId;
+            const reallocation = await this.newReallocationIn(tx, organizationId, requestedBy);
             await tx.settings.updateMany({
               where: { key: row.key },
               data: {
-                value: {
+                value: sendJson({
                   mode: state.transition.targetMode,
                   revision: state.revision + 1,
-                },
+                  ...(reallocation ? { reallocation } : {}),
+                }),
               },
             });
             return true;
@@ -648,7 +840,8 @@ export class SendModeService {
     const row = await tx.settings.findUnique({
       where: { key: organizationSendModeKey(organizationId) },
     });
-    return this.parseOrganization(row?.value).transition!.eligiblePostIds;
+    const active = new Set((await this.pendingPostsIn(tx, organizationId)).map(post => post.id));
+    return this.parseOrganization(row?.value).transition!.eligiblePostIds.filter(id => active.has(id));
   }
 
   async isTransitionPending(organizationId: string) {
@@ -780,7 +973,7 @@ export class SendModeService {
           if (current.mode !== 'AUTONOMOUS' || !current.autonomousAllowed)
             throw new ConflictException('SEND_MODE_SWITCH_UNSAFE');
           transition = {
-            version: 1,
+            version: 2,
             targetMode: 'CONTROLLED',
             requestedAt: new Date().toISOString(),
             requestedByUserId: userId,
@@ -819,6 +1012,9 @@ export class SendModeService {
           blockers: current.blockers,
         });
       }
+      const currentSetting = await tx.settings.findUnique({ where: { key: organizationSendModeKey(organizationId) } });
+      const reallocation = !transition && body.mode === 'CONTROLLED'
+        ? this.parseReallocation(currentSetting?.value) ?? await this.newReallocationIn(tx, organizationId, userId) : null;
       await tx.settings.updateMany({
         where: { key: organizationSendModeKey(organizationId) },
         data: {
@@ -826,6 +1022,7 @@ export class SendModeService {
             mode: transition ? 'AUTONOMOUS' : body.mode,
             revision: current.revision + 1,
             ...(transition ? { transition } : {}),
+            ...(reallocation ? { reallocation } : {}),
           }),
         },
       });
@@ -1561,13 +1758,30 @@ export class SendModeService {
               executionProtocol: true,
               publishDate: true,
               intervalInDays: true,
+              releaseURL: true,
             },
           })
         : null;
+      let retryableError = false;
+      if (post?.state === 'ERROR' && !post.releaseURL &&
+          state.mode === 'AUTONOMOUS' && state.autonomousAllowed && !state.transition) {
+        // A queue failure callback records ERROR even when the browser proved
+        // nothing was submitted. A fresh explicit attempt needs that same proof;
+        // it is new work and never receives a pending-transition drain exception.
+        const receipts = await tx.sendMutationReceipt.findMany({
+          where: { organizationId, userId, operation: AUTONOMOUS_EFFECT_OPERATION, requestHash },
+          select: { result: true },
+        });
+        retryableError = receipts.some(receipt => {
+          const result = this.effectResult(receipt.result);
+          return result.source === 'BROWSER' && result.browserUserId === userId &&
+            result.status === 'NOT_SUBMITTED' && result.postIds?.includes(post.id);
+        });
+      }
       if (
         storedPostId &&
         (!post ||
-          !['DRAFT', 'QUEUE'].includes(post.state) ||
+          (!['DRAFT', 'QUEUE'].includes(post.state) && !retryableError) ||
           post.sendIntentId ||
           !isLegacyExecution(post.executionProtocol))
       )

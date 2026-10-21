@@ -53,6 +53,8 @@ export interface EnqueueSend {
   publishMethod?: 'API' | 'EXTENSION';
   publishDate?: Date;
   sentReplyId?: string;
+  // Internal handover adds provenance checks; it never relaxes enqueue policy.
+  modeHandover?: true;
   selection?: {
     integrationId?: string | null;
     expectedRouteRevision?: number;
@@ -237,6 +239,41 @@ export class SendCoordinatorService {
     return chain;
   }
 
+  async reallocateUnsentLegacy(org: string, userId: string): Promise<Array<{ postId: string; code: string }>> {
+    const roots = await sendTransaction(this.db, async tx => {
+      await this.assertMember(tx, org, userId);
+      await this.assertControlledIn(tx, org);
+      return tx.post.findMany({
+        where: {
+          organizationId: org, deletedAt: null, state: 'QUEUE', parentPostId: null,
+          sendIntentId: null, releaseId: null,
+          OR: [{ executionProtocol: null }, { executionProtocol: { not: 'ACCOUNT_BOUND_V1' } }],
+        },
+        orderBy: { id: 'asc' }, take: 5001,
+      });
+    });
+    if (roots.length > 5000)
+      return [{ postId: roots[5000].id, code: 'SEND_MODE_REALLOCATION_TOO_LARGE' }];
+    const issues: Array<{ postId: string; code: string }> = [];
+    for (const root of roots) {
+      try {
+        const origin = root.sendOrigin === 'MANUAL' || root.sendOrigin === 'AUTOMATION'
+          ? root.sendOrigin
+          : root.source === 'engage' || root.operationPlanId || (root.source && root.source !== 'calendar')
+          ? 'AUTOMATION' : 'MANUAL';
+        await this.enqueue(org, root.id, {
+          userId, origin, modeHandover: true,
+          ...(root.integrationId ? { explicitIntegrationId: root.integrationId } : {}),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '';
+        issues.push({ postId: root.id, code: /^[A-Z][A-Z0-9_]{2,100}$/.test(message)
+          ? message : 'SEND_MODE_REALLOCATION_FAILED' });
+      }
+    }
+    return issues;
+  }
+
   async enqueue(org: string, rootId: string, options: EnqueueSend) {
     await this.enabled(org);
     const now = options.now ?? new Date();
@@ -250,6 +287,25 @@ export class SendCoordinatorService {
       await this.assertControlledIn(tx, org);
       const posts = await this.chain(tx, org, rootId);
       const first = posts[0];
+      if (options.modeHandover) {
+        if (!first.sendIntentId) {
+          if (first.state !== 'QUEUE') reject('CONTENT_NOT_ENQUEUEABLE');
+          if (first.projectId !== root.projectId ||
+              (first.integrationId ?? undefined) !== options.explicitIntegrationId)
+            reject('SEND_CONTENT_CHANGED');
+        }
+        if (posts.some(post => post.releaseURL)) reject('CONTENT_ALREADY_SUBMITTED');
+        const receipts = await tx.sendMutationReceipt.findMany({
+          where: { organizationId: org, operation: 'autonomous-side-effect' },
+          select: { result: true },
+        });
+        const postIds = new Set(posts.map(post => post.id));
+        if (receipts.some(receipt => {
+          const result = receipt.result as { status?: string; postIds?: unknown } | null;
+          return result && result.status !== 'NOT_SUBMITTED' && Array.isArray(result.postIds) &&
+            result.postIds.some(id => postIds.has(id));
+        })) reject('AUTONOMOUS_EFFECT_RECONCILIATION_REQUIRED');
+      }
       const selection = options.selection;
       const receiptKey = {
         organizationId: org, userId: options.userId,
@@ -257,7 +313,7 @@ export class SendCoordinatorService {
       };
       const receiptRequestId = selection?.requestId;
       const fingerprint = receiptRequestId ? sendHash({ rootId, selection }) : '';
-      if (selection || options.sentReplyId) await this.assertMember(tx, org, options.userId);
+      if (selection || options.sentReplyId || options.modeHandover) await this.assertMember(tx, org, options.userId);
       if (receiptRequestId) {
         const receipt = await tx.sendMutationReceipt.findUnique({
           where: { organizationId_userId_operation_requestId: receiptKey },
@@ -368,8 +424,23 @@ export class SendCoordinatorService {
             },
           })
         : null;
+      let origin = options.origin;
+      if (options.modeHandover && first.source === 'engage' && first.sendOrigin == null) {
+        // Legacy manual scheduling claims SCHEDULED and writes an account-bound
+        // API post; the unattended producer claims AUTO_QUEUED instead. The
+        // opportunity status alone cannot identify an older automatic row that
+        // shares a newly scheduled opportunity, so require both durable signals.
+        if (replyState?.status === 'SCHEDULED' && first.publishMethod === 'API' && first.integrationId)
+          origin = 'MANUAL';
+        else if (replyState?.status === 'AUTO_QUEUED') origin = 'AUTOMATION';
+        else reject('SEND_ORIGIN_RECONFIRMATION_REQUIRED');
+      }
+      // A handover keeps the existing manual schedule's claim; a fresh enqueue
+      // must still atomically claim a NEW/AUTO_QUEUED opportunity below.
+      const scheduledHandover = options.modeHandover && origin === 'MANUAL' &&
+        replyState?.status === 'SCHEDULED';
       // Both saved-reply and generic Post entry points must claim the opportunity.
-      if (options.sentReplyId || (reply && options.origin === 'MANUAL')) {
+      if ((options.sentReplyId || (reply && origin === 'MANUAL')) && !scheduledHandover) {
         if (!replyState || !['NEW', 'AUTO_QUEUED'].includes(replyState.status))
           reject('REPLY_OPPORTUNITY_NOT_ACTIONABLE');
         const claimed = await tx.engageOpportunityState.updateMany({
@@ -433,7 +504,7 @@ export class SendCoordinatorService {
           projectId: first.projectId!,
           platform: canonicalControlledPlatform(first.providerIdentifier!),
           action,
-          sendOrigin: options.origin,
+          sendOrigin: origin,
           status: 'QUEUED',
           integrationId: route?.integrationId ?? null,
           canonicalAccountKey: route?.canonicalAccountKey ?? null,
@@ -473,7 +544,7 @@ export class SendCoordinatorService {
           routeRevision: first.routeRevision,
           state: 'QUEUE',
           ...(options.publishDate ? { publishDate: options.publishDate } : {}),
-          sendOrigin: options.origin,
+          sendOrigin: origin,
           // The legacy request field remains accepted; new intents execute through the plugin only.
           publishMethod: 'EXTENSION',
           accountSelectionMode: !route

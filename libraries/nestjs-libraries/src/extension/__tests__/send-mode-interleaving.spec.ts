@@ -26,6 +26,8 @@ it('retries a producer with a stale mode snapshot after concurrent transition fi
     id: 'captured',
     organizationId: 'org',
     state: 'QUEUE',
+    releaseId: 'lease',
+    claimedAt: new Date(),
     publishDate: new Date(),
   });
   const service = new SendModeService(db);

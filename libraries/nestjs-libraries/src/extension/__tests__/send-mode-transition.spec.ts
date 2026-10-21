@@ -42,7 +42,7 @@ afterEach(() => {
 describe('durable sending mode transitions', () => {
   it('snapshots overlapping queued and claimed work once and preserves unsent drafts', async () => {
     const { db, service, post } = setup();
-    post('queued', { releaseId: 'lease', claimedAt: new Date() });
+    post('queued', { releaseId: 'lease', claimedAt: new Date(), publishDate: new Date('2026-10-20T08:00:00Z') });
     post('draft', { state: 'DRAFT', source: 'engage' });
     const first = await service.save('org', 'admin', change());
     expect(first).toMatchObject({
@@ -55,7 +55,7 @@ describe('durable sending mode transitions', () => {
         initialPendingCount: 1,
         remainingCount: 1,
         completedCount: 0,
-        scheduledNotBefore: '2026-10-20T10:00:00.000Z',
+        scheduledNotBefore: null,
         estimatedCompletionAt: null,
       },
     });
@@ -78,7 +78,7 @@ describe('durable sending mode transitions', () => {
   });
   it('completes in the reconciler after the captured work settles without a GET completing it', async () => {
     const { db, service, post } = setup();
-    post('queued');
+    post('queued', { releaseId: 'lease', claimedAt: new Date() });
     await service.save('org', 'admin', change());
     db.rows('post')[0].state = 'PUBLISHED';
     expect(await service.get('org', 'admin')).toMatchObject({
@@ -142,7 +142,7 @@ describe('durable sending mode transitions', () => {
   });
   it('retains the transition when capability is disabled or its requester loses management access', async () => {
     const { db, service, post } = setup();
-    post('queued');
+    post('queued', { releaseId: 'lease', claimedAt: new Date() });
     await service.save('org', 'admin', change());
     db.rows('post')[0].state = 'PUBLISHED';
     vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'false');
@@ -157,7 +157,7 @@ describe('durable sending mode transitions', () => {
   });
   it('cancels with owner, role, revision and idempotency protections', async () => {
     const { db, service, post } = setup();
-    post('queued');
+    post('queued', { releaseId: 'lease', claimedAt: new Date() });
     await service.save('org', 'admin', change());
     const { mode, ...body } = change(1, 'cancel');
     const tasksBefore = structuredClone(db.rows('post'));
@@ -217,25 +217,25 @@ describe('durable sending mode transitions', () => {
       'SEND_MODE_CONFIGURATION_INVALID'
     );
   });
-  it('keeps scheduled recurring templates intact and explicitly requests user action', async () => {
+  it('switches immediately with future recurring work preserved for controlled reallocation', async () => {
     const { db, service, post } = setup();
-    post('recurring', { intervalInDays: 2 });
+    post('recurring', { intervalInDays: 2, publishDate: new Date('2026-12-20T10:00:00Z') });
     const before = structuredClone(db.rows('post'));
     expect(await service.save('org', 'admin', change())).toMatchObject({
-      transition: {
-        status: 'NEEDS_ATTENTION',
-        waitReason: 'RECURRING_SCHEDULE',
-        remainingCount: 1,
-        estimatedCompletionAt: null,
-      },
+      mode: 'CONTROLLED',
+      transition: null,
+      reallocation: { remainingCount: 1, completedCount: 0, blockedCount: 0 },
     });
     expect(db.rows('post')).toEqual(before);
+    expect(await service.pendingReallocations()).toEqual([
+      { organizationId: 'org', userId: 'admin' },
+    ]);
     await service.reconcilePendingTransitions();
-    expect((await service.get('org', 'admin')).mode).toBe('AUTONOMOUS');
+    expect((await service.get('org', 'admin')).mode).toBe('CONTROLLED');
   });
   it('fences fresh effects, permits only captured post occurrences, and replays a settled receipt after automatic switching', async () => {
     const { db, service, post } = setup();
-    post('queued');
+    post('queued', { releaseId: 'lease', claimedAt: new Date() });
     db.seed('integration', {
       id: 'account',
       organizationId: 'org',
@@ -281,24 +281,29 @@ describe('durable sending mode transitions', () => {
     ).toEqual([{ postId: 'remote' }]);
     expect(work).toHaveBeenCalledTimes(1);
   });
-  it('never completes when an uncaptured queue admission is detected', async () => {
+  it('fences uncaptured queue work while draining and preserves it for reallocation after settlement', async () => {
     const { db, service, post } = setup();
-    post('captured');
+    post('captured', { releaseId: 'lease', claimedAt: new Date() });
     await service.save('org', 'admin', change());
-    db.rows('post')[0].state = 'PUBLISHED';
     post('unexpected');
     expect(await service.get('org', 'admin')).toMatchObject({
-      transition: { status: 'NEEDS_ATTENTION', remainingCount: 1 },
+      mode: 'AUTONOMOUS', transition: { status: 'DRAINING', remainingCount: 1 },
     });
-    await expect(
-      service.assertAutonomousIn(db, 'org', ['unexpected'])
-    ).rejects.toThrow('SEND_MODE_TRANSITION_PENDING');
+    await expect(service.assertAutonomousIn(db, 'org', ['unexpected']))
+      .rejects.toThrow('SEND_MODE_TRANSITION_PENDING');
+    db.rows('post')[0].state = 'PUBLISHED';
     await service.reconcilePendingTransitions();
-    expect((await service.get('org', 'admin')).mode).toBe('AUTONOMOUS');
+    expect(await service.get('org', 'admin')).toMatchObject({
+      mode: 'CONTROLLED', transition: null,
+      reallocation: { remainingCount: 1, completedCount: 0 },
+    });
+    expect(db.rows('post').find((row: any) => row.id === 'unexpected')).toMatchObject({
+      state: 'QUEUE', deletedAt: null,
+    });
   });
   it('serializes a final reconciliation racing a new autonomous admission', async () => {
     const { db, service, post } = setup();
-    post('captured');
+    post('captured', { releaseId: 'lease', claimedAt: new Date() });
     await service.save('org', 'admin', change());
     db.rows('post')[0].state = 'PUBLISHED';
     const outcomes = await Promise.allSettled([
@@ -355,7 +360,7 @@ describe('durable sending mode transitions', () => {
       key: organizationSendModeKey('broken'),
       value: { mode: 'AUTONOMOUS', revision: 1, transition: { version: 1 } },
     });
-    post('queued');
+    post('queued', { releaseId: 'lease', claimedAt: new Date() });
     await service.save('org', 'admin', change());
     db.rows('post')[0].state = 'PUBLISHED';
     await service.reconcilePendingTransitions();

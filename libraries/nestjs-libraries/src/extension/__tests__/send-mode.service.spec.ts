@@ -212,17 +212,24 @@ describe('organization sending mode', () => {
       'legacyClaims',
     ],
   ])(
-    'captures unfinished autonomous work and preserves unclaimed drafts in %s',
+    'drains active claims while preserving unstarted work in %s',
     async (table, fields, blocker) => {
       vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true');
       const { db, service } = setup();
       db.seed(table, { organizationId: 'org', ...fields });
       const result = await service.save('org', 'admin', save('CONTROLLED'));
-      if (blocker === 'legacyReplyDrafts') {
-        expect(result).toMatchObject({ mode: 'CONTROLLED', transition: null });
-        expect(db.rows('post')[0].state).toBe('DRAFT');
-      } else {
+      if (blocker === 'legacyClaims') {
         expect(result).toMatchObject({ mode: 'AUTONOMOUS', transition: { remainingCount: 1 } });
+        expect(db.rows('post')[0]).toMatchObject({ state: 'ERROR', releaseId: 'lease' });
+      } else {
+        expect(result).toMatchObject({ mode: 'CONTROLLED', transition: null });
+        if (blocker === 'legacyReplyDrafts') {
+          expect(db.rows('post')[0].state).toBe('DRAFT');
+          expect(result.reallocation).toBeNull();
+        } else {
+          expect(db.rows('post')[0]).toMatchObject({ state: 'QUEUE', deletedAt: null });
+          expect(result.reallocation).toMatchObject({ remainingCount: 1, completedCount: 0 });
+        }
       }
       expect(db.rows('sendMutationReceipt')).toHaveLength(1);
     }

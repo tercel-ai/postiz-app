@@ -115,6 +115,8 @@ describe('durable browser write admission', () => {
       id: 'queued',
       organizationId: 'org',
       state: 'QUEUE',
+      releaseId: 'lease',
+      claimedAt: new Date(),
       providerIdentifier: 'x',
       publishDate: new Date(),
     });
@@ -237,6 +239,8 @@ describe('durable browser write admission', () => {
       id: 'queued',
       organizationId: 'org',
       state: 'QUEUE',
+      releaseId: 'lease',
+      claimedAt: new Date(),
       providerIdentifier: 'x',
       publishDate: new Date('2026-10-20'),
     });

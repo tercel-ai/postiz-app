@@ -4,6 +4,7 @@ import {
   OnApplicationBootstrap,
   OnApplicationShutdown,
 } from '@nestjs/common';
+import { SendCoordinatorService } from '@gitroom/nestjs-libraries/extension/send-coordinator.service';
 import { SendModeService } from '@gitroom/nestjs-libraries/extension/send-mode.service';
 
 @Injectable()
@@ -16,7 +17,10 @@ export class SendModeTransitionReconciliationService
   private timer?: NodeJS.Timeout;
   private running = false;
 
-  constructor(private readonly modes: SendModeService) {}
+  constructor(
+    private readonly modes: SendModeService,
+    private readonly coordinator: SendCoordinatorService
+  ) {}
 
   onApplicationBootstrap(): void {
     const run = async () => {
@@ -24,6 +28,23 @@ export class SendModeTransitionReconciliationService
       this.running = true;
       try {
         await this.modes.reconcilePendingTransitions();
+        for (const pending of await this.modes.pendingReallocations()) {
+          try {
+            const issues = await this.coordinator.reallocateUnsentLegacy(
+              pending.organizationId,
+              pending.userId
+            );
+            await this.modes.recordReallocationIssues(
+              pending.organizationId,
+              issues
+            );
+          } catch (error) {
+            this.logger.error(
+              `Sending mode reallocation failed for organization ${pending.organizationId}`,
+              error instanceof Error ? error.stack : error
+            );
+          }
+        }
       } catch (error) {
         this.logger.error(
           'Sending mode transition reconciliation failed',
