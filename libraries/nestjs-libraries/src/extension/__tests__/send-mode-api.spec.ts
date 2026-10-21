@@ -9,6 +9,7 @@ import {
   BeginBrowserWriteDto,
   BrowserWriteOutcomeDto,
   ResolveAutonomousEffectDto,
+  ResolveLegacyReplyRecoveryDto,
   SaveSendModeDto,
   SaveSystemSendModeDto,
 } from '../send-mode.dto';
@@ -18,6 +19,30 @@ import {
 } from '../send-mode.service';
 
 describe('sending mode API and Settings isolation', () => {
+  it('requires explicit administrator evidence and a complete recovery snapshot for historical claim repair', async () => {
+    const body = { expectedOrganizationId: 'org', expectedUserId: 'admin', requestId: 'repair',
+      expectedRecoveryRevision: 'a'.repeat(64), executorStopped: true, noPendingSubmit: true,
+      replyAbsent: true, evidence: 'Original workers stopped; target checked.' };
+    expect(await validate(plainToInstance(ResolveLegacyReplyRecoveryDto, body))).toEqual([]);
+    for (const patch of [{ expectedRecoveryRevision: 'stale' }, { replyAbsent: false },
+      { executorStopped: false }, { noPendingSubmit: false }, { evidence: ' ' },
+      { evidence: 'x'.repeat(2001) }, { requestId: '' }, { expectedUserId: undefined }])
+      expect(await validate(plainToInstance(ResolveLegacyReplyRecoveryDto, { ...body, ...patch }))).not.toEqual([]);
+  });
+  it('routes historical reply inspection and resolution using authenticated organization and administrator identities', async () => {
+    const modes = { getLegacyReplyRecovery: vi.fn(), resolveLegacyReplyRecovery: vi.fn() };
+    const controller = new SendModeController(modes as any);
+    const body = { expectedOrganizationId: 'org', expectedUserId: 'admin', requestId: 'repair',
+      expectedRecoveryRevision: 'a'.repeat(64), executorStopped: true as const, noPendingSubmit: true as const,
+      replyAbsent: true as const, evidence: 'Workers stopped and platform inspected.' };
+    controller.getLegacyReplyRecovery({ id: 'org' } as any, { id: 'admin' } as any, 'reply');
+    controller.resolveLegacyReplyRecovery({ id: 'org' } as any, { id: 'admin' } as any, 'reply', body);
+    expect(modes.getLegacyReplyRecovery).toHaveBeenCalledWith('org', 'admin', 'reply');
+    expect(modes.resolveLegacyReplyRecovery).toHaveBeenCalledWith('org', 'admin', 'reply', body);
+    expect(Reflect.getMetadata('path', controller.getLegacyReplyRecovery)).toBe('/replies/:id/legacy-recovery');
+    expect(Reflect.getMetadata('path', controller.resolveLegacyReplyRecovery)).toBe('/replies/:id/legacy-recovery');
+  });
+
   it('validates browser write ownership, stable content identities and safe outcome proof', async () => {
     const owner = { expectedOrganizationId: 'org', expectedUserId: 'user' };
     const begin = {

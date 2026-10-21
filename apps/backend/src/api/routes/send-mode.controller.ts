@@ -9,6 +9,7 @@ import {
   BrowserWriteOutcomeDto,
   CancelSendModeTransitionDto,
   ResolveAutonomousEffectDto,
+  ResolveLegacyReplyRecoveryDto,
   SaveSendModeDto,
 } from '@gitroom/nestjs-libraries/extension/send-mode.dto';
 
@@ -70,6 +71,27 @@ export class SendModeController {
     @Body() body: BrowserWriteOutcomeDto
   ) {
     return this.modes.settleBrowserWrite(org.id, user.id, id, body);
+  }
+
+  @Get('/replies/:id/legacy-recovery')
+  @ApiOperation({ summary: 'Inspect a historical reply claim and all relevant receipt outcomes' })
+  getLegacyReplyRecovery(
+    @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
+    @Param('id') id: string
+  ) {
+    return this.modes.getLegacyReplyRecovery(org.id, user.id, id);
+  }
+
+  @Post('/replies/:id/legacy-recovery')
+  @ApiOperation({ summary: 'Audit administrator proof and release only the reviewed historical reply ownership' })
+  resolveLegacyReplyRecovery(
+    @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
+    @Param('id') id: string,
+    @Body() body: ResolveLegacyReplyRecoveryDto
+  ) {
+    return this.modes.resolveLegacyReplyRecovery(org.id, user.id, id, body);
   }
 
   @Get('/autonomous-effects')

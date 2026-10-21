@@ -125,3 +125,28 @@ export class BrowserWriteOutcomeDto extends BrowserWriteOwnerDto {
   @MaxLength(4096)
   url?: string;
 }
+
+export class ResolveLegacyReplyRecoveryDto extends BrowserWriteOwnerDto {
+  @IsString()
+  @Matches(/\S/)
+  @MaxLength(128)
+  requestId!: string;
+
+  @IsString()
+  @Matches(/^[a-f0-9]{64}$/)
+  expectedRecoveryRevision!: string;
+
+  @IsIn([true])
+  executorStopped!: true;
+
+  @IsIn([true])
+  noPendingSubmit!: true;
+
+  @IsIn([true])
+  replyAbsent!: true;
+
+  @IsString()
+  @Matches(/\S/)
+  @MaxLength(2000)
+  evidence!: string;
+}

@@ -200,3 +200,95 @@ Project/Post/Reply 继续使用 `GET /projects/:projectId/sending-context` 获�
 必须验证：默认自主、显式受控、系统暂停、权限和组织隔离、模式写入幂等、并发切换/领取/授权、迟到回调、UNKNOWN 不重发、配额只结算一次、本机日志恢复，以及注册失败不降级。
 
 本次验证结果、逐项测试对应和未覆盖的真实环境边界见 [验收记录](../planning/organization-sending-modes/verification.md)。
+
+
+## Historical saved reply ownership recovery
+
+`GET /sending/mode/autonomous-effects` lists only `AUTHORIZED` and `UNKNOWN`
+effects. An empty list does not exclude a held historical claim, captured mode
+ownership, or a terminal `CONFIRMED` receipt. Replaying an acknowledged
+`NOT_SUBMITTED` browser outcome does not invent a missing historical claim binding.
+
+Organization administrators can inspect one saved reply with:
+
+```http
+GET /sending/mode/replies/:sentReplyId/legacy-recovery
+```
+
+This organization-scoped diagnostic includes all related receipt statuses and
+revisions, safe claim-binding classifications (`MISSING`, `MATCH`, `CHANGED`),
+claim time, captured ownership, blocking Post IDs, eligibility reasons, and an
+opaque `recoveryRevision`. It does not expose lease tokens, request hashes,
+credentials, or reply content. It is an organization-level reconciliation read;
+normal project access and activation checks still apply to any subsequent send.
+
+Only after checking the actual platform and stopping all original executors may
+an administrator submit:
+
+```http
+POST /sending/mode/replies/:sentReplyId/legacy-recovery
+Content-Type: application/json
+
+{
+  "expectedOrganizationId": "authenticated-organization",
+  "expectedUserId": "acting-administrator",
+  "requestId": "new-unique-recovery-request",
+  "expectedRecoveryRevision": "opaque-revision-from-the-diagnostic",
+  "executorStopped": true,
+  "noPendingSubmit": true,
+  "replyAbsent": true,
+  "evidence": "Actual executor-stop and platform-verification evidence"
+}
+```
+
+These flags are human attestations, not conclusions inferred from an old error,
+missing reply URL, elapsed time, or a local journal. The original browser owner
+may differ from the acting organization administrator. Node credentials do not
+grant administrator authority.
+
+Recovery is restricted to one nonrecurring legacy Engage root in `DRAFT` or
+`QUEUE`, with no children, publication evidence, removal, controlled intent, or
+API publication method. At least one matching single-reply browser receipt is
+required, and every related receipt must be `NOT_SUBMITTED`. Confirmed or
+uncertain receipts remain blocked. The opportunity must still be `NEW` or
+`AUTO_QUEUED`; expired, dismissed, replied, and separately scheduled opportunities
+are not reopened by this operation.
+
+The server rechecks the complete snapshot under the organization mode lock,
+requires configured controlled mode, and uses compare-and-set for the current
+claim and captured ownership. A change returns `LEGACY_REPLY_RECOVERY_CHANGED`.
+Only the selected claim and matching captured ID/occurrence entry are cleared;
+activity time, mode revision, unrelated tasks, opportunity status, content, and
+original receipts remain intact. The existing mutation-receipt table records a
+separate idempotent audit with administrator identity, evidence, proof receipt
+IDs, and an opaque claim fingerprint. It never fabricates a historical binding.
+
+Success returns `nextAction: CHECK_REPLY_STATUS`. Re-read the normal reply status
+and use ordinary Retry only when its current actions allow sending. Recovery
+does not enqueue, claim a controlled execution, reserve quota, or post a comment.
+
+### Design decisions: historical recovery API
+
+- Necessity: the historical incident has settled browser non-submissions but
+  remains blocked after outcome replay. The existing pending-effect inventory
+  omits the facts required to diagnose it and offers no audited historical-claim
+  reconciliation. One scoped GET/POST resource provides inspection and a guarded
+  administrator action without a separate retry queue or schema.
+- Scale: this is an explicit, infrequent administrator action. It reuses the
+  existing organization receipt scan and the exact legacy-blocker calculation;
+  it is not added to periodic status polling. Reply lookup uses existing IDs and
+  organization constraints. The existing legacy scan bound remains in force.
+- Volatility: historical fields remain compatible. New proof and audit data use
+  the existing JSON receipt representation, keeping schema and legacy outcomes
+  unchanged.
+- Migration and rollback: no schema migration, data backfill, or live database
+  repair script is needed. Deploying code adds the resource; reverting code
+  preserves audits and leaves unresolved ownership protected.
+- External contract: both routes and their DTO are additive. Existing status,
+  enqueue, settlement, and administrator-resolution contracts are unchanged.
+  Snapshot revisions cover stable, sorted durable facts and reject stale repair.
+- Cheaper alternative: replaying existing outcomes is already supported and was
+  attempted successfully, but cannot release unbound or uncaptured historical
+  ownership. Broadly clearing claims or reopening opportunities would discard
+  required evidence; a dedicated guarded administrator action is the smaller
+  safe repair.

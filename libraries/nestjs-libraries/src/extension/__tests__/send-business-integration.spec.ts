@@ -123,6 +123,38 @@ describe('saved reply enqueue contract', () => {
 });
 
 describe('simple saved reply business idempotency', () => {
+  it('reconciles an unbound historical claim, then enqueues the same eligible saved reply exactly once through normal policy', async () => {
+    const { service, db } = await draft();
+    db.rows('userOrganization')[0].role = 'ADMIN';
+    const post = db.rows('post')[0];
+    Object.assign(post, { executionProtocol: 'LEGACY', state: 'QUEUE', publishMethod: 'EXTENSION',
+      releaseId: 'historical-claim', claimedAt: sendNow });
+    db.seed('engageOpportunity', { id: 'opp', platform: 'x', externalPostUrl: 'https://x.com/u/status/target' });
+    db.seed('sendMutationReceipt', { id: 'proof', organizationId: 'org', userId: 'old-browser',
+      operation: 'autonomous-side-effect', requestId: 'proof-request', requestHash: 'old-hash',
+      result: { source: 'BROWSER', platform: 'x', browserUserId: 'old-browser', integrationId: 'browser:old-browser:x',
+        action: 'COMMENT', postIds: ['root'], recurring: false, occurrenceKey: 'single', status: 'NOT_SUBMITTED', revision: 2 } });
+    await expect(service.enqueueSavedReply('org', 'user', 'reply', { sentReplyId: 'reply' }))
+      .rejects.toThrow('LEGACY_CONTENT_DRAIN_REQUIRED');
+    const modes = new SendModeService(db);
+    const diagnosis = await modes.getLegacyReplyRecovery('org', 'user', 'reply');
+    expect(diagnosis.canResolve).toBe(true);
+    await modes.resolveLegacyReplyRecovery('org', 'user', 'reply', {
+      expectedOrganizationId: 'org', expectedUserId: 'user', requestId: 'recover-historical',
+      expectedRecoveryRevision: diagnosis.recoveryRevision,
+      executorStopped: true, noPendingSubmit: true, replyAbsent: true,
+      evidence: 'All old workers stopped; platform target checked and reply absent.',
+    });
+    await service.enqueueSavedReply('org', 'user', 'reply', { sentReplyId: 'reply' });
+    await service.enqueueSavedReply('org', 'user', 'reply', { sentReplyId: 'reply' });
+    expect(db.rows('sendIntent')).toHaveLength(1);
+    expect(db.rows('post')).toHaveLength(1);
+    expect(db.rows('engageSentReply')).toHaveLength(1);
+    expect(db.rows('engageOpportunityState')[0].status).toBe('SCHEDULED');
+    expect(db.rows('sendExecution')).toEqual([]);
+    expect(db.rows('sendQuotaReservation')).toEqual([]);
+  });
+
   const simple = { sentReplyId: 'reply', integrationId: 'account' };
 
   it('accepts a real two-field controller request without frontend revisions or request ids', async () => {

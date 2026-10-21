@@ -14,6 +14,7 @@ import {
   BrowserWriteOutcomeDto,
   CancelSendModeTransitionDto,
   ResolveAutonomousEffectDto,
+  ResolveLegacyReplyRecoveryDto,
   SaveSendModeDto,
   SaveSystemSendModeDto,
 } from './send-mode.dto';
@@ -2110,6 +2111,126 @@ export class SendModeService {
       if (saved.count !== 1) throw retryConflict();
       await this.releaseUnsentReplyClaimIn(tx, organizationId, next);
       return { id, status: next.status, organizationId, userId };
+    });
+  }
+
+  private async legacyReplyRecoveryIn(tx: Prisma.TransactionClient, organizationId: string, sentReplyId: string) {
+    const reply = await tx.engageSentReply.findFirst({ where: { id: sentReplyId, organizationId } });
+    const post = reply ? await tx.post.findFirst({ where: { id: reply.postId, organizationId } }) : null;
+    if (!reply || !post) throw new BadRequestException('LEGACY_REPLY_NOT_FOUND');
+    const [setting, opportunity, opportunityState, children, records, active] = await Promise.all([
+      tx.settings.findUnique({ where: { key: organizationSendModeKey(organizationId) } }),
+      tx.engageOpportunity.findUnique({ where: { id: reply.opportunityId } }),
+      tx.engageOpportunityState.findFirst({ where: { organizationId, projectId: post.projectId, opportunityId: reply.opportunityId } }),
+      tx.post.findMany({ where: { organizationId, parentPostId: post.id }, orderBy: { id: 'asc' } }),
+      this.autonomousRecordsIn(tx, organizationId),
+      this.activeLegacyPostIdsIn(tx, organizationId),
+    ]);
+    const config = this.parseOrganization(setting?.value);
+    const capturedWork = config.legacyDrain ?? config.transition;
+    const captured = !!capturedWork?.eligiblePostIds.includes(post.id);
+    const relatedIds = new Set([post.id, ...children.map(child => child.id)]);
+    const receipts = records.filter(({ result }) => result.postIds?.some(id => relatedIds.has(id)))
+      .sort((a, b) => a.row.id.localeCompare(b.row.id));
+    const blockingPostIds = active.filter(id => relatedIds.has(id)).sort();
+    const platform = opportunity?.platform ? this.browserPlatform(opportunity.platform) : null;
+    const occurrence = post.publishDate ? new Date(post.publishDate).toISOString() : null;
+    const reasons: string[] = [];
+    if (config.mode !== 'CONTROLLED') reasons.push('CONTROLLED_MODE_REQUIRED');
+    if (!['DRAFT', 'QUEUE'].includes(post.state) || !isLegacyExecution(post.executionProtocol) || post.sendIntentId ||
+      post.deletedAt || post.removedAt || reply.removedAt || post.releaseURL || post.source !== 'engage' ||
+      !post.projectId || post.projectId !== reply.projectId || post.intervalInDays || post.publishMethod === 'API' ||
+      !platform || this.browserPlatform(post.providerIdentifier ?? '') !== platform)
+      reasons.push('CONTENT_NOT_RECOVERABLE');
+    if (post.parentPostId || children.length) reasons.push('THREAD_NOT_SUPPORTED');
+    if (!opportunity || opportunity.deletedAt || opportunity.repliesDisabledAt ||
+      !opportunityState || !['NEW', 'AUTO_QUEUED'].includes(opportunityState.status))
+      reasons.push('OPPORTUNITY_NOT_ACTIONABLE');
+    if (captured && capturedWork!.eligiblePostOccurrences[post.id] !== occurrence)
+      reasons.push('CAPTURED_OCCURRENCE_CHANGED');
+    if (receipts.some(({ result }) => result.status === 'CONFIRMED')) reasons.push('CONFIRMED_RECEIPT');
+    if (receipts.some(({ result }) => ['AUTHORIZED', 'UNKNOWN'].includes(result.status))) reasons.push('UNRESOLVED_RECEIPT');
+    if (!receipts.length || receipts.some(({ result }) => result.source !== 'BROWSER' || result.action !== 'COMMENT' ||
+      result.postIds?.length !== 1 || result.postIds[0] !== post.id || result.platform !== platform ||
+      result.recurring !== false || result.occurrenceKey !== 'single')) reasons.push('RECEIPT_PROOF_REQUIRED');
+    if (!blockingPostIds.includes(post.id)) reasons.push('NO_LEGACY_OWNERSHIP');
+    // Hash the private claim and all relevant durable facts; never expose a lease token.
+    const recoveryRevision = sendHash({ reply, post, opportunity, opportunityState, children,
+      setting: setting?.value, receipts, blockingPostIds });
+    const view = {
+      organizationId, sentReplyId, postId: post.id, recoveryRevision, canResolve: reasons.length === 0, reasons,
+      state: post.state, opportunityStatus: opportunityState?.status ?? null,
+      claimPresent: !!post.releaseId, claimedAt: post.claimedAt?.toISOString() ?? null,
+      captured, blockingPostIds,
+      receipts: receipts.map(({ row, result }) => ({
+        id: row.id, status: result.status, revision: result.revision,
+        source: result.source ?? 'SERVER', platform: result.platform ?? null,
+        claimBinding: !result.legacyClaim ? 'MISSING' : result.legacyClaim.releaseId === post.releaseId &&
+          Date.parse(result.legacyClaim.claimedAt) === post.claimedAt?.getTime() ? 'MATCH' : 'CHANGED',
+      })),
+    };
+    return { view, post, setting, capturedWork };
+  }
+
+  async getLegacyReplyRecovery(organizationId: string, userId: string, sentReplyId: string) {
+    return sendTransaction(this.db, async tx => {
+      const member = await this.memberIn(tx, organizationId, userId);
+      if (!['ADMIN', 'SUPERADMIN'].includes(member.role)) throw new ForbiddenException('ORGANIZATION_ADMIN_REQUIRED');
+      return { ...(await this.legacyReplyRecoveryIn(tx, organizationId, sentReplyId)).view, userId };
+    });
+  }
+
+  async resolveLegacyReplyRecovery(organizationId: string, userId: string, sentReplyId: string, body: ResolveLegacyReplyRecoveryDto) {
+    this.browserOwner(organizationId, userId, body);
+    if (typeof body.requestId !== 'string' || !body.requestId.trim() || body.requestId.length > 128 ||
+      typeof body.expectedRecoveryRevision !== 'string' || !/^[a-f0-9]{64}$/.test(body.expectedRecoveryRevision) ||
+      body.executorStopped !== true || body.noPendingSubmit !== true || body.replyAbsent !== true ||
+      typeof body.evidence !== 'string' || !body.evidence.trim() || body.evidence.length > 2000)
+      throw new BadRequestException('INVALID_LEGACY_REPLY_RECOVERY');
+    return sendTransaction(this.db, async tx => {
+      const member = await this.memberIn(tx, organizationId, userId);
+      if (!['ADMIN', 'SUPERADMIN'].includes(member.role)) throw new ForbiddenException('ORGANIZATION_ADMIN_REQUIRED');
+      await this.lockIn(tx, organizationId);
+      const key = { organizationId, userId, operation: 'legacy-reply-recovery', requestId: body.requestId };
+      const requestHash = sendHash({ sentReplyId, expectedRecoveryRevision: body.expectedRecoveryRevision,
+        executorStopped: body.executorStopped, noPendingSubmit: body.noPendingSubmit,
+        replyAbsent: body.replyAbsent, evidence: body.evidence });
+      const previous = await tx.sendMutationReceipt.findUnique({ where: { organizationId_userId_operation_requestId: key } });
+      if (previous) {
+        if (previous.requestHash !== requestHash) throw new ConflictException('REQUEST_ID_CONFLICT');
+        return previous.result;
+      }
+      const { view, post, setting, capturedWork } = await this.legacyReplyRecoveryIn(tx, organizationId, sentReplyId);
+      if (view.recoveryRevision !== body.expectedRecoveryRevision) throw new ConflictException('LEGACY_REPLY_RECOVERY_CHANGED');
+      if (!view.canResolve) throw new ConflictException({ message: 'LEGACY_REPLY_RECOVERY_UNSAFE', reasons: view.reasons });
+      const saved = await tx.post.updateMany({
+        where: { id: post.id, organizationId, deletedAt: null, sendIntentId: null,
+          executionProtocol: post.executionProtocol ?? null, state: post.state,
+          releaseId: post.releaseId ?? null, claimedAt: post.claimedAt ?? null,
+          routeRevision: post.routeRevision, contentRevision: post.contentRevision, releaseURL: null },
+        data: { releaseId: null },
+      });
+      if (saved.count !== 1) throw new ConflictException('LEGACY_REPLY_RECOVERY_CHANGED');
+      if (view.captured) {
+        const value = setting!.value as Prisma.JsonObject;
+        const occurrences = { ...capturedWork!.eligiblePostOccurrences };
+        delete occurrences[post.id];
+        const field = value.legacyDrain ? 'legacyDrain' : 'transition';
+        const updated = await tx.settings.updateMany({
+          where: { key: organizationSendModeKey(organizationId), value: { equals: setting!.value as Prisma.InputJsonValue } },
+          data: { value: sendJson({ ...value, [field]: { ...capturedWork,
+            eligiblePostIds: capturedWork!.eligiblePostIds.filter(id => id !== post.id), eligiblePostOccurrences: occurrences } }) },
+        });
+        if (updated.count !== 1) throw new ConflictException('LEGACY_REPLY_RECOVERY_CHANGED');
+      }
+      const result = { resolved: true, organizationId, userId, sentReplyId, postId: post.id,
+        recoveryRevision: view.recoveryRevision, receiptIds: view.receipts.map(receipt => receipt.id),
+        claimFingerprint: sendHash({ releaseId: post.releaseId, claimedAt: post.claimedAt }),
+        claimedAt: view.claimedAt, capturedOwnershipReleased: view.captured,
+        executorStopped: true, noPendingSubmit: true, replyAbsent: true, evidence: body.evidence,
+        nextAction: 'CHECK_REPLY_STATUS' };
+      await tx.sendMutationReceipt.create({ data: { ...key, requestHash, result: sendJson(result) } });
+      return result;
     });
   }
 
