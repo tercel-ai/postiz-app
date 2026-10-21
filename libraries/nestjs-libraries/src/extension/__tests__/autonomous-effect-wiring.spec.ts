@@ -71,7 +71,7 @@ describe('autonomous plug retries with durable receipts', () => {
     expect(await service.processPlugs(data)).toBe(true);
     expect(network).toHaveBeenCalledOnce();
   });
-  it('retains an uncertain platform outcome and refuses Temporal retry and mode switching', async () => {
+  it('retains an uncertain platform outcome and refuses Temporal retry while allowing immediate controlled mode', async () => {
     const network = vi.fn().mockRejectedValue(new Error('response lost'));
     const { service, effects, data, db } = realPlug(network);
     await expect(service.processPlugs(data)).rejects.toThrow('AUTONOMOUS_EFFECT_RECONCILIATION_REQUIRED');
@@ -80,9 +80,9 @@ describe('autonomous plug retries with durable receipts', () => {
     expect((await effects.stateIn(db, 'org')).blockers.autonomousEffects).toBe(1);
     expect(await effects.save('org', 'owner', { mode: 'CONTROLLED', expectedRevision: 0,
       expectedOrganizationId: 'org', expectedUserId: 'owner', requestId: 'switch' }))
-      .toMatchObject({ mode: 'AUTONOMOUS', transition: { status: 'NEEDS_ATTENTION', waitReason: 'RECONCILIATION_REQUIRED', remainingCount: 1 } });
+      .toMatchObject({ mode: 'CONTROLLED', legacyDrain: { status: 'NEEDS_ATTENTION', waitReason: 'RECONCILIATION_REQUIRED', remainingCount: 1 } });
     await effects.reconcilePendingTransitions();
-    expect((await effects.stateIn(db, 'org')).mode).toBe('AUTONOMOUS');
+    expect((await effects.stateIn(db, 'org')).mode).toBe('CONTROLLED');
   });
 });
 

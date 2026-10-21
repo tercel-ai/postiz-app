@@ -46,10 +46,10 @@ describe('durable sending mode transitions', () => {
     post('draft', { state: 'DRAFT', source: 'engage' });
     const first = await service.save('org', 'admin', change());
     expect(first).toMatchObject({
-      mode: 'AUTONOMOUS',
-      autonomousAllowed: true,
+      mode: 'CONTROLLED',
+      autonomousAllowed: false,
       revision: 1,
-      transition: {
+      legacyDrain: {
         targetMode: 'CONTROLLED',
         status: 'DRAINING',
         initialPendingCount: 1,
@@ -64,7 +64,7 @@ describe('durable sending mode transitions', () => {
       'DRAFT'
     );
     await expect(service.assertAutonomousIn(db, 'org')).rejects.toThrow(
-      'SEND_MODE_TRANSITION_PENDING'
+      'SEND_MODE_AUTONOMOUS_REQUIRED'
     );
     await expect(
       service.assertAutonomousIn(db, 'org', ['queued'])
@@ -72,27 +72,25 @@ describe('durable sending mode transitions', () => {
     await expect(
       service.assertAutonomousIn(db, 'org', ['queued', 'new'])
     ).rejects.toThrow('SEND_MODE_TRANSITION_PENDING');
-    expect(await service.autonomousDrainPostIdsIn(db, 'org')).toEqual([
-      'queued',
-    ]);
+    expect(await service.autonomousDrainPostIdsIn(db, 'org')).toEqual([]);
   });
-  it('completes in the reconciler after the captured work settles without a GET completing it', async () => {
+  it('clears independent settlement without changing the already committed mode revision', async () => {
     const { db, service, post } = setup();
     post('queued', { releaseId: 'lease', claimedAt: new Date() });
     await service.save('org', 'admin', change());
     db.rows('post')[0].state = 'PUBLISHED';
     expect(await service.get('org', 'admin')).toMatchObject({
-      mode: 'AUTONOMOUS',
-      transition: { remainingCount: 0 },
+      mode: 'CONTROLLED',
+      legacyDrain: { remainingCount: 0 },
     });
     await service.reconcilePendingTransitions();
     expect(await service.get('org', 'admin')).toMatchObject({
       mode: 'CONTROLLED',
-      revision: 2,
-      transition: null,
+      revision: 1,
+      transition: null, legacyDrain: null,
     });
     await service.reconcilePendingTransitions();
-    expect((await service.get('org', 'admin')).revision).toBe(2);
+    expect((await service.get('org', 'admin')).revision).toBe(1);
   });
   it('does not block on an unclaimed engage draft', async () => {
     const { service, post } = setup();
@@ -102,7 +100,7 @@ describe('durable sending mode transitions', () => {
       transition: null,
     });
   });
-  it('shows uncertain sends as requiring attention and completes only after settlement', async () => {
+  it('keeps uncertain sends in independent settlement while controlled mode remains active', async () => {
     const { db, service, post } = setup();
     post('queued');
     db.seed('sendMutationReceipt', {
@@ -122,7 +120,7 @@ describe('durable sending mode transitions', () => {
       },
     });
     expect(await service.save('org', 'admin', change())).toMatchObject({
-      transition: {
+      legacyDrain: {
         status: 'NEEDS_ATTENTION',
         waitReason: 'RECONCILIATION_REQUIRED',
         initialPendingCount: 1,
@@ -131,7 +129,7 @@ describe('durable sending mode transitions', () => {
     });
     db.rows('post')[0].state = 'PUBLISHED';
     await service.reconcilePendingTransitions();
-    expect((await service.get('org', 'admin')).mode).toBe('AUTONOMOUS');
+    expect((await service.get('org', 'admin')).mode).toBe('CONTROLLED');
     db
       .rows('sendMutationReceipt')
       .find(
@@ -140,25 +138,26 @@ describe('durable sending mode transitions', () => {
     await service.reconcilePendingTransitions();
     expect((await service.get('org', 'admin')).mode).toBe('CONTROLLED');
   });
-  it('retains the transition when capability is disabled or its requester loses management access', async () => {
+  it('keeps independent legacy settlement while capability or requester access changes', async () => {
     const { db, service, post } = setup();
     post('queued', { releaseId: 'lease', claimedAt: new Date() });
     await service.save('org', 'admin', change());
-    db.rows('post')[0].state = 'PUBLISHED';
     vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'false');
     await service.reconcilePendingTransitions();
     expect(await service.get('org', 'admin')).toMatchObject({
-      transition: { status: 'NEEDS_ATTENTION', waitReason: 'SYSTEM_DISABLED' },
+      legacyDrain: { status: 'NEEDS_ATTENTION', waitReason: 'SYSTEM_DISABLED' },
     });
     vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true');
     db.rows('userOrganization')[0].role = 'USER';
     await service.reconcilePendingTransitions();
-    expect((await service.get('org', 'admin')).mode).toBe('AUTONOMOUS');
+    expect((await service.get('org', 'admin')).mode).toBe('CONTROLLED');
   });
   it('cancels with owner, role, revision and idempotency protections', async () => {
     const { db, service, post } = setup();
     post('queued', { releaseId: 'lease', claimedAt: new Date() });
     await service.save('org', 'admin', change());
+    const setting = db.rows('settings').find(row => row.key === organizationSendModeKey('org'));
+    setting.value = { mode: 'AUTONOMOUS', revision: 1, transition: setting.value.legacyDrain };
     const { mode, ...body } = change(1, 'cancel');
     const tasksBefore = structuredClone(db.rows('post'));
     const result = await service.cancelTransition('org', 'admin', body);
@@ -182,7 +181,9 @@ describe('durable sending mode transitions', () => {
       const { db, service, post } = setup();
       post('queued', { releaseId: 'lease', claimedAt: new Date() });
       await service.save('org', 'admin', change());
-      const { mode, ...body } = change(1, 'cancel');
+      const setting = db.rows('settings').find(row => row.key === organizationSendModeKey('org'));
+    setting.value = { mode: 'AUTONOMOUS', revision: 1, transition: setting.value.legacyDrain };
+    const { mode, ...body } = change(1, 'cancel');
       if (changed === 'organization') body.expectedOrganizationId = 'other';
       if (changed === 'user') body.expectedUserId = 'other';
       if (changed === 'role') db.rows('userOrganization')[0].role = 'USER';
@@ -272,7 +273,7 @@ describe('durable sending mode transitions', () => {
     db.rows('post')[0].publishDate = new Date('2026-10-20T10:00:00Z');
     await service.autonomousEffect('org', 'captured', request, work);
     await service.reconcilePendingTransitions();
-    expect((await service.get('org', 'admin')).mode).toBe('AUTONOMOUS');
+    expect((await service.get('org', 'admin')).mode).toBe('CONTROLLED');
     db.rows('post')[0].state = 'PUBLISHED';
     await service.reconcilePendingTransitions();
     expect((await service.get('org', 'admin')).mode).toBe('CONTROLLED');
@@ -287,7 +288,7 @@ describe('durable sending mode transitions', () => {
     await service.save('org', 'admin', change());
     post('unexpected');
     expect(await service.get('org', 'admin')).toMatchObject({
-      mode: 'AUTONOMOUS', transition: { status: 'DRAINING', remainingCount: 1 },
+      mode: 'CONTROLLED', legacyDrain: { status: 'DRAINING', remainingCount: 1 },
     });
     await expect(service.assertAutonomousIn(db, 'org', ['unexpected']))
       .rejects.toThrow('SEND_MODE_TRANSITION_PENDING');
@@ -350,7 +351,7 @@ describe('durable sending mode transitions', () => {
       },
     });
     expect(await service.save('org', 'admin', change())).toMatchObject({
-      transition: { initialPendingCount: 2, remainingCount: 2 },
+      legacyDrain: { initialPendingCount: 2, remainingCount: 2 },
     });
   });
 

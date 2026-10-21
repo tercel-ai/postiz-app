@@ -1,3 +1,4 @@
+import { legacyExecutionWhere } from '@gitroom/nestjs-libraries/extension/legacy-execution';
 import { Injectable, Logger } from '@nestjs/common';
 import { Activity, ActivityMethod } from 'nestjs-temporal-core';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
@@ -120,6 +121,9 @@ export class EngageHousekeepingActivity {
       const { count } = await this._post.model.post.updateMany({
         where: {
           state: 'QUEUE',
+          sendIntentId: null,
+          releaseId: null,
+          AND: [legacyExecutionWhere()],
           deletedAt: null,
           // Belt and braces with `state`: a reply that went out gains a URL, so
           // a half-written commit cannot be swept up here as if it were stuck.

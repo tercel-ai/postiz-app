@@ -318,3 +318,10 @@ describe('EngageHousekeepingActivity — orphaned scan cursors', () => {
     expect(updateMany).toHaveBeenCalled();
   });
 });
+
+it('leaves claimed and coordinated replies outside the automatic stale-queue expiry writer', async () => {
+  const { activity, postUpdateMany } = build({ x: 3 });
+  await activity.runDueMaintenanceJobs();
+  const write = replyCallFor(postUpdateMany, 'x');
+  expect(write.where).toMatchObject({ releaseId: null, sendIntentId: null });
+});

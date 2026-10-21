@@ -113,8 +113,8 @@ it('same-group draft cleanup preserves captured live claims', async () => {
   });
   await modes.reconcilePendingTransitions();
   expect(await modes.get('org', 'admin')).toMatchObject({
-    mode: 'AUTONOMOUS',
-    transition: { remainingCount: 1 },
+    mode: 'CONTROLLED',
+    legacyDrain: { remainingCount: 1 },
   });
 });
 
@@ -136,7 +136,7 @@ it('explicit deletion can cancel unclaimed queued work during transition', async
   const { db, modes, posts, post, save } = setup();
   post('captured');
   post('active', { group: 'active-group', releaseId: 'lease', claimedAt: new Date() });
-  expect(await save()).toMatchObject({ mode: 'AUTONOMOUS', transition: { remainingCount: 1 } });
+  expect(await save()).toMatchObject({ mode: 'CONTROLLED', legacyDrain: { remainingCount: 1 } });
   await posts.deletePostById('org', 'captured');
   expect(db.rows('post')[0].deletedAt).toBeInstanceOf(Date);
   db.rows('post').find((row: any) => row.id === 'active').state = 'PUBLISHED';
@@ -237,7 +237,7 @@ it('reports overdue captured browser claims as needing reconciliation without cl
     claimedAt: new Date(Date.now() - 31 * 60_000),
   });
   expect(await save()).toMatchObject({
-    transition: {
+    legacyDrain: {
       status: 'NEEDS_ATTENTION',
       waitReason: 'RECONCILIATION_REQUIRED',
       remainingCount: 1,
@@ -245,8 +245,8 @@ it('reports overdue captured browser claims as needing reconciliation without cl
   });
   await modes.reconcilePendingTransitions();
   expect(await modes.get('org', 'admin')).toMatchObject({
-    mode: 'AUTONOMOUS',
-    transition: { remainingCount: 1 },
+    mode: 'CONTROLLED',
+    legacyDrain: { remainingCount: 1 },
   });
   expect(db.rows('post')[0]).toMatchObject({
     state: 'QUEUE',
@@ -265,7 +265,7 @@ it('keeps a captured claim inside the longer configured lease window in flight',
     claimedAt: new Date(Date.now() - 90 * 60_000),
   });
   expect(await save()).toMatchObject({
-    transition: {
+    legacyDrain: {
       status: 'DRAINING',
       waitReason: 'IN_FLIGHT',
       remainingCount: 1,
@@ -287,7 +287,7 @@ it.each([
       claimedAt: new Date(Date.now() - minutes * 60_000),
     });
     expect(await save()).toMatchObject({
-      transition: { status, remainingCount: 1 },
+      legacyDrain: { status, remainingCount: 1 },
     });
   }
 );
@@ -303,6 +303,109 @@ it('respects the configured reply lease before requiring reconciliation', async 
     claimedAt: new Date(Date.now() - 45 * 60_000),
   });
   expect(await save()).toMatchObject({
-    transition: { status: 'DRAINING', waitReason: 'IN_FLIGHT' },
+    legacyDrain: { status: 'DRAINING', waitReason: 'IN_FLIGHT' },
   });
+});
+it('preserves old claim ownership during automatic workflow recovery after immediate cutover', async () => {
+  const { db, modes, posts, post, save } = setup();
+  post('captured', { releaseId: 'lease', claimedAt: new Date(), providerIdentifier: 'x', publishMethod: 'EXTENSION' });
+  await save();
+  await posts.resetClaimForPost('captured');
+  expect(db.rows('post')[0].releaseId).toBe('lease');
+  expect(await modes.get('org', 'admin')).toMatchObject({ mode: 'CONTROLLED', legacyDrain: { remainingCount: 1 } });
+});
+it('keeps durable settlement protection after an unconfirmed callback clears volatile lease fields', async () => {
+  const { db, modes, engage, post, save } = setup();
+  Object.assign(engage, { _post: { model: db } });
+  db.seed('integration', { id: 'account', organizationId: 'org', providerIdentifier: 'x', internalId: '123', identityNamespace: 'x.rest_id' });
+  post('captured', { releaseId: 'lease', claimedAt: new Date(), providerIdentifier: 'x', publishMethod: 'EXTENSION' });
+  db.seed('engageSentReply', { id: 'reply', organizationId: 'org', postId: 'captured' });
+  await save();
+  await engage.closeUnconfirmedReply('org', 'reply', 'Lost platform confirmation');
+  expect(db.rows('post')[0].state).toBe('ERROR');
+  expect(await modes.get('org', 'admin')).toMatchObject({ mode: 'CONTROLLED', legacyDrain: { remainingCount: 1 } });
+  expect(await modes.legacyAccountBlockedIn(db, 'org', 'account')).toBe(true);
+  db.rows('post')[0].state = 'PUBLISHED';
+  await modes.reconcilePendingTransitions();
+  expect((await modes.get('org', 'admin')).legacyDrain).toBeNull();
+});
+it('does not delete an expired but captured reply while cleaning obsolete working drafts', async () => {
+  const { db, engage, post, save } = setup();
+  Object.assign(engage, { _post: { model: db } });
+  post('captured', { releaseId: 'lease', claimedAt: new Date('2026-01-01'), releaseURL: null });
+  db.seed('engageSentReply', { id: 'reply', organizationId: 'org', projectId: null, opportunityId: 'opportunity', postId: 'captured', post: structuredClone(db.rows('post')[0]) });
+  await save();
+  await (engage as any)._deleteDraftsForOpportunity('org', 'opportunity');
+  expect(db.rows('post').find(row => row.id === 'captured')).toBeDefined();
+});
+it('keeps captured unclaimed thread children out of draft cleanup as well as the claimed root', async () => {
+  const { db, posts, post, save } = setup();
+  post('captured', { releaseId: 'lease', claimedAt: new Date() });
+  post('child', { state: 'DRAFT', parentPostId: 'captured', releaseId: null });
+  await save();
+  await posts.softDeleteGroupPosts('g', { organizationId: 'org' });
+  expect(db.rows('post').find(row => row.id === 'child')).toMatchObject({ deletedAt: null, parentPostId: 'captured' });
+});
+it('does not let the stale API queue sweep clear an outstanding claim', async () => {
+  const { db, posts, post, save } = setup();
+  post('captured', { releaseId: 'lease', claimedAt: new Date(), parentPostId: null, intervalInDays: null,
+    publishDate: new Date('2026-01-01'), publishMethod: 'API', providerIdentifier: 'mastodon', source: 'calendar' });
+  await save();
+  await posts.markStaleQueuePostsAsError([]);
+  expect(db.rows('post')[0]).toMatchObject({ state: 'QUEUE', releaseId: 'lease' });
+});
+it('captures an admitted saved draft even when it never acquired a queue lease', async () => {
+  const { db, modes, post, save } = setup();
+  post('captured', { state: 'DRAFT', releaseId: null, providerIdentifier: 'x', source: 'engage' });
+  await modes.beginBrowserWrite('org', 'admin', { expectedOrganizationId: 'org', expectedUserId: 'admin',
+    requestId: 'write', platform: 'x', postId: 'captured', contentHash: 'a'.repeat(64) });
+  await save();
+  expect(await modes.activeLegacyPostIdsIn(db, 'org')).toEqual(['captured']);
+});
+it('refuses controlled editing of a saved draft whose original browser write is still admitted', async () => {
+  const { db, modes, posts, post, save } = setup();
+  post('captured', { state: 'DRAFT', releaseId: null, providerIdentifier: 'x', source: 'engage', content: 'original' });
+  await modes.beginBrowserWrite('org', 'admin', { expectedOrganizationId: 'org', expectedUserId: 'admin',
+    requestId: 'write', platform: 'x', postId: 'captured', contentHash: 'a'.repeat(64) });
+  await save();
+  await expect(posts.createOrUpdatePost('draft', 'org', '2026-10-20', {
+    group: 'g', value: [{ id: 'captured', content: 'replacement', image: [] }], settings: { __type: 'x' },
+  } as any, [], undefined, undefined, undefined, undefined, undefined, 'CONTROLLED'))
+    .rejects.toThrow('SEND_MODE_TRANSITION_PENDING');
+  expect(db.rows('post')[0].content).toBe('original');
+});
+it('protects an admitted saved reply from the independent engage draft editor after cutover', async () => {
+  const { db, modes, engage, post, save } = setup();
+  post('captured', { state: 'DRAFT', providerIdentifier: 'x', source: 'engage', content: 'original', settings: '{}' });
+  db.seed('engageSentReply', { id: 'reply', organizationId: 'org', projectId: null,
+    opportunityId: 'opportunity', postId: 'captured', post: structuredClone(db.rows('post')[0]) });
+  await modes.beginBrowserWrite('org', 'admin', { expectedOrganizationId: 'org', expectedUserId: 'admin',
+    requestId: 'write', platform: 'x', postId: 'captured', contentHash: 'a'.repeat(64) });
+  await save();
+  await expect(engage.upsertDraft('org', 'opportunity', { platform: 'x', content: 'replacement', inputData: {} }))
+    .rejects.toThrow('SEND_MODE_TRANSITION_PENDING');
+  expect(db.rows('post')[0].content).toBe('original');
+});
+it('rejects direct engage cancellation of a captured send after immediate cutover', async () => {
+  const { db, engage, post, save } = setup();
+  Object.assign(engage, { _post: { model: { post: { delete: ({ where }: any) => db.post.deleteMany({ where }) } } } });
+  post('captured', { releaseId: 'lease', claimedAt: new Date() });
+  await save();
+  await expect(engage.deletePostById('captured')).rejects.toThrow('SEND_MODE_TRANSITION_PENDING');
+  expect(db.rows('post').find(row => row.id === 'captured')).toBeDefined();
+});
+it('still permits direct engage cancellation of untouched work after cutover', async () => {
+  const { db, engage, post, save } = setup();
+  Object.assign(engage, { _post: { model: { post: { delete: ({ where }: any) => db.post.deleteMany({ where }) } } } });
+  post('untouched');
+  await save();
+  await engage.deletePostById('untouched');
+  expect(db.rows('post')).toHaveLength(0);
+});
+it('does not let engage failure cleanup delete content owned by a controlled intent', async () => {
+  const { db, engage, post, save } = setup();
+  post('controlled', { state: 'DRAFT', executionProtocol: 'ACCOUNT_BOUND_V1', sendIntentId: 'intent' });
+  await save();
+  await expect(engage.deletePostById('controlled')).rejects.toThrow('SEND_INTENT_IMMUTABLE');
+  expect(db.rows('post').find(row => row.id === 'controlled')).toBeDefined();
 });

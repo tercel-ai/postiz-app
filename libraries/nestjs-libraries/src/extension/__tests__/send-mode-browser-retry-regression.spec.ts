@@ -120,7 +120,7 @@ describe('saved browser write retries after definite non-submission', () => {
       if (mode === 'PENDING') db.seed('post', { id: 'draining', organizationId: 'org', state: 'QUEUE', releaseId: 'lease', claimedAt: new Date(), publishDate: new Date() });
       await service.save('org', 'user', { ...owner, mode: 'CONTROLLED', expectedRevision: 0, requestId: 'switch' });
       await expect(service.beginBrowserWrite('org', 'user', { ...request, requestId: 'retry' }))
-        .rejects.toThrow('BROWSER_WRITE_CONTENT_REQUIRED');
+        .rejects.toThrow('SEND_MODE_AUTONOMOUS_REQUIRED');
     }
   );
   it('requires the same saved content fingerprint for an ERROR retry', async () => {

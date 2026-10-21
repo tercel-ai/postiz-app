@@ -219,7 +219,7 @@ describe('organization sending mode', () => {
       db.seed(table, { organizationId: 'org', ...fields });
       const result = await service.save('org', 'admin', save('CONTROLLED'));
       if (blocker === 'legacyClaims') {
-        expect(result).toMatchObject({ mode: 'AUTONOMOUS', transition: { remainingCount: 1 } });
+        expect(result).toMatchObject({ mode: 'CONTROLLED', legacyDrain: { remainingCount: 1 } });
         expect(db.rows('post')[0]).toMatchObject({ state: 'ERROR', releaseId: 'lease' });
       } else {
         expect(result).toMatchObject({ mode: 'CONTROLLED', transition: null });

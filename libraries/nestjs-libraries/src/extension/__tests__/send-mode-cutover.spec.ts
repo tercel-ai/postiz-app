@@ -22,15 +22,15 @@ it('switches immediately with future queued work and preserves its content and d
   expect(db.rows('post')).toEqual(before);
   expect(await modes.pendingReallocations()).toEqual([{ organizationId: 'org', userId: 'admin' }]);
 });
-it('waits only for an already claimed chain, then switches without waiting for future posts', async () => {
+it('switches immediately and settles an already claimed chain independently', async () => {
   const { db, modes, post } = setup();
   post('active', { releaseId: 'lease', claimedAt: new Date() });
   post('active-child', { parentPostId: 'active' }); post('future');
-  expect(await modes.save('org', 'admin', request)).toMatchObject({ mode: 'AUTONOMOUS',
-    transition: { remainingCount: 2, scheduledNotBefore: null, waitReason: 'IN_FLIGHT' } });
+  expect(await modes.save('org', 'admin', request)).toMatchObject({ mode: 'CONTROLLED',
+    legacyDrain: { remainingCount: 2, scheduledNotBefore: null, waitReason: 'IN_FLIGHT' } });
   await expect(modes.assertAutonomousIn(db, 'org', ['future'])).rejects.toThrow('SEND_MODE_TRANSITION_PENDING');
   db.rows('post').filter(p => p.id !== 'future').forEach(p => { p.state = 'PUBLISHED'; });
-  expect(await modes.reconcilePendingTransitions()).toEqual([true]);
+  expect(await modes.reconcilePendingTransitions()).toEqual([false]);
   expect(await modes.get('org', 'admin')).toMatchObject({ mode: 'CONTROLLED', transition: null,
     reallocation: { remainingCount: 1 } });
 });
@@ -48,14 +48,14 @@ it('does not reallocate a confirmed write whose post callback has not settled', 
   const grant = await modes.beginBrowserWrite('org', 'admin', { ...owner, requestId: 'write',
     platform: 'x', postId: 'future', contentHash: 'a'.repeat(64) });
   await modes.settleBrowserWrite('org', 'admin', grant.id, { ...owner, status: 'CONFIRMED', platformPostId: 'live' });
-  expect(await modes.save('org', 'admin', request)).toMatchObject({ mode: 'AUTONOMOUS',
-    transition: { remainingCount: 1, status: 'NEEDS_ATTENTION' } });
+  expect(await modes.save('org', 'admin', request)).toMatchObject({ mode: 'CONTROLLED',
+    legacyDrain: { remainingCount: 1, status: 'NEEDS_ATTENTION' } });
   expect(db.rows('post')[0].state).toBe('QUEUE');
 });
 it('retains partial published threads as reconciliation work rather than migrating them', async () => {
   const { modes, post } = setup(); post('root', { state: 'PUBLISHED' }); post('child', { parentPostId: 'root' });
-  expect(await modes.save('org', 'admin', request)).toMatchObject({ mode: 'AUTONOMOUS',
-    transition: { remainingCount: 1, status: 'NEEDS_ATTENTION' } });
+  expect(await modes.save('org', 'admin', request)).toMatchObject({ mode: 'CONTROLLED',
+    legacyDrain: { remainingCount: 1, status: 'NEEDS_ATTENTION' } });
 });
 it('reports per-task reallocation issues and clears the marker only after queued work is adopted', async () => {
   const { db, modes, post } = setup(); post('future'); await modes.save('org', 'admin', request);
@@ -67,8 +67,8 @@ it('reports per-task reallocation issues and clears the marker only after queued
 });
 it('keeps a known live permalink out of the unsent handover even without a receipt', async () => {
   const { modes, post } = setup(); post('live', { releaseURL: 'https://x.com/u/status/live' });
-  expect(await modes.save('org', 'admin', request)).toMatchObject({ mode: 'AUTONOMOUS',
-    transition: { remainingCount: 1, status: 'NEEDS_ATTENTION' } });
+  expect(await modes.save('org', 'admin', request)).toMatchObject({ mode: 'CONTROLLED',
+    legacyDrain: { remainingCount: 1, status: 'NEEDS_ATTENTION' } });
 });
 it('shows an unavailable reallocation owner instead of silently waiting forever', async () => {
   const { db, modes, post } = setup(); post('future'); await modes.save('org', 'admin', request);
@@ -82,11 +82,12 @@ it('rebases v1 progress to active work instead of falsely counting future tasks 
     transition: { version: 1, targetMode: 'CONTROLLED', requestedAt: new Date().toISOString(),
       requestedByUserId: 'admin', initialPendingCount: 2, eligiblePostIds: ['future', 'active'],
       eligiblePostOccurrences: { future: '2026-12-15T10:00:00.000Z', active: '2026-12-15T10:00:00.000Z' } } } });
-  expect(await modes.reconcilePendingTransitions()).toEqual([false]);
-  expect(await modes.get('org', 'admin')).toMatchObject({ transition: {
+  expect(await modes.reconcilePendingTransitions()).toEqual([true]);
+  expect(await modes.get('org', 'admin')).toMatchObject({ mode: 'CONTROLLED', legacyDrain: {
     initialPendingCount: 1, remainingCount: 1, completedCount: 0,
   } });
-  expect(await modes.autonomousDrainPostIdsIn(db, 'org')).toEqual(['active']);
+  expect(await modes.autonomousDrainPostIdsIn(db, 'org')).toEqual([]);
+  await expect(modes.assertAutonomousIn(db, 'org', ['active'])).resolves.toBeDefined();
 });
 it('does not turn an ordinary saved draft thread into in-flight work', async () => {
   const { db, modes, post } = setup();
@@ -105,8 +106,8 @@ it('does not block cutover on a failed unsent root and its saved draft continuat
 it('keeps a truly missing parent of a draft continuation requiring reconciliation', async () => {
   const { modes, post } = setup();
   post('orphan', { state: 'DRAFT', parentPostId: 'missing' });
-  expect(await modes.save('org', 'admin', request)).toMatchObject({ mode: 'AUTONOMOUS',
-    transition: { remainingCount: 1, status: 'NEEDS_ATTENTION' } });
+  expect(await modes.save('org', 'admin', request)).toMatchObject({ mode: 'CONTROLLED',
+    legacyDrain: { remainingCount: 1, status: 'NEEDS_ATTENTION' } });
 });
 it('upgrades an existing v1 captured active chain to include its pre-existing draft continuation', async () => {
   const { db, modes, post } = setup();

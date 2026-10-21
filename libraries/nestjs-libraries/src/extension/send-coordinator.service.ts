@@ -177,6 +177,7 @@ export class SendCoordinatorService {
       organizationId: org, projectId: intent.projectId, integrationId: session.integrationId, disabled: false,
     } });
     const actor = session.accountIdentity as { id?: string; namespace?: string } | null;
+    if (await this.modes.legacyAccountBlockedIn(tx, org, session.integrationId)) return false;
     if (!integration || integration.inBetweenSteps || !relation ||
         (action === 'REPLY' && relation.engageEnabled !== true) ||
         canonicalControlledPlatform(integration.providerIdentifier) !== intent.platform ||
@@ -254,8 +255,10 @@ export class SendCoordinatorService {
     });
     if (roots.length > 5000)
       return [{ postId: roots[5000].id, code: 'SEND_MODE_REALLOCATION_TOO_LARGE' }];
+    const active = new Set(await sendTransaction(this.db, tx => this.modes.activeLegacyPostIdsIn(tx, org)));
     const issues: Array<{ postId: string; code: string }> = [];
     for (const root of roots) {
+      if (active.has(root.id)) continue;
       try {
         const origin = root.sendOrigin === 'MANUAL' || root.sendOrigin === 'AUTOMATION'
           ? root.sendOrigin
@@ -287,6 +290,8 @@ export class SendCoordinatorService {
       await this.assertControlledIn(tx, org);
       const posts = await this.chain(tx, org, rootId);
       const first = posts[0];
+      const activeLegacy = new Set(await this.modes.activeLegacyPostIdsIn(tx, org));
+      if (posts.some(post => activeLegacy.has(post.id))) reject('LEGACY_CONTENT_DRAIN_REQUIRED');
       if (options.modeHandover) {
         if (!first.sendIntentId) {
           if (first.state !== 'QUEUE') reject('CONTENT_NOT_ENQUEUEABLE');
@@ -803,8 +808,8 @@ export class SendCoordinatorService {
     }));
   }
 
-  async assertLegacyAccount(org: string, _integrationId: string) {
-    await this.autonomousTransaction(org, async () => undefined);
+  async assertLegacyAccount(org: string, _integrationId: string, existingPostIds?: string[]) {
+    await this.autonomousTransaction(org, async () => undefined, existingPostIds);
   }
 
   async legacyBlockedPlatforms(org: string) {
@@ -907,6 +912,8 @@ export class SendCoordinatorService {
       !intent.target
     )
       reject('SEND_INTENT_REQUIRED');
+    if (await this.modes.legacyAccountBlockedIn(tx, org, intent.integrationId))
+      reject('LEGACY_ACCOUNT_DRAIN_REQUIRED');
     const requestKey = sendHash([root.id, executorKey]);
     const prior = await tx.sendExecution.findUnique({
       where: {
@@ -1025,6 +1032,8 @@ export class SendCoordinatorService {
     const org = execution.organizationId;
     await this.assertControlledIn(tx, org);
     await this.verifyPolicyIn(tx);
+    if (await this.modes.legacyAccountBlockedIn(tx, org, execution.integrationId))
+      reject('LEGACY_ACCOUNT_DRAIN_REQUIRED');
     const account = await tx.accountWriteState.findUnique({
       where: {
         organizationId_canonicalAccountKey: {

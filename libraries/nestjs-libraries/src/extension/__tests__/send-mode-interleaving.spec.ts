@@ -13,7 +13,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-it('retries a producer with a stale mode snapshot after concurrent transition finalization', async () => {
+it('retries a stale producer snapshot after concurrent legacy settlement cleanup', async () => {
   vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true');
   const db = memorySendDatabase();
   db.seed('userOrganization', {
@@ -124,14 +124,14 @@ it('retries a producer with a stale mode snapshot after concurrent transition fi
       (error) => error
     );
   await producerPaused.promise;
-  await expect(service.reconcilePendingTransitions()).resolves.toEqual([true]);
+  await expect(service.reconcilePendingTransitions()).resolves.toEqual([false]);
   resumeProducer.resolve();
   expect(await producer).toMatchObject({
     message: 'SEND_MODE_AUTONOMOUS_REQUIRED',
   });
 
-  // The stale snapshot held a pending autonomous mode. Only the retry can see
-  // CONTROLLED and return this business rejection instead of pending/conflict.
+  // The stale snapshot still held legacy settlement metadata. The mode-row
+  // compare-and-set forces a retry against the completed cleanup snapshot.
   expect(conflicts).toBe(1);
   expect((await service.get('org', 'admin')).mode).toBe('CONTROLLED');
   expect(

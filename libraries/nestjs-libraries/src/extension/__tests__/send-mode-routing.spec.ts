@@ -38,7 +38,7 @@ describe('organization sending mode authorization', () => {
       parentPostId: null, source: 'calendar', intervalInDays: null, settings: '{}',
       publishMethod: 'EXTENSION', providerIdentifier: 'x', publishDate: new Date('2026-01-01') });
     await expect(repository.claimDueExtensionPublishPosts('org', ['x'], new Date(), 1, 'lease', new Date(0)))
-      .rejects.toThrow('SEND_MODE_AUTONOMOUS_REQUIRED');
+      .resolves.toEqual([]);
     expect(db.rows('post')[0].releaseId).toBeNull();
   });
   it('keeps controlled failures outside autonomous retry even after explicit downgrade', async () => {

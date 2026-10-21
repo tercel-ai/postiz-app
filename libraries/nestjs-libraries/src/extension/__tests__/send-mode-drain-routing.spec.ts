@@ -8,6 +8,7 @@ vi.mock('../../redis/redis.service', () => ({ ioRedis: {} }));
 function fixture(captured: string[] | null = ['old']) {
   const db = memorySendDatabase();
   const modes = {
+    activeLegacyPostIdsIn: vi.fn(async () => captured ?? []),
     autonomousDrainPostIdsIn: vi.fn(async (_tx: unknown, _org: string) => captured),
     assertAutonomousIn: vi.fn(async (_tx, _org, ids?: string[]) => {
       if (captured && (!ids?.length || ids.some(id => !captured.includes(id))))

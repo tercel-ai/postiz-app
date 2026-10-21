@@ -891,13 +891,14 @@ export class PostsRepository {
     if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
     return sendTransaction(this._tx.model, async client => {
       const state = await this._sendModes!.lockIn(client, organizationId);
-      if (!state.transition) return remove(client);
+      if (!state.transition && !state.legacyDrain) return remove(client);
+      const active = await this._sendModes!.activeLegacyPostIdsIn(client, organizationId);
       if (preservePendingQueue) {
         // Editor cleanup must not cancel a captured send or detach its thread.
-        return remove(client, { AND: [where, { state: 'DRAFT', releaseId: null }] });
+        return remove(client, { AND: [where, { state: 'DRAFT', releaseId: null, id: { notIn: active } }] });
       }
       const claimed = await client.post.findFirst({
-        where: { AND: [where, { state: { not: 'PUBLISHED' }, releaseId: { not: null } }] },
+        where: { AND: [where, { OR: [{ state: { not: 'PUBLISHED' }, releaseId: { not: null } }, { id: { in: active } }] }] },
         select: { id: true },
       });
       if (claimed) throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
@@ -1274,8 +1275,18 @@ export class PostsRepository {
    * Only resets if the post is still in QUEUE — a PUBLISHED post must not be touched.
    * The releaseId is a claim token (starts with 'claim_'), not a platform post ID.
    */
-  async resetClaimForPost(id: string): Promise<void> {
-    await this._post.model.post.updateMany({
+  async resetClaimForPost(id: string, tx?: Prisma.TransactionClient): Promise<void> {
+    if (this._sendModes && !tx) {
+      if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
+      return sendTransaction(this._tx.model, async client => {
+        const post = await client.post.findUnique({ where: { id }, select: { organizationId: true } });
+        if (!post) return;
+        const mode = await this._sendModes!.lockIn(client, post.organizationId);
+        if (mode.configuredMode === 'CONTROLLED' || mode.transition) return;
+        return this.resetClaimForPost(id, client);
+      });
+    }
+    await (tx?.post ?? this._post.model.post).updateMany({
       where: {
         id,
         sendIntentId: null,
@@ -1382,6 +1393,7 @@ export class PostsRepository {
 
     const staleWhere: Prisma.PostWhereInput = {
       sendIntentId: null,
+      releaseId: null,
       state: 'QUEUE',
       deletedAt: null,
       parentPostId: null,
@@ -1441,6 +1453,8 @@ export class PostsRepository {
         },
         group: { in: [...new Set(staleRoots.map((r) => r.group))] },
         parentPostId: { not: null },
+        sendIntentId: null,
+        releaseId: null,
         state: State.QUEUE,
         deletedAt: null,
         // Restated rather than inferred from the root. A child SHOULD share its
@@ -1485,7 +1499,8 @@ export class PostsRepository {
       return sendTransaction(this._tx.model, async client => {
         const post = await client.post.findUnique({ where: { id }, select: { organizationId: true } });
         if (!post) return false;
-        await this._sendModes!.assertAutonomousIn(client, post.organizationId, [id]);
+        const mode = await this._sendModes!.assertAutonomousIn(client, post.organizationId, [id]);
+        if (mode?.configuredMode === 'CONTROLLED') return false;
         return this.claimPostForPublishing(id, claimToken, client);
       });
     }
@@ -2185,6 +2200,7 @@ export class PostsRepository {
     admissionMode?: 'AUTONOMOUS' | 'CONTROLLED'
   ): Promise<{ previousPost: string | undefined; posts: Post[] }> {
     let restrictToUnclaimedDrafts = false;
+    let protectedLegacyIds: string[] = [];
     if (this._sendModes && (admissionMode || state === 'draft')) {
       if (!tx) {
         if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
@@ -2192,9 +2208,16 @@ export class PostsRepository {
           state, orgId, date, body, tags, inter, source, projectId, publishMethod, client, admissionMode
         ));
       }
-      if (admissionMode === 'CONTROLLED') await this._sendModes.assertControlledIn(tx, orgId);
-      else if (state !== 'draft' || admissionMode === 'AUTONOMOUS') await this._sendModes.assertAutonomousIn(tx, orgId);
-      else restrictToUnclaimedDrafts = !!(await this._sendModes.lockIn(tx, orgId)).transition;
+      const mode = admissionMode === 'CONTROLLED'
+        ? await this._sendModes.assertControlledIn(tx, orgId)
+        : state !== 'draft' || admissionMode === 'AUTONOMOUS'
+          ? await this._sendModes.assertAutonomousIn(tx, orgId)
+          : await this._sendModes.lockIn(tx, orgId);
+      if (!admissionMode && state === 'draft') {
+        restrictToUnclaimedDrafts = !!(mode.transition || mode.legacyDrain);
+      }
+      if (mode.transition || mode.legacyDrain)
+        protectedLegacyIds = await this._sendModes.activeLegacyPostIdsIn(tx, orgId);
     }
     if ((body.accountSelectionMode === 'INHERIT' && body.integration?.id) ||
         (body.accountSelectionMode === 'EXPLICIT' && !body.integration?.id))
@@ -2216,9 +2239,11 @@ export class PostsRepository {
 
     for (const value of body.value) {
       const id = value.id || uuidv4();
+      if (value.id && protectedLegacyIds.includes(id))
+        throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
       if (restrictToUnclaimedDrafts && value.id) {
         const existing = await tx!.post.findFirst({ where: { id, organizationId: orgId } });
-        if (existing && (existing.state !== 'DRAFT' || existing.sendIntentId || existing.releaseId))
+        if (existing && (existing.state !== 'DRAFT' || existing.sendIntentId || existing.releaseId || protectedLegacyIds.includes(existing.id)))
           throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
       }
       if (clearSelection && value.id) {

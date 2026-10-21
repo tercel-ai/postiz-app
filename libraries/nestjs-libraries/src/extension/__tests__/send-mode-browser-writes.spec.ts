@@ -92,11 +92,11 @@ describe('durable browser write admission', () => {
       { id: permit.id, admitted: false }
     );
     expect(await service.save('org', 'user', change)).toMatchObject({
-      mode: 'AUTONOMOUS',
-      transition: { remainingCount: 1 },
+      mode: 'CONTROLLED',
+      legacyDrain: { remainingCount: 1 },
     });
     await service.reconcilePendingTransitions();
-    expect((await service.get('org', 'user')).mode).toBe('AUTONOMOUS');
+    expect((await service.get('org', 'user')).mode).toBe('CONTROLLED');
     await service.settleBrowserWrite('org', 'user', permit.id, {
       ...owner,
       status: 'CONFIRMED',
@@ -109,7 +109,7 @@ describe('durable browser write admission', () => {
       { admitted: false, status: 'CONFIRMED' }
     );
   });
-  it('allows captured saved content but rejects unsaved or foreign content during a switch', async () => {
+  it('does not grant new browser leases after cutover even for captured saved content', async () => {
     const { db, service } = setup();
     db.seed('post', {
       id: 'queued',
@@ -130,16 +130,16 @@ describe('durable browser write admission', () => {
     await service.save('org', 'user', change);
     await expect(
       service.beginBrowserWrite('org', 'user', begin)
-    ).rejects.toThrow('SEND_MODE_TRANSITION_PENDING');
+    ).rejects.toThrow('SEND_MODE_AUTONOMOUS_REQUIRED');
     await expect(
       service.beginBrowserWrite('org', 'user', { ...begin, postId: 'foreign' })
-    ).rejects.toThrow('BROWSER_WRITE_CONTENT_REQUIRED');
-    expect(
-      await service.beginBrowserWrite('org', 'user', {
+    ).rejects.toThrow('SEND_MODE_AUTONOMOUS_REQUIRED');
+    await expect(
+      service.beginBrowserWrite('org', 'user', {
         ...begin,
         postId: 'queued',
       })
-    ).toMatchObject({ admitted: true });
+    ).rejects.toThrow('SEND_MODE_AUTONOMOUS_REQUIRED');
   });
   it('resolves a saved engage reply through organization-scoped records and compares platform', async () => {
     const { db, service } = setup();
@@ -212,7 +212,7 @@ describe('durable browser write admission', () => {
       status: 'UNKNOWN',
     });
     expect(await service.save('org', 'user', change)).toMatchObject({
-      transition: { status: 'NEEDS_ATTENTION' },
+      legacyDrain: { status: 'NEEDS_ATTENTION' },
     });
     await service.settleBrowserWrite('org', 'user', permit.id, {
       ...owner,
@@ -248,9 +248,9 @@ describe('durable browser write admission', () => {
     db.rows('post')[0].publishDate = new Date('2026-10-21');
     await expect(
       service.beginBrowserWrite('org', 'user', { ...begin, postId: 'queued' })
-    ).rejects.toThrow('SEND_MODE_TRANSITION_PENDING');
+    ).rejects.toThrow('SEND_MODE_AUTONOMOUS_REQUIRED');
     expect(await service.get('org', 'user')).toMatchObject({
-      transition: {
+      legacyDrain: {
         status: 'NEEDS_ATTENTION',
         waitReason: 'RECONCILIATION_REQUIRED',
       },
@@ -267,11 +267,10 @@ describe('durable browser write admission', () => {
       if (switchFirst) writes.reverse();
       await Promise.allSettled(writes.map((work) => work()));
       const state = await service.get('org', 'user');
-      expect(
-        state.mode === 'CONTROLLED'
-          ? state.blockers.autonomousEffects
-          : state.transition?.remainingCount
-      ).toBe(state.mode === 'CONTROLLED' ? 0 : 1);
+      expect(state.mode).toBe('CONTROLLED');
+      expect(state.autonomousAllowed).toBe(false);
+      expect(state.blockers.autonomousEffects).toBe(switchFirst ? 0 : 1);
+      expect(state.legacyDrain?.remainingCount ?? 0).toBe(switchFirst ? 0 : 1);
     }
   );
   it('binds both admissions and callbacks to the displayed owner before any receipt mutation', async () => {

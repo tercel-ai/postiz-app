@@ -3857,9 +3857,8 @@ export class EngageRepository {
    * record of a reply that goes live anyway — unbillable, untrackable, and
    * invisible in Sent. Leaving it lets the send complete and commit normally.
    *
-   * (The claim is read against the same lease window `claimDueEngageReplies`
-   * uses; an EXPIRED claim means nobody is holding it, so it is deleted like any
-   * other unsent row.)
+   * Expired leases are removable only when no durable admission or captured
+   * execution still owns the row; a timeout does not stop a remote executor.
    *
    * Deleting the Post cascades to its EngageSentReply (onDelete: Cascade).
    * No-op when none exist.
@@ -3868,17 +3867,27 @@ export class EngageRepository {
     organizationId: string,
     opportunityId: string,
     projectId?: string | null,
-    leaseCutoff?: Date
+    leaseCutoff?: Date,
+    tx?: Prisma.TransactionClient
   ): Promise<void> {
+    if (this._sendModes && !tx) {
+      return sendTransaction(this._tx.model, async client => {
+        await this._sendModes!.lockIn(client, organizationId);
+        return this._deleteDraftsForOpportunity(organizationId, opportunityId, projectId, leaseCutoff, client);
+      });
+    }
+    const protectedIds = this._sendModes && tx
+      ? await this._sendModes.activeLegacyPostIdsIn(tx, organizationId) : [];
     const cutoff =
       leaseCutoff ??
       new Date(Date.now() - DEFAULT_CLAIM_LEASE_MINUTES * 60_000);
-    const drafts = await this._sentReply.model.engageSentReply.findMany({
+    const drafts = await (tx?.engageSentReply ?? this._sentReply.model.engageSentReply).findMany({
       where: {
         organizationId,
         projectId: projectId ?? null,
         opportunityId,
         post: {
+          id: { notIn: protectedIds },
           state: { in: ['DRAFT', 'QUEUE'] },
           releaseURL: null,
           // Un-held only: no claim, or one whose lease has lapsed.
@@ -3888,8 +3897,8 @@ export class EngageRepository {
       select: { postId: true },
     });
     if (!drafts.length) return;
-    await this._post.model.post.deleteMany({
-      where: { id: { in: drafts.map((d) => d.postId) } },
+    await (tx?.post ?? this._post.model.post).deleteMany({
+      where: { organizationId, id: { in: drafts.map(d => d.postId), notIn: protectedIds }, sendIntentId: null },
     });
   }
 
@@ -3961,6 +3970,8 @@ export class EngageRepository {
       });
 
       if (existing) {
+        if (this._sendModes && (await this._sendModes.activeLegacyPostIdsIn(tx, organizationId)).includes(existing.postId))
+          throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
         await tx.post.update({
           where: { sendIntentId: null, id: existing.postId },
           data: {
@@ -4174,6 +4185,18 @@ export class EngageRepository {
   }
 
   async deletePostById(postId: string) {
+    if (this._sendModes) {
+      return sendTransaction(this._tx.model, async tx => {
+        const post = await tx.post.findUnique({ where: { id: postId },
+          select: { organizationId: true, sendIntentId: true } });
+        if (!post) return;
+        await this._sendModes!.lockIn(tx, post.organizationId);
+        if (post.sendIntentId) throw new ConflictException('SEND_INTENT_IMMUTABLE');
+        if ((await this._sendModes!.activeLegacyPostIdsIn(tx, post.organizationId)).includes(postId))
+          throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
+        await tx.post.deleteMany({ where: { id: postId, organizationId: post.organizationId, sendIntentId: null } });
+      });
+    }
     try {
       await this._post.model.post.delete({ where: { id: postId } });
     } catch {

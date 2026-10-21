@@ -311,7 +311,7 @@ describe('durable autonomous side effects', () => {
     await ready;
     expect((await service.stateIn(db, 'org')).mode).toBe('AUTONOMOUS');
     expect(await service.save('org', 'admin', change('CONTROLLED'))).toMatchObject({
-      mode: 'AUTONOMOUS', transition: { remainingCount: 1, status: 'DRAINING' },
+      mode: 'CONTROLLED', legacyDrain: { remainingCount: 1, status: 'DRAINING' },
     });
     await expect(
       service.autonomousEffect('org', 'plug:post:1', request, work)
@@ -343,7 +343,7 @@ describe('durable autonomous side effects', () => {
     ).rejects.toThrow('AUTONOMOUS_EFFECT_RECONCILIATION_REQUIRED');
     expect(work).toHaveBeenCalledTimes(1);
     expect(await service.save('org', 'admin', change('CONTROLLED'))).toMatchObject({
-      mode: 'AUTONOMOUS', transition: { status: 'NEEDS_ATTENTION', waitReason: 'RECONCILIATION_REQUIRED' },
+      mode: 'CONTROLLED', legacyDrain: { status: 'NEEDS_ATTENTION', waitReason: 'RECONCILIATION_REQUIRED' },
     });
   });
   it('finds immutable effect receipts across membership changes, rejects changed input, and strips provider secrets', async () => {
@@ -627,7 +627,7 @@ describe('durable autonomous side effects', () => {
     );
     expect(db.rows('sendMutationReceipt')[0].result.status).toBe('CONFIRMED');
   });
-  it('keeps already-controlled organizations paused if unresolved autonomous admissions are detected', async () => {
+  it('keeps controlled mode active and isolates detected legacy effects at the account guard', async () => {
     const { db, service } = setup();
     db.seed('settings', {
       key: 'sending.organization_mode:org',
@@ -646,12 +646,12 @@ describe('durable autonomous side effects', () => {
       },
     });
     expect(await service.stateIn(db, 'org')).toMatchObject({
-      mode: 'PAUSED',
+      mode: 'CONTROLLED',
       blockers: { autonomousEffects: 1 },
     });
-    await expect(
-      service.save('org', 'admin', change('CONTROLLED', 1))
-    ).rejects.toThrow('SEND_MODE_SWITCH_UNSAFE');
+    expect(await service.legacyAccountBlockedIn(db, 'org', 'account')).toBe(true);
+    await expect(service.save('org', 'admin', change('CONTROLLED', 1)))
+      .resolves.toMatchObject({ mode: 'CONTROLLED' });
   });
   it('returns only safe business references for operator review and never raw request metadata', async () => {
     const { service } = setup();

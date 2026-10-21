@@ -193,7 +193,7 @@ export class PostActivity {
       throw new Error('SEND_COORDINATOR_REQUIRED');
     if (!this._sendModes) {
       await this._sendCoordinator?.assertLegacyPosts(integration.organizationId, posts);
-      await this._sendCoordinator?.assertLegacyAccount(integration.organizationId, integration.id);
+      await this._sendCoordinator?.assertLegacyAccount(integration.organizationId, integration.id, posts.map(post => post.id));
     }
   }
 
@@ -370,7 +370,7 @@ export class PostActivity {
     finisherText: string,
     releaseURL: string
   ) {
-    if (!this._sendModes) await this._sendCoordinator?.assertLegacyAccount(integration.organizationId, integration.id);
+    if (!this._sendModes) await this._sendCoordinator?.assertLegacyAccount(integration.organizationId, integration.id, posts.map(post => post.id));
     const getIntegration = this._integrationManager.getSocialIntegration(
       integration.providerIdentifier
     );

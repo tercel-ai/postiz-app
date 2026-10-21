@@ -5244,7 +5244,7 @@ describe('EngageRepository.getOrgScanStatus', () => {
       expect(where.post.OR[0]).toEqual({ releaseId: null });
       expect(where.post.OR[1].claimedAt.lte).toBeInstanceOf(Date);
       expect(postDeleteMany.mock.calls[0][0]).toEqual({
-        where: { id: { in: ['post-d'] } },
+        where: { organizationId: 'org1', id: { in: ['post-d'], notIn: [] }, sendIntentId: null },
       });
     });
 

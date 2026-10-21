@@ -8,7 +8,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma/prisma.service';
-import { sendHash, sendJson, sendTransaction } from './send-coordination.utils';
+import { canonicalSendAccount, sendHash, sendJson, sendTransaction } from './send-coordination.utils';
 import {
   BeginBrowserWriteDto,
   BrowserWriteOutcomeDto,
@@ -18,6 +18,7 @@ import {
   SaveSystemSendModeDto,
 } from './send-mode.dto';
 import { isLegacyExecution } from './legacy-execution';
+import { canonicalControlledPlatform } from './controlled-platforms';
 
 export const SEND_MODE_SYSTEM_KEY = 'sending.account_bound_enabled';
 export const SEND_MODE_ORGANIZATION_PREFIX = 'sending.organization_mode:';
@@ -73,6 +74,7 @@ interface PendingSendModeTransition {
   eligiblePostIds: string[];
   eligiblePostOccurrences: Record<string, string | null>;
   initialPendingCount: number;
+  effectReceiptIds?: string[];
 }
 interface PendingReallocation {
   version: 1;
@@ -112,6 +114,7 @@ export interface SendModeState {
   autonomousAllowed: boolean;
   blockers: SendModeBlockers;
   transition: SendModeTransitionState | null;
+  legacyDrain: SendModeTransitionState | null;
   reallocation: { remainingCount: number; completedCount: number; blockedCount: number;
     issues: Array<{ postId: string; code: string }> } | null;
 }
@@ -151,13 +154,15 @@ export class SendModeService {
     mode: OrganizationSendingMode | null;
     revision: number;
     transition: PendingSendModeTransition | null;
+    legacyDrain: PendingSendModeTransition | null;
   } {
     if (raw === undefined || raw === null)
-      return { mode: null, revision: 0, transition: null };
+      return { mode: null, revision: 0, transition: null, legacyDrain: null };
     const value = raw as {
       mode: OrganizationSendingMode;
       revision: number;
       transition?: PendingSendModeTransition;
+      legacyDrain?: PendingSendModeTransition;
     };
     if (
       !value ||
@@ -166,11 +171,14 @@ export class SendModeService {
       value.revision === 0
     )
       throw new ServiceUnavailableException('SEND_MODE_CONFIGURATION_INVALID');
-    const pending = value.transition;
+    if ((value.transition != null && value.mode !== 'AUTONOMOUS') ||
+        (value.legacyDrain != null && value.mode !== 'CONTROLLED') ||
+        (value.transition != null && value.legacyDrain != null))
+      throw new ServiceUnavailableException('SEND_MODE_CONFIGURATION_INVALID');
+    const pending = value.transition ?? value.legacyDrain;
     if (
       pending != null &&
-      (value.mode !== 'AUTONOMOUS' ||
-        ![1, 2].includes(pending.version) ||
+      (![1, 2].includes(pending.version) ||
         pending.targetMode !== 'CONTROLLED' ||
         typeof pending.requestedAt !== 'string' ||
         !Number.isFinite(Date.parse(pending.requestedAt)) ||
@@ -184,6 +192,9 @@ export class SendModeService {
         ) ||
         new Set(pending.eligiblePostIds).size !==
           pending.eligiblePostIds.length ||
+        (pending.effectReceiptIds !== undefined && (!Array.isArray(pending.effectReceiptIds) ||
+          pending.effectReceiptIds.length > 5000 || pending.effectReceiptIds.some(id =>
+            typeof id !== 'string' || !id || id.length > 128))) ||
         !validRevision(pending.initialPendingCount) ||
         pending.initialPendingCount < pending.eligiblePostIds.length ||
         !pending.eligiblePostOccurrences ||
@@ -208,7 +219,8 @@ export class SendModeService {
     return {
       mode: value.mode,
       revision: value.revision,
-      transition: pending ?? null,
+      transition: value.transition ?? null,
+      legacyDrain: value.legacyDrain ?? null,
     };
   }
 
@@ -350,7 +362,7 @@ export class SendModeService {
       this.controlledObligations(blockers) === 0;
     const mode =
       configured.mode === 'CONTROLLED'
-        ? system.effectiveEnabled && blockers.autonomousEffects === 0
+        ? system.effectiveEnabled
           ? 'CONTROLLED'
           : 'PAUSED'
         : autonomousAllowed
@@ -373,6 +385,9 @@ export class SendModeService {
             system.effectiveEnabled
           )
         : null,
+      legacyDrain: configured.legacyDrain
+        ? await this.transitionStateIn(tx, organizationId, configured.legacyDrain, system.effectiveEnabled)
+        : null,
       reallocation: await this.reallocationStateIn(tx, organizationId, row?.value),
     };
   }
@@ -381,10 +396,17 @@ export class SendModeService {
     tx: Prisma.TransactionClient,
     organizationId: string
   ) {
+    const setting = await tx.settings.findUnique({ where: { key: organizationSendModeKey(organizationId) } });
+    const config = this.parseOrganization(setting?.value);
+    const captured = config.legacyDrain ?? config.transition;
+    const capturedIds = captured?.eligiblePostIds ?? [];
+    const records = await this.autonomousRecordsIn(tx, organizationId);
+    const evidencedIds = [...new Set(records.filter(({ result }) => result.status !== 'NOT_SUBMITTED')
+      .flatMap(({ result }) => result.postIds ?? []))];
     const posts = await tx.post.findMany({
       where: {
         organizationId,
-        deletedAt: null,
+        OR: [{ deletedAt: null }, { releaseId: { not: null } }, { id: { in: capturedIds } }],
         sendIntentId: null,
         AND: [
           {
@@ -395,6 +417,8 @@ export class SendModeService {
           },
           {
             OR: [
+              { id: { in: capturedIds } },
+              { id: { in: evidencedIds }, state: { not: 'PUBLISHED' } },
               { state: 'QUEUE' },
               { state: 'DRAFT', parentPostId: { not: null } },
               {
@@ -417,12 +441,16 @@ export class SendModeService {
         parentPostId: true,
         releaseURL: true,
         createdAt: true,
+        sendIntentId: true,
+        executionProtocol: true,
+        integrationId: true,
+        providerIdentifier: true,
+        publishMethod: true,
       },
       take: 5001,
     });
     if (posts.length > 5000)
       throw new ConflictException('SEND_MODE_TRANSITION_TOO_LARGE');
-    const records = await this.autonomousRecordsIn(tx, organizationId);
     const byId = new Map(posts.map(post => [post.id, post]));
     const missingParentIds = [...new Set(posts.map(post => post.parentPostId)
       .filter((id): id is string => !!id && !byId.has(id)))];
@@ -435,17 +463,37 @@ export class SendModeService {
     }) : [];
     const parentById = new Map(parents.map(post => [post.id, post]));
     const active = new Set(posts.filter(post => {
+      if (post.state === 'PUBLISHED') return false;
       if (post.releaseId || post.releaseURL) return true;
-      if (!post.parentPostId || byId.has(post.parentPostId)) return false;
-      const parent = parentById.get(post.parentPostId);
+      if (!post.parentPostId) return false;
+      const parent = byId.get(post.parentPostId) ?? parentById.get(post.parentPostId);
+      if (byId.has(post.parentPostId) && parent?.state !== 'PUBLISHED') return false;
       return !parent || parent.state === 'PUBLISHED' || !!parent.releaseId || !!parent.releaseURL ||
         !!parent.sendIntentId || !isLegacyExecution(parent.executionProtocol);
     }).map(post => post.id));
+    // A background error/lease reset is not proof that an admitted send stopped.
+    // Durable captured ownership survives volatile task fields until settlement.
+    for (const post of posts) {
+      if (!capturedIds.includes(post.id) || post.state === 'PUBLISHED') continue;
+      // v1 also captured untouched future queue rows; retain only its failed
+      // records here, leaving live claims and receipts to the evidence below.
+      if (!config.legacyDrain && captured?.version === 1 && post.state !== 'ERROR') continue;
+      const ancestry = new Set([post.id]);
+      let parent = post.parentPostId;
+      while (parent && !ancestry.has(parent)) {
+        ancestry.add(parent); parent = byId.get(parent)?.parentPostId ?? null;
+      }
+      const stopped = !post.releaseId && !post.releaseURL && records.some(({ row, result }) =>
+        captured?.effectReceiptIds?.includes(row.id) && result.status === 'NOT_SUBMITTED' &&
+        result.postIds?.some(id => ancestry.has(id) && (!result.recurring ||
+          result.occurrenceKey === captured.eligiblePostOccurrences[id])));
+      if (!stopped) active.add(post.id);
+    }
     for (const { result } of records) {
       if (result.status === 'NOT_SUBMITTED') continue;
       for (const id of result.postIds ?? []) {
         const post = byId.get(id) ?? parentById.get(id);
-        if (post && (!result.recurring || Date.parse(result.occurrenceKey ?? '') === new Date(post.publishDate).getTime()))
+        if (post && post.state !== 'PUBLISHED' && (!result.recurring || Date.parse(result.occurrenceKey ?? '') === new Date(post.publishDate).getTime()))
           active.add(id);
       }
     }
@@ -462,7 +510,7 @@ export class SendModeService {
         if (!active.has(id)) { active.add(id); queue.push(id); }
       }
     }
-    return posts.filter(post => active.has(post.id));
+    return posts.filter(post => post.state !== 'PUBLISHED' && active.has(post.id));
   }
 
   private parseReallocation(raw: unknown): PendingReallocation | null {
@@ -484,7 +532,8 @@ export class SendModeService {
       sendIntentId: null, state: 'QUEUE', OR: [{ executionProtocol: null },
         { executionProtocol: { not: 'ACCOUNT_BOUND_V1' } }] }, select: { id: true, parentPostId: true }, take: 5001 });
     if (posts.length > 5000) throw new ConflictException('SEND_MODE_REALLOCATION_TOO_LARGE');
-    return posts;
+    const active = new Set((await this.pendingPostsIn(tx, organizationId)).map(post => post.id));
+    return posts.filter(post => !active.has(post.id));
   }
 
   private async newReallocationIn(tx: Prisma.TransactionClient, organizationId: string, userId: string): Promise<PendingReallocation | null> {
@@ -580,9 +629,11 @@ export class SendModeService {
         },
       }),
     ]);
+    const existing = await tx.post.findMany({ where: { organizationId, id: { in: pending.eligiblePostIds } }, select: { id: true } });
+    const existingIds = new Set(existing.map(post => post.id));
+    const missingIds = pending.eligiblePostIds.filter(id => !existingIds.has(id));
     const remainingCount = this.pendingCount(
-      remainingPosts.map((post) => post.id),
-      effects
+      [...remainingPosts.map(post => post.id), ...missingIds], effects
     );
     const pacing = await tx.settings.findUnique({
       where: { key: 'engage_reply_pacing' },
@@ -599,7 +650,7 @@ export class SendModeService {
     const replyLeaseMinutes = Number.isFinite(configuredReplyLease) && configuredReplyLease > 0
       ? configuredReplyLease : 30;
     const receipts = await this.autonomousRecordsIn(tx, organizationId);
-    const needsReconciliation =
+    const needsReconciliation = missingIds.length > 0 ||
       remainingPosts.some(post =>
         !!post.releaseURL ||
         (post.parentPostId && !remainingPosts.some(parent => parent.id === post.parentPostId)) ||
@@ -660,11 +711,70 @@ export class SendModeService {
     };
   }
 
+  private async normalizeTransitionIn(tx: Prisma.TransactionClient, organizationId: string, previous: PendingSendModeTransition): Promise<PendingSendModeTransition> {
+    if (previous.version === 2) return { ...previous,
+      effectReceiptIds: previous.effectReceiptIds ?? (await this.pendingAutonomousIn(tx, organizationId)).map(({ row }) => row.id) };
+    const activePosts = await this.pendingPostsIn(tx, organizationId);
+    const active = new Map(activePosts.map(post => [post.id, post]));
+    const existing = await tx.post.findMany({ where: { organizationId,
+      id: { in: previous.eligiblePostIds } }, select: { id: true } });
+    const existingIds = new Set(existing.map(post => post.id));
+    // Old cleanup could delete a claimed row without stopping its executor.
+    // Missing captured work remains uncertain; absence never proves settlement.
+    const eligible = previous.eligiblePostIds.filter(id => active.has(id) || !existingIds.has(id));
+    const captured = new Set(eligible);
+    const anchors = new Set(eligible.filter(id => {
+      const post = active.get(id);
+      return !!post && previous.eligiblePostOccurrences[id] ===
+        (post.publishDate ? new Date(post.publishDate).toISOString() : null);
+    }));
+    const completedAncestors = await tx.post.findMany({
+      where: { organizationId, deletedAt: null, state: 'PUBLISHED',
+        id: { in: previous.eligiblePostIds.filter(id => !active.has(id)) } },
+      select: { id: true, publishDate: true, intervalInDays: true },
+    });
+    const facts = await this.autonomousRecordsIn(tx, organizationId);
+    for (const ancestor of completedAncestors) {
+      const sameOccurrence = previous.eligiblePostOccurrences[ancestor.id] ===
+        new Date(ancestor.publishDate).toISOString();
+      const confirmedSingle = !ancestor.intervalInDays && facts.some(({ result }) =>
+        result.status === 'CONFIRMED' && result.recurring === false &&
+        result.occurrenceKey === 'single' && result.postIds?.includes(ancestor.id));
+      if (sameOccurrence || confirmedSingle) anchors.add(ancestor.id);
+    }
+    const occurrences = Object.fromEntries(eligible.map(id => [id, previous.eligiblePostOccurrences[id]]));
+    // v1 captured queue rows, but its executor also expanded existing
+    // draft continuations. Recover only that already recorded chain.
+    for (const post of activePosts) {
+      if (post.state !== 'DRAFT' || !post.parentPostId || captured.has(post.id) ||
+          new Date(post.createdAt).getTime() > Date.parse(previous.requestedAt)) continue;
+      let ancestor = post.parentPostId;
+      const seen = new Set([post.id]);
+      while (!anchors.has(ancestor)) {
+        if (seen.has(ancestor)) break;
+        seen.add(ancestor);
+        const parent = active.get(ancestor);
+        if (!parent?.parentPostId || new Date(parent.createdAt).getTime() > Date.parse(previous.requestedAt)) break;
+        ancestor = parent.parentPostId;
+      }
+      if (!anchors.has(ancestor)) continue;
+      captured.add(post.id);
+      anchors.add(post.id);
+      eligible.push(post.id);
+      occurrences[post.id] = post.publishDate ? new Date(post.publishDate).toISOString() : null;
+    }
+    const effects = await this.pendingAutonomousIn(tx, organizationId);
+    return { ...previous, version: 2, eligiblePostIds: eligible,
+      eligiblePostOccurrences: occurrences, effectReceiptIds: effects.map(({ row }) => row.id),
+      initialPendingCount: this.pendingCount(eligible, effects) };
+  }
+
   async reconcilePendingTransitions() {
     const rows = await this.db.settings.findMany({
       where: {
         key: { startsWith: SEND_MODE_ORGANIZATION_PREFIX },
-        value: { path: ['transition', 'targetMode'], equals: 'CONTROLLED' },
+        OR: [{ value: { path: ['transition', 'targetMode'], equals: 'CONTROLLED' } },
+          { value: { path: ['legacyDrain', 'targetMode'], equals: 'CONTROLLED' } }],
       },
       select: { key: true },
     });
@@ -680,85 +790,33 @@ export class SendModeService {
             const stored = await tx.settings.findUnique({ where: { key: row.key } });
             const previous = this.parseOrganization(stored?.value).transition;
             if (previous?.version === 1) {
-              const activePosts = await this.pendingPostsIn(tx, organizationId);
-              const active = new Map(activePosts.map(post => [post.id, post]));
-              const eligible = previous.eligiblePostIds.filter(id => active.has(id));
-              const captured = new Set(eligible);
-              const anchors = new Set(eligible.filter(id => {
-                const post = active.get(id)!;
-                return previous.eligiblePostOccurrences[id] ===
-                  (post.publishDate ? new Date(post.publishDate).toISOString() : null);
-              }));
-              const completedAncestors = await tx.post.findMany({
-                where: { organizationId, deletedAt: null, state: 'PUBLISHED',
-                  id: { in: previous.eligiblePostIds.filter(id => !active.has(id)) } },
-                select: { id: true, publishDate: true, intervalInDays: true },
-              });
-              const facts = await this.autonomousRecordsIn(tx, organizationId);
-              for (const ancestor of completedAncestors) {
-                const sameOccurrence = previous.eligiblePostOccurrences[ancestor.id] ===
-                  new Date(ancestor.publishDate).toISOString();
-                const confirmedSingle = !ancestor.intervalInDays && facts.some(({ result }) =>
-                  result.status === 'CONFIRMED' && result.recurring === false &&
-                  result.occurrenceKey === 'single' && result.postIds?.includes(ancestor.id));
-                if (sameOccurrence || confirmedSingle) anchors.add(ancestor.id);
-              }
-              const occurrences = Object.fromEntries(eligible.map(id => [id, previous.eligiblePostOccurrences[id]]));
-              // v1 captured queue rows, but its executor also expanded existing
-              // draft continuations. Recover only that already recorded chain.
-              for (const post of activePosts) {
-                if (post.state !== 'DRAFT' || !post.parentPostId || captured.has(post.id) ||
-                    new Date(post.createdAt).getTime() > Date.parse(previous.requestedAt)) continue;
-                let ancestor = post.parentPostId;
-                const seen = new Set([post.id]);
-                while (!anchors.has(ancestor)) {
-                  if (seen.has(ancestor)) break;
-                  seen.add(ancestor);
-                  const parent = active.get(ancestor);
-                  if (!parent?.parentPostId || new Date(parent.createdAt).getTime() > Date.parse(previous.requestedAt)) break;
-                  ancestor = parent.parentPostId;
-                }
-                if (!anchors.has(ancestor)) continue;
-                captured.add(post.id);
-                anchors.add(post.id);
-                eligible.push(post.id);
-                occurrences[post.id] = post.publishDate ? new Date(post.publishDate).toISOString() : null;
-              }
-              const effects = await this.pendingAutonomousIn(tx, organizationId);
+              const normalized = await this.normalizeTransitionIn(tx, organizationId, previous);
               await tx.settings.updateMany({ where: { key: row.key }, data: { value: sendJson({
-                mode: 'AUTONOMOUS', revision: state.revision,
-                transition: { ...previous, version: 2, eligiblePostIds: eligible,
-                  eligiblePostOccurrences: occurrences,
-                  initialPendingCount: this.pendingCount(eligible, effects) },
+                mode: 'AUTONOMOUS', revision: state.revision, transition: normalized,
               }) } });
               state = await this.stateIn(tx, organizationId);
             }
-            if (
-              !state.transition ||
-              state.transition.remainingCount !== 0 ||
-              state.transition.status !== 'DRAINING' ||
-              state.mode !== 'AUTONOMOUS' ||
-              !state.autonomousAllowed ||
-              !state.systemEnabled
-            )
-              return false;
-            if (state.revision >= 2147483647)
-              throw new ServiceUnavailableException(
-                'SEND_MODE_REVISION_EXHAUSTED'
-              );
             const setting = await tx.settings.findUnique({ where: { key: row.key } });
-            const requestedBy = this.parseOrganization(setting?.value).transition!.requestedByUserId;
-            const reallocation = await this.newReallocationIn(tx, organizationId, requestedBy);
-            await tx.settings.updateMany({
-              where: { key: row.key },
-              data: {
-                value: sendJson({
-                  mode: state.transition.targetMode,
-                  revision: state.revision + 1,
-                  ...(reallocation ? { reallocation } : {}),
-                }),
-              },
-            });
+            const config = this.parseOrganization(setting?.value);
+            if (config.legacyDrain) {
+              const reallocation = this.parseReallocation(setting?.value) ??
+                await this.newReallocationIn(tx, organizationId, config.legacyDrain.requestedByUserId);
+              const { legacyDrain: _old, reallocation: _allocation, ...value } = setting!.value as Prisma.JsonObject;
+              await tx.settings.updateMany({ where: { key: row.key }, data: { value: sendJson({ ...value,
+                ...(state.legacyDrain!.remainingCount ? { legacyDrain: config.legacyDrain } : {}),
+                ...(reallocation ? { reallocation } : {}),
+              }) } });
+              return false;
+            }
+            if (!config.transition || !state.systemEnabled) return false;
+            if (state.revision >= 2147483647)
+              throw new ServiceUnavailableException('SEND_MODE_REVISION_EXHAUSTED');
+            const reallocation = await this.newReallocationIn(tx, organizationId, config.transition.requestedByUserId);
+            await tx.settings.updateMany({ where: { key: row.key }, data: { value: sendJson({
+              mode: 'CONTROLLED', revision: state.revision + 1,
+              ...(state.transition!.remainingCount ? { legacyDrain: await this.normalizeTransitionIn(tx, organizationId, config.transition) } : {}),
+              ...(reallocation ? { reallocation } : {}),
+            }) } });
             return true;
           })
         );
@@ -816,32 +874,90 @@ export class SendModeService {
     existingPostIds?: string[]
   ) {
     const state = await this.lockIn(tx, organizationId);
+    if (state.configuredMode === 'CONTROLLED' && state.legacyDrain && existingPostIds?.length) {
+      const captured = await this.capturedWorkIn(tx, organizationId);
+      const active = new Set((await this.pendingPostsIn(tx, organizationId)).map(post => post.id));
+      if (existingPostIds.every(id => captured?.eligiblePostIds.includes(id) && active.has(id))) return state;
+      throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
+    }
     if (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed)
       throw new ConflictException('SEND_MODE_AUTONOMOUS_REQUIRED');
     if (state.transition) {
       const allowed = await this.autonomousDrainPostIdsIn(tx, organizationId);
-      if (
-        !existingPostIds?.length ||
-        existingPostIds.some((id) => !allowed!.includes(id))
-      )
+      if (!existingPostIds?.length || existingPostIds.some(id => !allowed!.includes(id)))
         throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
     }
     return state;
   }
 
-  async autonomousDrainPostIdsIn(
-    tx: Prisma.TransactionClient,
-    organizationId: string
-  ): Promise<string[] | null> {
+  private async capturedWorkIn(tx: Prisma.TransactionClient, organizationId: string) {
+    const row = await tx.settings.findUnique({ where: { key: organizationSendModeKey(organizationId) } });
+    const config = this.parseOrganization(row?.value);
+    return config.legacyDrain ?? config.transition;
+  }
+
+  async autonomousDrainPostIdsIn(tx: Prisma.TransactionClient, organizationId: string): Promise<string[] | null> {
     const state = await this.lockIn(tx, organizationId);
+    // Switching never transfers an old lease to another legacy executor.
+    if (state.configuredMode === 'CONTROLLED') return [];
     if (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed)
       throw new ConflictException('SEND_MODE_AUTONOMOUS_REQUIRED');
     if (!state.transition) return null;
-    const row = await tx.settings.findUnique({
-      where: { key: organizationSendModeKey(organizationId) },
-    });
+    const captured = await this.capturedWorkIn(tx, organizationId);
     const active = new Set((await this.pendingPostsIn(tx, organizationId)).map(post => post.id));
-    return this.parseOrganization(row?.value).transition!.eligiblePostIds.filter(id => active.has(id));
+    return captured!.eligiblePostIds.filter(id => active.has(id));
+  }
+
+  async activeLegacyPostIdsIn(tx: Prisma.TransactionClient, organizationId: string) {
+    return (await this.pendingPostsIn(tx, organizationId)).map(post => post.id);
+  }
+
+  async legacyAccountBlockedIn(tx: Prisma.TransactionClient, organizationId: string, integrationId: string) {
+    const [posts, records, captured] = await Promise.all([
+      this.pendingPostsIn(tx, organizationId), this.autonomousRecordsIn(tx, organizationId),
+      this.capturedWorkIn(tx, organizationId),
+    ]);
+    if (captured?.eligiblePostIds.length) {
+      const existing = await tx.post.findMany({ where: { organizationId, id: { in: captured.eligiblePostIds } }, select: { id: true } });
+      if (existing.length !== captured.eligiblePostIds.length) return true;
+    }
+    const associated = new Map(posts.map(post => [post.id, { id: post.id, parentPostId: post.parentPostId, publishDate: post.publishDate }]));
+    let parents = posts.map(post => post.parentPostId).filter((id): id is string => !!id && !associated.has(id));
+    while (parents.length) {
+      if (associated.size > 5000) throw new ConflictException('SEND_MODE_TRANSITION_TOO_LARGE');
+      const rows = await tx.post.findMany({ where: { organizationId, id: { in: parents } },
+        select: { id: true, parentPostId: true, publishDate: true } });
+      const seen = new Set(parents);
+      for (const row of rows) associated.set(row.id, row);
+      parents = rows.map(row => row.parentPostId).filter((id): id is string => !!id && !associated.has(id) && !seen.has(id));
+    }
+    const relevant = records.filter(({ result }) => result.status !== 'NOT_SUBMITTED' &&
+      (result.status !== 'CONFIRMED' || result.postIds?.some(id => associated.has(id) &&
+        (!result.recurring || Date.parse(result.occurrenceKey ?? '') === new Date(associated.get(id)!.publishDate).getTime()))));
+    if (!posts.length && !relevant.length) return false;
+    const target = await tx.integration.findFirst({ where: { id: integrationId, organizationId } });
+    if (!target) return true;
+    const platform = canonicalControlledPlatform(target.providerIdentifier);
+    const affected = async (id: string | null, family?: string | null, browser = false) => {
+      const account = id && !browser ? await tx.integration.findFirst({ where: { id, organizationId } }) : null;
+      const sourcePlatform = family || (account ? canonicalControlledPlatform(account.providerIdentifier) : null);
+      if (sourcePlatform && canonicalControlledPlatform(sourcePlatform) !== platform) return false;
+      if (browser || !account || !account.identityNamespace || account.identityNamespace === 'legacy' || !account.internalId)
+        return true;
+      if (account.id === target.id) return true;
+      if (!target.identityNamespace || !target.internalId) return true;
+      return canonicalSendAccount(organizationId, account.providerIdentifier, account.identityNamespace, account.internalId) ===
+        canonicalSendAccount(organizationId, target.providerIdentifier, target.identityNamespace, target.internalId);
+    };
+    for (const { result } of relevant) {
+      if (await affected(result.integrationId, result.platform, result.source === 'BROWSER')) return true;
+    }
+    for (const post of posts) {
+      const account = post.integrationId ? await tx.integration.findFirst({ where: { id: post.integrationId, organizationId } }) : null;
+      const family = post.providerIdentifier || account?.providerIdentifier;
+      if (await affected(post.integrationId, family, post.publishMethod !== 'API')) return true;
+    }
+    return false;
   }
 
   async isTransitionPending(organizationId: string) {
@@ -952,7 +1068,7 @@ export class SendModeService {
         throw new ConflictException('SEND_MODE_REVISION_CONFLICT');
       if (body.mode === 'CONTROLLED' && !current.systemEnabled)
         throw new ServiceUnavailableException('ACCOUNT_BINDINGS_NOT_ENABLED');
-      if (current.transition)
+      if (current.transition && body.mode !== 'CONTROLLED')
         throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
       let transition: PendingSendModeTransition | null = null;
       if (
@@ -966,10 +1082,6 @@ export class SendModeService {
           effects
         );
         if (initialPendingCount > 0) {
-          if (current.revision >= 2147483646)
-            throw new ServiceUnavailableException(
-              'SEND_MODE_REVISION_EXHAUSTED'
-            );
           if (current.mode !== 'AUTONOMOUS' || !current.autonomousAllowed)
             throw new ConflictException('SEND_MODE_SWITCH_UNSAFE');
           transition = {
@@ -988,12 +1100,13 @@ export class SendModeService {
               ])
             ),
             initialPendingCount,
+            effectReceiptIds: effects.map(({ row }) => row.id),
           };
         }
       } else if (
         body.mode === 'AUTONOMOUS' &&
         this.controlledObligations(current.blockers) +
-          current.blockers.autonomousEffects >
+          current.blockers.autonomousEffects + (current.legacyDrain?.remainingCount ?? 0) >
           0 &&
         current.configuredMode !== body.mode
       ) {
@@ -1002,26 +1115,20 @@ export class SendModeService {
           message: 'SEND_MODE_SWITCH_UNSAFE',
           blockers: current.blockers,
         });
-      } else if (
-        body.mode === 'CONTROLLED' &&
-        current.blockers.autonomousEffects > 0
-      ) {
-        throw new ConflictException({
-          code: 'SEND_MODE_SWITCH_UNSAFE',
-          message: 'SEND_MODE_SWITCH_UNSAFE',
-          blockers: current.blockers,
-        });
       }
       const currentSetting = await tx.settings.findUnique({ where: { key: organizationSendModeKey(organizationId) } });
-      const reallocation = !transition && body.mode === 'CONTROLLED'
+      const existingConfig = this.parseOrganization(currentSetting?.value);
+      const legacyDrain = body.mode === 'CONTROLLED'
+        ? existingConfig.legacyDrain ?? (existingConfig.transition ? await this.normalizeTransitionIn(tx, organizationId, existingConfig.transition) : transition) : null;
+      const reallocation = body.mode === 'CONTROLLED'
         ? this.parseReallocation(currentSetting?.value) ?? await this.newReallocationIn(tx, organizationId, userId) : null;
       await tx.settings.updateMany({
         where: { key: organizationSendModeKey(organizationId) },
         data: {
           value: sendJson({
-            mode: transition ? 'AUTONOMOUS' : body.mode,
+            mode: body.mode,
             revision: current.revision + 1,
-            ...(transition ? { transition } : {}),
+            ...(legacyDrain ? { legacyDrain } : {}),
             ...(reallocation ? { reallocation } : {}),
           }),
         },
@@ -1301,9 +1408,9 @@ export class SendModeService {
           'AUTONOMOUS_EFFECT_RECONCILIATION_REQUIRED'
         );
       }
-      if (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed)
+      if (!state.transition && !state.legacyDrain && (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed))
         throw new ConflictException('SEND_MODE_AUTONOMOUS_REQUIRED');
-      if (state.transition) {
+      if (state.transition || state.legacyDrain) {
         if (
           !['POST', 'COMMENT'].includes(request.action) ||
           !Array.isArray(request.postIds)
@@ -1393,11 +1500,8 @@ export class SendModeService {
           )
         )
           throw new ConflictException('AUTONOMOUS_EFFECT_CONTENT_CHANGED');
-        if (state.transition) {
-          const setting = await tx.settings.findUnique({
-            where: { key: organizationSendModeKey(organizationId) },
-          });
-          const captured = this.parseOrganization(setting?.value).transition!;
+        if (state.transition || state.legacyDrain) {
+          const captured = (await this.capturedWorkIn(tx, organizationId))!;
           if (
             posts.some(
               (post) =>
@@ -1559,6 +1663,15 @@ export class SendModeService {
           result: sendJson(result),
         },
       });
+      if (state.legacyDrain) {
+        const setting = await tx.settings.findUnique({ where: { key: organizationSendModeKey(organizationId) } });
+        const captured = this.parseOrganization(setting?.value).legacyDrain!;
+        const ids = [...new Set([...(captured.effectReceiptIds ?? []), receipt.id])];
+        if (ids.length > 5000) throw new ConflictException('SEND_MODE_TRANSITION_TOO_LARGE');
+        await tx.settings.updateMany({ where: { key: setting!.key }, data: { value: sendJson({
+          ...(setting!.value as Prisma.JsonObject), legacyDrain: { ...captured, effectReceiptIds: ids },
+        }) } });
+      }
       return { replay: false as const, id: receipt.id };
     });
     if (admitted.replay) return admitted.value as T;
@@ -1729,6 +1842,10 @@ export class SendModeService {
           userId,
         };
       }
+      // Legacy leases do not identify their original browser owner. Only an
+      // already admitted receipt may finish after cutover; never grant a new one.
+      if (state.configuredMode === 'CONTROLLED')
+        throw new ConflictException('SEND_MODE_AUTONOMOUS_REQUIRED');
       let storedPostId = body.postId;
       let storedPlatform: string | null | undefined;
       if (body.sentReplyId) {
@@ -1800,15 +1917,12 @@ export class SendModeService {
         if (this.browserPlatform(storedPlatform) !== platform)
           throw new ConflictException('BROWSER_WRITE_PLATFORM_CHANGED');
       }
-      if (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed)
+      if (!state.transition && !state.legacyDrain && (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed))
         throw new ConflictException('SEND_MODE_AUTONOMOUS_REQUIRED');
-      if (state.transition) {
+      if (state.transition || state.legacyDrain) {
         if (!post) throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
         await this.assertAutonomousIn(tx, organizationId, [post.id]);
-        const setting = await tx.settings.findUnique({
-          where: { key: organizationSendModeKey(organizationId) },
-        });
-        const pending = this.parseOrganization(setting?.value).transition!;
+        const pending = (await this.capturedWorkIn(tx, organizationId))!;
         const occurrence =
           post.publishDate &&
           Number.isFinite(new Date(post.publishDate).getTime())

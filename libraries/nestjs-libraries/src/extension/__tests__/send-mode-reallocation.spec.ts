@@ -121,7 +121,6 @@ it('does not convert claims, previously published content or partial threads', a
   const issues = await service.reallocateUnsentLegacy('org', 'user');
   expect(issues).toEqual(
     expect.arrayContaining([
-      { postId: 'known', code: 'CONTENT_ALREADY_SUBMITTED' },
       { postId: 'partial', code: 'CONTENT_NOT_ENQUEUEABLE' },
     ])
   );
@@ -179,7 +178,7 @@ it('rechecks a lease acquired between discovery and enqueue and preserves it', a
     db.rows('post')[0].releaseId = 'racing-lease';
   });
   expect(await service.reallocateUnsentLegacy('org', 'user')).toEqual([
-    { postId: 'root', code: 'CONTENT_ALREADY_SUBMITTED' },
+    { postId: 'root', code: 'LEGACY_CONTENT_DRAIN_REQUIRED' },
   ]);
   expect(db.rows('post')[0].releaseId).toBe('racing-lease');
   expect(db.rows('sendIntent')).toHaveLength(0);
@@ -200,12 +199,10 @@ it('retains a confirmed legacy receipt instead of reenqueuing a missing business
       occurrenceKey: 'single',
     },
   });
-  expect(await service.reallocateUnsentLegacy('org', 'user')).toEqual([
-    { postId: 'root', code: 'AUTONOMOUS_EFFECT_RECONCILIATION_REQUIRED' },
-  ]);
+  expect(await service.reallocateUnsentLegacy('org', 'user')).toEqual([]);
   expect(db.rows('sendIntent')).toHaveLength(0);
 });
-it('fails closed before adopting when any old platform effect is unresolved', async () => {
+it('keeps a root with an unresolved old effect out of controlled adoption', async () => {
   const { db, service, post } = fixture();
   post('root');
   db.seed('sendMutationReceipt', {
@@ -221,9 +218,7 @@ it('fails closed before adopting when any old platform effect is unresolved', as
       occurrenceKey: 'single',
     },
   });
-  await expect(service.reallocateUnsentLegacy('org', 'user')).rejects.toThrow(
-    'SEND_MODE_CONTROLLED_REQUIRED'
-  );
+  expect(await service.reallocateUnsentLegacy('org', 'user')).toEqual([]);
   expect(db.rows('sendIntent')).toHaveLength(0);
 });
 it('keeps a valid account-optional root queued for verified current-actor selection', async () => {
