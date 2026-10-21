@@ -31,6 +31,7 @@ import {
   sessionActorKey,
   observationProvider,
 } from './extension-node.protocol';
+import { CONTROLLED_SEND_PLATFORMS } from './controlled-platforms';
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
@@ -267,6 +268,37 @@ export class ExtensionNodeService {
     });
   }
 
+  async identityProbePlatforms(org: string, user: string, id: string | undefined, token: string | undefined, rootPostId?: string) {
+    if (rootPostId !== undefined && (!rootPostId || rootPostId.length > 128)) throw new BadRequestException('SEND_ROOT_INVALID');
+    return this.transact(async tx => {
+      const node = await this.authenticateIn(tx, org, user, id, token);
+      const now = new Date();
+      const sessions = await tx.extensionNodeSession.findMany({ where: { organizationId: org, extensionNodeId: node.id,
+        verificationStatus: 'VERIFIED', integrationId: { not: null },
+        verificationExpiresAt: { gt: new Date(now.getTime() + 60000) } } });
+      const platforms: string[] = [];
+      for (const platform of CONTROLLED_SEND_PLATFORMS) {
+        const capability = (node.capabilities as any)?.[platform];
+        if (!capability?.strictAccountVerification) continue;
+        const fresh = sessions.filter(session => session.platform === platform);
+        const actions = [capability.post && 'POST', capability.reply && 'REPLY'].filter(Boolean) as ('POST' | 'REPLY')[];
+        if (!actions.length) continue;
+        const pending = await tx.post.findFirst({ where: {
+          organizationId: org, state: 'QUEUE', parentPostId: null, deletedAt: null,
+          ...(rootPostId ? { id: rootPostId } : {}),
+          executionProtocol: 'ACCOUNT_BOUND_V1', publishMethod: 'EXTENSION', publishDate: { lte: now },
+          providerIdentifier: { in: platform === 'linkedin' ? ['linkedin', 'linkedin-page'] : [platform] },
+          sendIntent: { status: { in: ['QUEUED', 'RESERVED'] }, action: { in: actions } },
+          OR: [{ integrationId: { not: null, notIn: fresh.map(session => session.integrationId!) } },
+            ...(!fresh.some(session => !session.actorKey) ? [{ integrationId: null, accountSelectionMode: 'CURRENT_SESSION',
+              accountResolution: { not: 'PRESELECTION_REQUIRED' } }] : [])],
+        }, select: { id: true } });
+        if (pending) platforms.push(platform);
+      }
+      return { platforms };
+    });
+  }
+
   async list(org: string, user: string) {
     await this.member(this.db, org, user);
     const rows = await this.db.extensionNode.findMany({
@@ -324,6 +356,10 @@ export class ExtensionNodeService {
     const fingerprint = hashSecret(canonical(body));
     return this.transact(async (tx) => {
       const node = await this.authenticateIn(tx, org, user, id, token);
+      if (body.platforms.some(entry => entry.accountRecovery !== undefined)) {
+        const member = await this.member(tx, org, user);
+        if (!['ADMIN', 'SUPERADMIN'].includes(member.role)) throw new ForbiddenException('ACCOUNT_IDENTITY_ADMIN_REQUIRED');
+      }
       const now = new Date();
       const metadata =
         body.reportSequence! > node.lastReportSequence
@@ -380,9 +416,16 @@ export class ExtensionNodeService {
           });
         }
         let matched = resolveObservedAccount(entry, accounts);
-        let registration: { registrationStatus?: string; blockCode?: string } =
+        let registration: { registrationStatus?: string; blockCode?: string; recovery?: { integrationId: string; action: 'RESTORE' | 'VERIFY_LEGACY'; name: string } } =
           {};
         const probe = sessionDecision(entry, prior, now, 'identity-candidate');
+        if (entry.accountRecovery !== undefined &&
+            (!entry.accountRecovery || typeof entry.accountRecovery !== 'object' || entry.accountRecovery.confirmed !== true || typeof entry.accountRecovery.integrationId !== 'string' ||
+             !entry.accountRecovery.integrationId || entry.accountRecovery.integrationId.length > 128 ||
+             probe.verificationStatus !== 'VERIFIED' || entry.probeId === prior?.probeId ||
+             !['LIVE_COOKIE_ID', 'LIVE_PAGE_ACTOR'].includes(entry.evidenceKind ?? '') ||
+             !stableSocialIdentity(observationProvider(entry), entry.identityNamespace ?? '', entry.id ?? '')))
+          throw new BadRequestException('ACCOUNT_RECOVERY_EVIDENCE_REQUIRED');
         if (
           probe.verificationStatus === 'VERIFIED' &&
           entry.probeId !== prior?.probeId &&
@@ -409,6 +452,9 @@ export class ExtensionNodeService {
               maxChannels: creation.maxChannels,
               handle: entry.handle,
               name: entry.name,
+              ...(entry.accountRecovery ? { extensionRecovery: {
+                integrationId: entry.accountRecovery.integrationId, verifiedByUserId: user, probeId: entry.probeId!,
+              } } : {}),
             }
           );
           registration = resolved;
@@ -480,6 +526,7 @@ export class ExtensionNodeService {
           ...(registration.blockCode
             ? { blockCode: registration.blockCode }
             : {}),
+          ...(registration.recovery ? { recovery: registration.recovery } : {}),
           sessionRevision: decision.sessionRevision,
           verificationStatus: decision.verificationStatus,
           verificationExpiresAt:

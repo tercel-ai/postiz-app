@@ -11,6 +11,19 @@ beforeEach(() => vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true'));
 afterEach(() => vi.unstubAllEnvs());
 
 describe('terminal API registration', () => {
+  it('offers read-only task-driven identity hints only for authenticated controlled nodes', async () => {
+    const service = { identityProbePlatforms: vi.fn().mockResolvedValue({ platforms: ['medium'] }) };
+    const mode = { get: vi.fn().mockResolvedValue({ mode: 'CONTROLLED', systemEnabled: true }) };
+    const controller = new ExtensionNodesController(service as any, mode as any);
+    expect(Reflect.getMetadata(METHOD_METADATA, ExtensionNodesController.prototype.identityProbes)).toBe(RequestMethod.GET);
+    expect(await controller.identityProbes(org, user, 'node', 'token', 'ACCOUNT_BOUND_V1', 'root')).toEqual({ platforms: ['medium'] });
+    expect(service.identityProbePlatforms).toHaveBeenCalledWith('org', 'user', 'node', 'token', 'root');
+    service.identityProbePlatforms.mockClear();
+    await expect(controller.identityProbes(org, user, 'node', 'token', undefined)).rejects.toThrow('NODE_AUTHENTICATION_REQUIRED');
+    mode.get.mockResolvedValue({ mode: 'PAUSED', systemEnabled: false });
+    await expect(controller.identityProbes(org, user, 'node', 'token', 'ACCOUNT_BOUND_V1')).rejects.toThrow('EXTENSION_NODES_NOT_ENABLED');
+    expect(service.identityProbePlatforms).not.toHaveBeenCalled();
+  });
   it('keeps new writes on POST and list on GET', () => {
     expect(Reflect.getMetadata(PATH_METADATA, ExtensionNodesController)).toBe(
       '/extension/nodes'

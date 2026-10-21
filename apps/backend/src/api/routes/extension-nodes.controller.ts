@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Get,
+  Query,
   Headers,
   UnauthorizedException,
   Post,
@@ -58,6 +59,15 @@ export class ExtensionNodesController {
       registeredByUserId: node.registeredByUserId,
       status: node.status,
     };
+  }
+
+  @Get('/identity-probes')
+  async identityProbes(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User,
+    @Headers('x-extension-node-id') nodeId?: string, @Headers('x-extension-node-token') nodeToken?: string,
+    @Headers('x-extension-protocol-version') protocol?: string, @Query('rootPostId') rootPostId?: string) {
+    if (protocol !== 'ACCOUNT_BOUND_V1') throw new UnauthorizedException('NODE_AUTHENTICATION_REQUIRED');
+    await this.enabled(org.id, user.id, true);
+    return this.nodes.identityProbePlatforms(org.id, user.id, nodeId, nodeToken, rootPostId);
   }
 
   @Get('/')

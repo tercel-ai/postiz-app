@@ -57,6 +57,26 @@ function fixture() {
   return { db, service, report };
 }
 describe('terminal identity synchronization', () => {
+  it('does not request browser probes when no controlled work is due', async () => {
+    const f = fixture(); f.db.rows('extensionNode')[0].capabilities = { x: { post: true, reply: true, strictAccountVerification: true } };
+    expect(await f.service.identityProbePlatforms('org', 'user', 'node-a', 'token')).toEqual({ platforms: [] });
+  });
+  it('requests only due platform identities and skips a still-fresh matching verified account', async () => {
+    const f = fixture();
+    f.db.rows('extensionNode')[0].capabilities = Object.fromEntries(['x', 'reddit', 'medium'].map(p => [p, { post: true, reply: true, strictAccountVerification: true }]));
+    const post = (id: string, platform: string, patch = {}) => {
+      f.db.seed('sendIntent', { id: 'intent-' + id, organizationId: 'org', status: 'QUEUED', action: 'POST' });
+      f.db.seed('post', { id, organizationId: 'org', state: 'QUEUE', parentPostId: null,
+      executionProtocol: 'ACCOUNT_BOUND_V1', publishMethod: 'EXTENSION', providerIdentifier: platform, integrationId: 'account-' + platform,
+      publishDate: now, sendIntentId: 'intent-' + id, ...patch });
+    };
+    post('x', 'x'); post('reddit', 'reddit'); post('future', 'medium', { publishDate: new Date(now.getTime() + 3600000) });
+    f.db.seed('extensionNodeSession', { extensionNodeId: 'node-a', organizationId: 'org', platform: 'reddit', actorKey: '',
+      integrationId: 'account-reddit', verificationStatus: 'VERIFIED', verificationExpiresAt: new Date(now.getTime() + 120000) });
+    expect(await f.service.identityProbePlatforms('org', 'user', 'node-a', 'token')).toEqual({ platforms: ['x'] });
+    expect(await f.service.identityProbePlatforms('org', 'user', 'node-a', 'token', 'reddit')).toEqual({ platforms: [] });
+    expect(f.db.rows('sendExecution')).toHaveLength(0);
+  });
   it('creates one actor and associates independent verified sessions from two terminals', async () => {
     const f = fixture();
     const [a, b]: any[] = await Promise.all([f.report(), f.report('node-b')]);
@@ -96,6 +116,58 @@ describe('terminal identity synchronization', () => {
       name: 'custom',
       identityNamespace: 'legacy',
     });
+  });
+  it.each([false, true])('explicitly verifies the original legacy account and preserves its identity/history (deleted=%s)', async deleted => {
+    const f = fixture();
+    f.db.seed('userOrganization', { userId: 'user', organizationId: 'org', role: 'ADMIN', disabled: false });
+    f.db.seed('integration', { id: 'old', organizationId: 'org', providerIdentifier: 'x', identityNamespace: 'legacy',
+      internalId: '123', token: 'old-secret', refreshNeeded: true, disabled: true, name: 'custom', metadata: { custom: 42 },
+      deletedAt: deleted ? now : null });
+    const before: any = await f.report();
+    expect(before.results[0]).toMatchObject({ integrationId: null, recovery: {
+      integrationId: 'old', action: deleted ? 'RESTORE' : 'VERIFY_LEGACY', name: 'custom',
+    } });
+    const result: any = await f.report('node-a', { accountRecovery: { integrationId: 'old', confirmed: true } });
+    expect(result.results[0]).toMatchObject({ integrationId: 'old', verificationStatus: 'VERIFIED' });
+    expect(f.db.rows('integration')).toHaveLength(1);
+    expect(f.db.rows('integration')[0]).toMatchObject({ id: 'old', identityNamespace: 'x.rest_id', deletedAt: null,
+      token: 'old-secret', refreshNeeded: true, disabled: true, name: 'custom', metadata: { custom: 42,
+        identityAudit: { method: 'EXPLICIT_EXTENSION_RECOVERY', verifiedByUserId: 'user' } } });
+    expect(f.db.rows('extensionNodeSession')[0]).toMatchObject({ integrationId: 'old', verificationStatus: 'VERIFIED' });
+  });
+  it('requires an organization administrator for explicit account recovery', async () => {
+    const f = fixture();
+    f.db.seed('userOrganization', { userId: 'user', organizationId: 'org', role: 'USER', disabled: false });
+    await expect(f.report('node-a', { accountRecovery: { integrationId: 'old', confirmed: true } }))
+      .rejects.toThrow('ACCOUNT_IDENTITY_ADMIN_REQUIRED');
+    expect(f.db.rows('integration')).toHaveLength(0);
+  });
+  it.each([{ evidenceKind: 'CACHED' }, { verificationStatus: 'UNKNOWN' },
+    { identityObservedAt: new Date(now.getTime() - 300001).toISOString() }, { loggedIn: false }])(
+    'rejects recovery without current live evidence: %j', async patch => {
+      const f = fixture();
+      f.db.seed('userOrganization', { userId: 'user', organizationId: 'org', role: 'ADMIN', disabled: false });
+      await expect(f.report('node-a', { ...patch, accountRecovery: { integrationId: 'old', confirmed: true } }))
+        .rejects.toThrow('ACCOUNT_RECOVERY_EVIDENCE_REQUIRED');
+      expect(f.db.rows('integration')).toHaveLength(0);
+    }
+  );
+  it('never restores another organization or creates a replacement when the confirmed account changed', async () => {
+    const f = fixture();
+    f.db.seed('userOrganization', { userId: 'user', organizationId: 'org', role: 'ADMIN', disabled: false });
+    f.db.seed('integration', { id: 'foreign', organizationId: 'other', providerIdentifier: 'x', identityNamespace: 'legacy', internalId: '123', deletedAt: now });
+    const result: any = await f.report('node-a', { accountRecovery: { integrationId: 'foreign', confirmed: true } });
+    expect(result.results[0]).toMatchObject({ integrationId: null, blockCode: 'ACCOUNT_RECOVERY_CHANGED' });
+    expect(f.db.rows('integration')).toHaveLength(1);
+    expect(f.db.rows('integration')[0].deletedAt).toEqual(now);
+  });
+  it('checks channel capacity before restoring a deleted account', async () => {
+    const f = fixture();
+    f.db.seed('userOrganization', { userId: 'user', organizationId: 'org', role: 'ADMIN', disabled: false });
+    f.db.seed('integration', { id: 'old', organizationId: 'org', providerIdentifier: 'x', identityNamespace: 'legacy', internalId: '123', deletedAt: now });
+    const result: any = await f.report('node-a', { accountRecovery: { integrationId: 'old', confirmed: true } }, { canCreateChannels: true, maxChannels: 0 });
+    expect(result.results[0]).toMatchObject({ integrationId: null, blockCode: 'ACCOUNT_CHANNEL_LIMIT' });
+    expect(f.db.rows('integration')[0].deletedAt).toEqual(now);
   });
   it.each([
     { evidenceKind: 'CACHED' },

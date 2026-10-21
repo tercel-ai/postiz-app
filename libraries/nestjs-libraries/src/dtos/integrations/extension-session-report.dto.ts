@@ -1,6 +1,7 @@
 import { Type } from 'class-transformer';
 import {
   IsArray,
+  Equals,
   IsBoolean,
   IsDateString,
   IsIn,
@@ -15,6 +16,14 @@ import {
 } from 'class-validator';
 import { VALID_CHANNELS } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
 
+export class ExtensionAccountRecoveryDto {
+  @IsString() @MaxLength(128)
+  integrationId!: string;
+
+  @Equals(true)
+  confirmed!: true;
+}
+
 /**
  * One platform actor's login state from the extension's session-maintenance probe
  * (aisee-browser-extension's `PlatformLoginEntry`). `id` is the platform-side
@@ -23,6 +32,9 @@ import { VALID_CHANNELS } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-l
  * against `Integration.profile` when `id` is absent or doesn't resolve.
  */
 export class ExtensionSessionPlatformDto {
+  @IsOptional() @ValidateNested() @Type(() => ExtensionAccountRecoveryDto)
+  accountRecovery?: ExtensionAccountRecoveryDto;
+
   @IsString()
   @IsIn(VALID_CHANNELS as unknown as string[])
   platform!: string;

@@ -27,6 +27,21 @@ function fixture() {
   return { db, service, resolve };
 }
 describe('shared stable social actor identity', () => {
+  it('registers a dotted Medium handle and matches its existing account on later reports', async () => {
+    const f = fixture();
+    const first = await f.resolve('medium', 'medium.handle', 'tercel.yi', { handle: 'tercel.yi' });
+    expect(first).toMatchObject({ registrationStatus: 'CREATED', account: {
+      providerIdentifier: 'medium', identityNamespace: 'medium.handle', internalId: 'tercel.yi', profile: 'tercel.yi',
+    } });
+    const second = await f.resolve('medium', 'medium.handle', 'tercel.yi', { handle: 'tercel.yi' });
+    expect(second).toMatchObject({ registrationStatus: 'EXISTING', account: { id: first.account!.id } });
+    expect(f.db.rows('integration')).toHaveLength(1);
+  });
+  it.each(['alice/bob', 'alice?other=bob', 'alice#bob', 'alice%2ebob'])('rejects Medium path or URL syntax in the identity: %s', async id => {
+    const f = fixture();
+    expect(await f.resolve('medium', 'medium.handle', id)).toMatchObject({ blockCode: 'ACCOUNT_IDENTITY_UNRESOLVED' });
+    expect(f.db.rows('integration')).toHaveLength(0);
+  });
   it('promotes a uniquely matching legacy OAuth row in place without overwriting credentials or custom state', async () => {
     const f = fixture();
     f.db.seed('integration', {
