@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupSend, sendNow } from './support/send-fixture';
+import { SendModeService } from '../send-mode.service';
 import { sendBusinessSummary } from '../send-business-summary';
 import { EngageRepository } from '../../engage/engage.repository';
 import { EngageService } from '../../engage/engage.service';
@@ -7,7 +8,7 @@ import { IntegrationsController } from '../../../../../apps/backend/src/api/rout
 import { PostsController } from '../../../../../apps/backend/src/api/routes/posts.controller';
 import { CONTROLLED_SEND_PLATFORMS } from '../controlled-platforms';
 import { validateSync } from 'class-validator';
-import { QueueStoredReplyDto } from '../send-execution.dto';
+import { ClaimSendDto, EnqueueSendDto, QueueStoredReplyDto } from '../send-execution.dto';
 import { SendIntentsController } from '../../../../../apps/backend/src/api/routes/send-executions.controller';
 
 beforeEach(() => vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true'));
@@ -263,6 +264,32 @@ describe('simple saved reply business idempotency', () => {
 });
 
 describe('ordinary user sending summary', () => {
+  it('reports the same legacy ownership restriction as enqueue for a claimed saved reply', async () => {
+    const { db, service } = await draft();
+    Object.assign(db.rows('post')[0], { executionProtocol: 'LEGACY', releaseId: 'old-lease', claimedAt: sendNow });
+    const summary = await service.businessSummary('org', 'user', 'root');
+    expect(summary.allowedActions.enqueue).toEqual({ allowed: false, reason: 'LEGACY_CONTENT_DRAIN_REQUIRED' });
+    expect(summary.allowedActions.retry).toEqual({ allowed: false, reason: 'LEGACY_CONTENT_DRAIN_REQUIRED' });
+    expect(JSON.stringify(summary)).not.toContain('old-lease');
+    await expect(service.enqueueSavedReply('org', 'user', 'reply')).rejects.toThrow('LEGACY_CONTENT_DRAIN_REQUIRED');
+    Object.assign(db.rows('post')[0], { releaseId: null, claimedAt: null });
+    expect((await service.businessSummary('org', 'user', 'root')).allowedActions.enqueue.allowed).toBe(true);
+  });
+  it('also projects legacy ownership held by a descendant of the saved root', async () => {
+    const { db, service } = await draft();
+    const post = db.rows('post')[0];
+    Object.assign(post, { executionProtocol: 'LEGACY' });
+    db.seed('post', { ...post, id: 'child', parentPostId: post.id, releaseId: 'child-lease', claimedAt: sendNow });
+    expect((await service.businessSummary('org', 'user', 'root')).allowedActions.enqueue)
+      .toEqual({ allowed: false, reason: 'LEGACY_CONTENT_DRAIN_REQUIRED' });
+  });
+  it('does not block an unrelated saved draft because another legacy root is still claimed', async () => {
+    const { db, service } = await draft();
+    db.seed('post', { ...db.rows('post')[0], id: 'other', group: 'other', executionProtocol: 'LEGACY',
+      releaseId: 'other-lease', claimedAt: sendNow });
+    expect((await service.businessSummary('org', 'user', 'root')).allowedActions.enqueue.allowed).toBe(true);
+  });
+
   it('whitelists public fields, exposes uncertainty and forbids all new sending for unknown work', async () => {
     const { db, service, create } = setupSend();
     await create();
@@ -476,4 +503,39 @@ describe('business status wiring and retry admission', () => {
     expect(await service.getSentReplyStatus({ id: 'org' }, 'reply', 'user')).not.toHaveProperty('sending');
     expect(service._postsService.getSendingSummary).not.toHaveBeenCalled();
   });
+});
+
+
+it('accepts saved Post CUID roots for enqueue and claim while preserving UUID reply identities', () => {
+  const rootPostId = 'cmvg4xcg00001qmjxkonk44ii';
+  expect(validateSync(Object.assign(new ClaimSendDto(), { rootPostId, requestId: 'request', action: 'REPLY' }))).toEqual([]);
+  expect(validateSync(Object.assign(new EnqueueSendDto(), { rootPostId }))).toEqual([]);
+  expect(validateSync(Object.assign(new QueueStoredReplyDto(), { sentReplyId: rootPostId })).length).toBeGreaterThan(0);
+  for (const invalid of ['', ' ', 'a'.repeat(129)]) {
+    expect(validateSync(Object.assign(new ClaimSendDto(), { rootPostId: invalid, requestId: 'request', action: 'REPLY' })).length).toBeGreaterThan(0);
+  }
+});
+
+
+it('automatically settles a proven unsent old claim and enqueues the same reply once after cutover', async () => {
+  const { db, service } = await draft();
+  Object.assign(db.rows('post')[0], { executionProtocol: 'LEGACY', state: 'QUEUE',
+    releaseId: 'old-claim', claimedAt: sendNow });
+  db.rows('engageOpportunityState')[0].status = 'AUTO_QUEUED';
+  db.seed('engageOpportunity', { id: 'opp', platform: 'x' });
+  db.rows('userOrganization')[0].role = 'ADMIN';
+  db.rows('settings').find(row => row.key === 'sending.organization_mode:org').value = { mode: 'AUTONOMOUS', revision: 1 };
+  const modes = new SendModeService(db as any);
+  const owner = { expectedOrganizationId: 'org', expectedUserId: 'user' };
+  const grant = await modes.beginBrowserWrite('org', 'user', { ...owner, requestId: 'old-write',
+    sentReplyId: 'reply', platform: 'x', contentHash: 'a'.repeat(64) });
+  await modes.save('org', 'user', { ...owner, mode: 'CONTROLLED', expectedRevision: 1, requestId: 'cutover' });
+  await modes.settleBrowserWrite('org', 'user', grant.id, { ...owner, status: 'NOT_SUBMITTED' });
+  const first = await service.enqueueSavedReply('org', 'user', 'reply');
+  const replay = await service.enqueueSavedReply('org', 'user', 'reply');
+  expect(first.id).toBe('root');
+  expect(replay.sendIntentId).toBe(first.sendIntentId);
+  expect(db.rows('sendIntent')).toHaveLength(1);
+  expect(db.rows('engageSentReply')).toHaveLength(1);
+  expect(db.rows('post')[0]).toMatchObject({ state: 'QUEUE', executionProtocol: 'ACCOUNT_BOUND_V1', releaseId: null });
 });

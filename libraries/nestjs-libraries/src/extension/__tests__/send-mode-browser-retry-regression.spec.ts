@@ -162,3 +162,51 @@ describe('saved browser write retries after definite non-submission', () => {
   });
 
 });
+
+
+describe('settling an owned legacy reply claim', () => {
+  async function claimed() {
+    const { db, service } = setup();
+    const claimedAt = new Date('2026-10-21T03:00:00Z');
+    Object.assign(db.rows('post')[0], { state: 'QUEUE', releaseId: 'lease-a', claimedAt, source: 'engage' });
+    db.seed('engageSentReply', { id: 'reply', organizationId: 'org', postId: 'post', opportunityId: 'opp' });
+    db.seed('engageOpportunity', { id: 'opp', platform: 'x' });
+    const replyRequest = { ...request, postId: undefined, sentReplyId: 'reply' };
+    const grant = await service.beginBrowserWrite('org', 'user', replyRequest);
+    return { db, service, grant, claimedAt, replyRequest };
+  }
+  it('settles and releases exactly the claim captured at admission while preserving activity time', async () => {
+    const { db, service, grant, claimedAt } = await claimed();
+    await service.save('org', 'user', { ...owner, mode: 'CONTROLLED', expectedRevision: 0, requestId: 'switch' });
+    await service.settleBrowserWrite('org', 'user', grant.id, { ...owner, status: 'NOT_SUBMITTED' });
+    expect(db.rows('post')[0]).toMatchObject({ releaseId: null, claimedAt, state: 'QUEUE' });
+    expect(await service.activeLegacyPostIdsIn(db as any, 'org')).toEqual([]);
+    await service.settleBrowserWrite('org', 'user', grant.id, { ...owner, status: 'NOT_SUBMITTED' });
+    expect(db.rows('post')[0].releaseId).toBeNull();
+  });
+  it('preserves a newer lease even when the old send was definitely not submitted', async () => {
+    const { db, service, grant } = await claimed();
+    Object.assign(db.rows('post')[0], { releaseId: 'lease-b', claimedAt: new Date('2026-10-21T04:00:00Z') });
+    await service.settleBrowserWrite('org', 'user', grant.id, { ...owner, status: 'NOT_SUBMITTED' });
+    expect(db.rows('post')[0].releaseId).toBe('lease-b');
+  });
+  it('does not release historical claims whose receipts have no binding', async () => {
+    const { db, service, grant } = await claimed();
+    delete db.rows('sendMutationReceipt').find(row => row.id === grant.id).result.legacyClaim;
+    await service.settleBrowserWrite('org', 'user', grant.id, { ...owner, status: 'NOT_SUBMITTED' });
+    expect(db.rows('post')[0].releaseId).toBe('lease-a');
+  });
+  it.each(['UNKNOWN', 'CONFIRMED'] as const)('retains the claim after a %s outcome', async status => {
+    const { db, service, grant } = await claimed();
+    await service.settleBrowserWrite('org', 'user', grant.id, { ...owner, status });
+    expect(db.rows('post')[0].releaseId).toBe('lease-a');
+  });
+  it('does not release a claim while another receipt for that content remains uncertain', async () => {
+    const { db, service, grant } = await claimed();
+    const original = db.rows('sendMutationReceipt').find(row => row.id === grant.id);
+    db.seed('sendMutationReceipt', { ...original, id: 'other-receipt', requestId: 'other-request',
+      result: { ...original.result, status: 'UNKNOWN' } });
+    await service.settleBrowserWrite('org', 'user', grant.id, { ...owner, status: 'NOT_SUBMITTED' });
+    expect(db.rows('post')[0].releaseId).toBe('lease-a');
+  });
+});

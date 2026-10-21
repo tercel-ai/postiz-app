@@ -130,7 +130,13 @@ export class SendCoordinatorService {
       const segments = executions.length ? await tx.sendSegment.findMany({
         where: { organizationId: org, executionId: { in: executions.map(e => e.id) } }, orderBy: { segmentIndex: 'asc' },
       }) : [];
-      return sendBusinessSummary(root, intent, executions, segments, operationBlockCode, await this.isControlled(org, tx));
+      let blockCode = operationBlockCode;
+      if (!blockCode) {
+        const legacy = new Set(await this.modes.activeLegacyPostIdsIn(tx, org));
+        if (legacy.size && (await this.chain(tx, org, root.id)).some(item => legacy.has(item.id)))
+          blockCode = 'LEGACY_CONTENT_DRAIN_REQUIRED';
+      }
+      return sendBusinessSummary(root, intent, executions, segments, blockCode, await this.isControlled(org, tx));
     });
   }
 

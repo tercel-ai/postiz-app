@@ -2,6 +2,7 @@ import {
   IsBoolean,
   IsIn,
   IsInt,
+  Matches,
   Min,
   IsOptional,
   IsString,
@@ -11,7 +12,7 @@ import {
 export class ClaimSendDto {
   @IsString() @MaxLength(128) requestId: string;
   @IsIn(['POST', 'REPLY']) action: 'POST' | 'REPLY';
-  @IsOptional() @IsUUID() rootPostId?: string;
+  @IsOptional() @IsString() @Matches(/\S/) @MaxLength(128) rootPostId?: string;
 }
 export class SendOutcomeDto {
   @IsString() @MaxLength(200) eventId: string;
@@ -26,7 +27,7 @@ export class SendOutcomeDto {
   @IsOptional() @IsIn(['removed', 'gone']) removal?: 'removed' | 'gone';
 }
 export class EnqueueSendDto {
-  @IsUUID() rootPostId: string;
+  @IsString() @Matches(/\S/) @MaxLength(128) rootPostId: string;
   @IsOptional() @IsIn(['API', 'EXTENSION']) publishMethod?: 'API' | 'EXTENSION';
 }
 export class StopSendDto {

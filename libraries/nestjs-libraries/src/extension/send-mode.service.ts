@@ -51,6 +51,7 @@ interface AutonomousEffectResult {
   occurrenceKey?: string;
   recurring?: boolean;
   confirmedAt?: string;
+  legacyClaim?: { releaseId: string; claimedAt: string };
   quotaWriteKind?: 'WRITE' | 'REPLY';
   quotaUnits?: number;
 }
@@ -1339,6 +1340,11 @@ export class SendModeService {
             typeof value.recurring !== 'boolean')))
     )
       throw new ServiceUnavailableException('AUTONOMOUS_EFFECT_RECORD_INVALID');
+    if (value.legacyClaim !== undefined && (value.source !== 'BROWSER' || value.action !== 'COMMENT' ||
+      value.postIds?.length !== 1 || typeof value.legacyClaim?.releaseId !== 'string' ||
+      !value.legacyClaim.releaseId || value.legacyClaim.releaseId.length > 2048 ||
+      typeof value.legacyClaim.claimedAt !== 'string' || !Number.isFinite(Date.parse(value.legacyClaim.claimedAt))))
+      throw new ServiceUnavailableException('AUTONOMOUS_EFFECT_RECORD_INVALID');
     return value;
   }
 
@@ -1876,6 +1882,8 @@ export class SendModeService {
               publishDate: true,
               intervalInDays: true,
               releaseURL: true,
+              releaseId: true,
+              claimedAt: true,
             },
           })
         : null;
@@ -1972,6 +1980,9 @@ export class SendModeService {
         action: body.sentReplyId ? 'COMMENT' : 'POST',
         integrationId,
         ...(post ? { postIds: [post.id], occurrenceKey, recurring } : {}),
+        ...(body.sentReplyId && post?.releaseId && post.claimedAt ? { legacyClaim: {
+          releaseId: post.releaseId, claimedAt: new Date(post.claimedAt).toISOString(),
+        } } : {}),
       };
       const row = await tx.sendMutationReceipt.create({
         data: {
@@ -1990,6 +2001,25 @@ export class SendModeService {
         organizationId,
         userId,
       };
+    });
+  }
+
+  private async releaseUnsentReplyClaimIn(
+    tx: Prisma.TransactionClient, organizationId: string, result: AutonomousEffectResult
+  ) {
+    if (result.status !== 'NOT_SUBMITTED' || result.source !== 'BROWSER' ||
+      result.action !== 'COMMENT' || !result.legacyClaim || result.postIds?.length !== 1) return;
+    const postId = result.postIds[0];
+    const receipts = await this.autonomousRecordsIn(tx, organizationId);
+    if (receipts.some(({ result: other }) => other.status !== 'NOT_SUBMITTED' && other.postIds?.includes(postId))) return;
+    // Only the exact claim observed at admission can be released. Keep its time for pacing.
+    await tx.post.updateMany({
+      where: { organizationId, id: postId, sendIntentId: null, deletedAt: null,
+        state: { in: ['DRAFT', 'QUEUE', 'ERROR'] }, releaseURL: null,
+        releaseId: result.legacyClaim.releaseId, claimedAt: new Date(result.legacyClaim.claimedAt),
+        OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }],
+      },
+      data: { releaseId: null },
     });
   }
 
@@ -2056,6 +2086,7 @@ export class SendModeService {
             if (saved.count !== 1) throw retryConflict();
           }
         }
+        await this.releaseUnsentReplyClaimIn(tx, organizationId, current);
         return { id, status: current.status, organizationId, userId };
       }
       if (current.status === 'UNKNOWN' && body.status === 'NOT_SUBMITTED')
@@ -2077,6 +2108,7 @@ export class SendModeService {
         data: { result: sendJson(next) },
       });
       if (saved.count !== 1) throw retryConflict();
+      await this.releaseUnsentReplyClaimIn(tx, organizationId, next);
       return { id, status: next.status, organizationId, userId };
     });
   }
