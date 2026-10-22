@@ -1,14 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExtensionNodeService } from '../extension-node.service';
 import { memorySendDatabase } from './support/memory-send-database';
+import { canonicalSendAccount } from '../send-coordination.utils';
 const now = new Date('2026-10-16T12:00:00Z');
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(now);
+  vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true');
 });
-afterEach(() => vi.useRealTimers());
+afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 function fixture() {
   const db = memorySendDatabase();
+  db.seed('settings', { key: 'sending.organization_mode:org', value: { mode: 'CONTROLLED', revision: 1 } });
   for (const id of ['node-a', 'node-b'])
     db.seed('extensionNode', {
       id,
@@ -57,6 +60,38 @@ function fixture() {
   return { db, service, report };
 }
 describe('terminal identity synchronization', () => {
+  it('keeps social identity synchronization independent of account sending-state enrollment', async () => {
+    const f = fixture();
+    const result: any = await f.report();
+    expect(result.results[0].verificationStatus).toBe('VERIFIED');
+    expect(f.db.rows('accountWriteState')).toHaveLength(0);
+    expect(f.db.rows('integrationProject')).toHaveLength(0);
+  });
+  it.each([false, true])('does not change rolloutReady=%s or ownership/clocks during verified synchronization', async ready => {
+    const f = fixture();
+    f.db.seed('integration', { id: 'account', organizationId: 'org', providerIdentifier: 'x',
+      identityNamespace: 'x.rest_id', internalId: '123', disabled: false });
+    const key = canonicalSendAccount('org', 'x', 'x.rest_id', '123');
+    f.db.seed('accountWriteState', { id: key, organizationId: 'org', canonicalAccountKey: key,
+      integrationId: 'account', rolloutReady: ready, revision: 0, activeExecutionId: null,
+      firstConfirmedAt: now, lastConfirmedAt: now, nextWriteNotBefore: new Date(now.getTime() + 60000) });
+    const before = structuredClone(f.db.rows('accountWriteState'));
+    await f.report();
+    await f.report('node-b');
+    expect(f.db.rows('accountWriteState')).toEqual(before);
+    expect(f.db.rows('sendExecution')).toHaveLength(0);
+  });
+  it('keeps an occupied quarantined account unchanged on fresh identity verification', async () => {
+    const f = fixture();
+    f.db.seed('integration', { id: 'account', organizationId: 'org', providerIdentifier: 'x',
+      identityNamespace: 'x.rest_id', internalId: '123', disabled: false });
+    const key = canonicalSendAccount('org', 'x', 'x.rest_id', '123');
+    f.db.seed('accountWriteState', { id: key, organizationId: 'org', canonicalAccountKey: key,
+      integrationId: 'account', rolloutReady: false, revision: 3, activeExecutionId: 'uncertain-owner' });
+    const before = structuredClone(f.db.rows('accountWriteState'));
+    await f.report();
+    expect(f.db.rows('accountWriteState')).toEqual(before);
+  });
   it('does not request browser probes when no controlled work is due', async () => {
     const f = fixture(); f.db.rows('extensionNode')[0].capabilities = { x: { post: true, reply: true, strictAccountVerification: true } };
     expect(await f.service.identityProbePlatforms('org', 'user', 'node-a', 'token')).toEqual({ platforms: [] });

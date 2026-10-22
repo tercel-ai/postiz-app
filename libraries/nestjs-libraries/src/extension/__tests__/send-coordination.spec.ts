@@ -15,6 +15,23 @@ import {
 } from './support/send-fixture';
 
 describe('shared content send coordination', () => {
+  it('enables a newly enrolled account by default without any plugin readiness write', async () => {
+    const f = setup();
+    f.db.rows('accountWriteState').splice(0);
+    await f.create();
+    expect(f.db.rows('accountWriteState')).toEqual([expect.objectContaining({
+      organizationId: 'org', integrationId: 'account', rolloutReady: true,
+    })]);
+  });
+  it('preserves a disabled existing account when enqueuing another task', async () => {
+    const f = setup();
+    const state = f.db.rows('accountWriteState')[0];
+    state.rolloutReady = false;
+    const before = structuredClone(state);
+    await f.create();
+    expect(f.db.rows('accountWriteState')).toEqual([before]);
+  });
+
   it('freezes one send intent and rejects a reconstructed root for the same content', async () => {
     const { create, db } = setup();
     const queued = await create();

@@ -9,6 +9,9 @@ export const LIVE_EVIDENCE = ['LIVE_COOKIE_ID', 'LIVE_PAGE_ACTOR'] as const;
 export interface AccountObservation {
   platform: string;
   actorContext?: string;
+  controllerId?: string;
+  sessionBinding?: string;
+  preflightChallenge?: string;
   loggedIn: boolean;
   id?: string;
   handle?: string;
@@ -126,7 +129,21 @@ export function sessionDecision(
   const duplicate = !!entry.probeId && entry.probeId === previous?.probeId;
   const sameAccount =
     matchedId != null && matchedId === previous?.integrationId;
+  const priorIdentity = (previous?.lastVerifiedIdentity ?? previous?.accountIdentity) as {
+    id?: string; handle?: string; namespace?: string; sessionBinding?: string; controllerId?: string; actorContext?: string;
+  } | null;
+  // Cookie continuity can renew an existing identity, never establish a new actor or authorize a send.
+  const sessionContinuous = entry.evidenceKind === 'SESSION_BOUND_ACTOR' &&
+    !entry.preflightChallenge && sameAccount && previous?.verificationStatus === 'VERIFIED' && !!previous.verifiedAt &&
+    /^[a-f0-9]{64}$/.test(entry.sessionBinding ?? '') && entry.sessionBinding === priorIdentity?.sessionBinding &&
+    entry.identityNamespace === priorIdentity?.namespace && !!entry.id && entry.id === priorIdentity.id &&
+    ((entry.platform === 'linkedin' && entry.identityNamespace === 'linkedin.fs_miniProfile') ||
+      (entry.platform === 'devto' && entry.identityNamespace === 'devto.user_id') ||
+      (entry.platform === 'linkedin' && entry.identityNamespace === 'linkedin.organization_id' &&
+        entry.actorContext === 'COMPANY_ADMIN' && ['COMPANY_ADMIN', 'COMPOSER'].includes(priorIdentity.actorContext ?? '') &&
+        !!entry.controllerId && entry.controllerId === priorIdentity.controllerId));
   const replay =
+    entry.evidenceKind !== 'SESSION_BOUND_ACTOR' &&
     (duplicate || entry.evidenceKind === 'CACHED') &&
     sameAccount &&
     previous?.verificationStatus === 'VERIFIED' &&
@@ -136,7 +153,7 @@ export function sessionDecision(
     entry.verificationStatus === 'VERIFIED' &&
     !!matchedId &&
     !!entry.probeId &&
-    ((live && fresh && !duplicate) || replay);
+    (((live || sessionContinuous) && fresh && !duplicate) || replay);
   const status = !entry.loggedIn
     ? 'LOGGED_OUT'
     : entry.verificationStatus === 'UNSUPPORTED'
@@ -144,12 +161,6 @@ export function sessionDecision(
     : verified
     ? 'VERIFIED'
     : 'UNKNOWN';
-  const priorIdentity = (previous?.lastVerifiedIdentity ??
-    previous?.accountIdentity) as {
-    id?: string;
-    handle?: string;
-    namespace?: string;
-  } | null;
   const namespace = entry.identityNamespace;
   const observedId =
     namespace?.endsWith('.handle') || namespace?.endsWith('.profile_slug')
@@ -196,7 +207,7 @@ export function sessionDecision(
     verificationExpiresAt:
       !entry.loggedIn || (switched && !verified)
         ? null
-        : newEvidence
+        : newEvidence || (verified && sessionContinuous && fresh && !duplicate)
         ? new Date(at + SESSION_TTL_MS)
         : previous?.verificationExpiresAt ?? null,
   };

@@ -461,6 +461,11 @@ export class ExtensionNodeService {
           matched = resolved.account?.id ?? null;
         }
         const decision = sessionDecision(entry, prior, now, matched);
+        const previousIdentity = (prior?.lastVerifiedIdentity ?? prior?.accountIdentity) as { id?: string; namespace?: string; controllerId?: string; sessionBinding?: string } | null;
+        const sameIdentity = previousIdentity?.id === entry.id && previousIdentity?.namespace === entry.identityNamespace &&
+          (entry.identityNamespace !== 'linkedin.organization_id' || previousIdentity?.controllerId === entry.controllerId);
+        const sessionBinding = entry.sessionBinding ??
+          (decision.verificationStatus === 'VERIFIED' && sameIdentity ? previousIdentity?.sessionBinding : undefined);
         const data = {
           ...decision,
           actorKey,
@@ -475,6 +480,7 @@ export class ExtensionNodeService {
             id: entry.id ?? null,
             handle: entry.handle ?? null,
             namespace: entry.identityNamespace ?? null,
+            ...(sessionBinding ? { sessionBinding } : {}),
             ...(entry.actorContext ? { actorContext: entry.actorContext } : {}),
             ...(entry.controllerId ? { controllerId: entry.controllerId } : {}),
           },
@@ -487,6 +493,9 @@ export class ExtensionNodeService {
                   id: entry.id ?? null,
                   handle: entry.handle ?? null,
                   namespace: entry.identityNamespace ?? null,
+                  ...(sessionBinding ? { sessionBinding } : {}),
+                  ...(entry.actorContext ? { actorContext: entry.actorContext } : {}),
+                  ...(entry.controllerId ? { controllerId: entry.controllerId } : {}),
                 },
               }
             : {}),

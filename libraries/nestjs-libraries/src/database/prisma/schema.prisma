@@ -739,8 +739,8 @@ model AccountWriteState {
   organizationId      String
   canonicalAccountKey String
   integrationId       String
-  // Enabled only after legacy in-flight sends and identity aliases are audited.
-  rolloutReady        Boolean @default(false)
+  // Administrator sending switch; identity synchronization never changes it.
+  rolloutReady        Boolean @default(true)
   timezone            String @default("UTC")
   dailyWriteLimit     Int?
   identityIntegrationIds String[] @default([])

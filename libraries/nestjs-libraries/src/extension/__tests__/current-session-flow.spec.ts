@@ -90,7 +90,7 @@ it.each(platformCases.flatMap(row => ['POST', 'REPLY'].map(action => [...row, ac
   const actorId = discovered.results[0].integrationId;
   expect(actorId).toBeTruthy();
   expect(db.rows('integration')[0].token).toBe('');
-  // Project authorization and the deployment audit are explicit, independent prerequisites.
+  // Synchronization only identifies the actor; project authorization remains explicit.
   db.seed('integrationProject', {
     id: 'relation',
     organizationId: 'org',
@@ -100,13 +100,7 @@ it.each(platformCases.flatMap(row => ['POST', 'REPLY'].map(action => [...row, ac
     engageEnabled: true,
     integration: db.rows('integration')[0],
   });
-  db.seed('accountWriteState', {
-    id: 'state',
-    organizationId: 'org',
-    canonicalAccountKey: canonicalSendAccount('org', provider, namespace, actorIdentity),
-    integrationId: actorId,
-    rolloutReady: true,
-  });
+  expect(db.rows('accountWriteState')).toHaveLength(0);
   db.seed('post', {
     id: 'root',
     organizationId: 'org',
@@ -154,6 +148,10 @@ it.each(platformCases.flatMap(row => ['POST', 'REPLY'].map(action => [...row, ac
   const claim = (
     await executions.claim(auth, { requestId: 'claim', action: action as 'POST' | 'REPLY' })
   ).items[0];
+  expect(db.rows('accountWriteState')).toEqual([expect.objectContaining({
+    canonicalAccountKey: canonicalSendAccount('org', provider, namespace, actorIdentity),
+    integrationId: actorId, rolloutReady: true,
+  })]);
   expect(claim.targetAccount).toMatchObject({
     id: actorIdentity,
     idNamespace: namespace,

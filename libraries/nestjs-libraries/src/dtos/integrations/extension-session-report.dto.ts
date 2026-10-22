@@ -10,6 +10,7 @@ import {
   IsOptional,
   IsString,
   MaxLength,
+  Matches,
   Max,
   Min,
   ValidateNested,
@@ -75,8 +76,11 @@ export class ExtensionSessionPlatformDto {
   @IsOptional() @IsIn(['VERIFIED', 'UNKNOWN', 'UNSUPPORTED', 'LOGGED_OUT'])
   verificationStatus?: string;
 
-  @IsOptional() @IsIn(['LIVE_COOKIE_ID', 'LIVE_PAGE_ACTOR', 'CACHED', 'UNKNOWN'])
+  @IsOptional() @IsIn(['LIVE_COOKIE_ID', 'LIVE_PAGE_ACTOR', 'SESSION_BOUND_ACTOR', 'CACHED', 'UNKNOWN'])
   evidenceKind?: string;
+
+  @IsOptional() @IsString() @Matches(/^[a-f0-9]{64}$/)
+  sessionBinding?: string;
 
   @IsOptional() @IsString() @MaxLength(256)
   controllerId?: string;

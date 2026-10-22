@@ -153,6 +153,23 @@ export class SendCoordinatorService {
     }
   }
 
+  private async enrollAccountIn(
+    tx: Prisma.TransactionClient,
+    organizationId: string,
+    integrationId: string,
+    canonicalAccountKey: string
+  ) {
+    const account = await tx.accountWriteState.upsert({
+      where: { organizationId_canonicalAccountKey: { organizationId, canonicalAccountKey } },
+      create: { id: canonicalAccountKey, organizationId, integrationId, canonicalAccountKey, rolloutReady: true },
+      // Existing administrator switches, quarantine, clocks and ownership are authoritative.
+      update: {},
+    });
+    console.log('[sending-account] enrollment result', { organizationId, integrationId,
+      rolloutReady: account.rolloutReady, revision: account.revision });
+    return account;
+  }
+
   async claimableIn(
     tx: Prisma.TransactionClient,
     org: string,
@@ -198,7 +215,9 @@ export class SendCoordinatorService {
     const account = await tx.accountWriteState.findFirst({ where: {
       organizationId: org, integrationId: session.integrationId,
       ...(intent.canonicalAccountKey ? { canonicalAccountKey: intent.canonicalAccountKey } : {}),
-    } });
+    } }) ?? await this.enrollAccountIn(tx, org, session.integrationId,
+      intent.canonicalAccountKey ?? canonicalSendAccount(org, integration.providerIdentifier,
+        integration.identityNamespace, integration.internalId));
     if (!account?.rolloutReady || account.activeExecutionId ||
         (account.nextWriteNotBefore && account.nextWriteNotBefore > now)) return false;
     if (intent.activeExecutionId) {
@@ -490,23 +509,8 @@ export class SendCoordinatorService {
       );
       if (first.providerIdentifier === 'linkedin-page' && route?.providerIdentifier !== 'linkedin-page')
         throw new BadRequestException('LINKEDIN_COMPANY_ACCOUNT_REQUIRED');
-      // Enrollment deliberately blocks all legacy writers before an account is audited.
-      if (route)
-        await tx.accountWriteState.upsert({
-          where: {
-            organizationId_canonicalAccountKey: {
-              organizationId: org,
-              canonicalAccountKey: route.canonicalAccountKey,
-            },
-          },
-          create: {
-            id: route.canonicalAccountKey,
-            organizationId: org,
-            canonicalAccountKey: route.canonicalAccountKey,
-            integrationId: route.integrationId,
-          },
-          update: {},
-        });
+      // Enroll controlled sending without changing an existing account switch.
+      if (route) await this.enrollAccountIn(tx, org, route.integrationId, route.canonicalAccountKey);
       const intent = await tx.sendIntent.create({
         data: {
           organizationId: org,
@@ -664,14 +668,7 @@ export class SendCoordinatorService {
       })
     )
       return null;
-    const account = await tx.accountWriteState.findUnique({
-      where: {
-        organizationId_canonicalAccountKey: {
-          organizationId: org,
-          canonicalAccountKey: route.canonicalAccountKey,
-        },
-      },
-    });
+    const account = await this.enrollAccountIn(tx, org, route.integrationId, route.canonicalAccountKey);
     if (
       !account?.rolloutReady ||
       account.activeExecutionId ||

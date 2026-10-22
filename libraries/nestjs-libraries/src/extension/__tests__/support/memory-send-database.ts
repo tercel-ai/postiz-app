@@ -25,7 +25,7 @@ export function memorySendDatabase() {
     heldUnits: 0,
     confirmedUnits: 0,
     status: 'PENDING',
-    rolloutReady: false,
+    rolloutReady: true,
     identityIntegrationIds: [],
     timezone: 'UTC',
     createdAt: new Date(),

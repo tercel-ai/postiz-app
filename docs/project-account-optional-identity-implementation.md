@@ -8,7 +8,7 @@ Node identity is initialized automatically per extension installation; no native
 
 Date: 2026-10-16. Corresponds to [design doc §14.7](project-account-extension-node-binding-design.md#147-optional-first-binding-and-identity-unification-phase-2026-10-16).
 
-The initial phase connected OPTIONAL first binding, X/Reddit same-namespace identity reuse, and protected verification of historical OAuth identities; subsequently extension-controlled publishing/replying was completed for seven platforms, with the latest scope in design doc §14.9. **New controlled sends go through the extension only; OAuth API posting is currently unsupported.** The deployment master switch ACCOUNT_BOUND_SENDING_ENABLED and the actor rolloutReady flag remain off by default; no database migration was executed and no real social send occurred.
+The initial phase connected OPTIONAL first binding, X/Reddit same-namespace identity reuse, and protected verification of historical OAuth identities; subsequently extension-controlled publishing/replying was completed for seven platforms, with the latest scope in design doc §14.9. **New controlled sends go through the extension only; OAuth API posting is currently unsupported.** The deployment master switch ACCOUNT_BOUND_SENDING_ENABLED remains off by default; new account rolloutReady defaults to true under design §14.18; no database migration was executed and no real social send occurred.
 
 ## First Binding Rules
 
@@ -20,7 +20,7 @@ The first claim completes inside a single Serializable transaction:
 
 1. Acquires the same policy coordination lock as system-policy updates, and checks the task owner snapshot and lastRequiredRevision. A system tightening followed by a relaxation still prevents older unbound tasks from claiming first; personal preferences are snapshotted at enqueue and do not change with the poller.
 2. Verifies the owner is still a valid organization member, that terminal authentication is valid and supports the corresponding operation, and that the current NodeSession is verified and unexpired; the session ID must match the Integration's stable ID.
-3. Verifies the Integration belongs to the current organization, is available, and is assigned to that project; replies additionally require engageEnabled. The account must have completed deployment audit with rolloutReady=true, and have no other active write or cooldown blocking it.
+3. Verifies the Integration belongs to the current organization, is available, and is assigned to that project; replies additionally require engageEnabled. The account sending switch must be rolloutReady=true (default for new rows; design §14.18), and have no other active write or cooldown blocking it.
 4. CAS-pins the same account snapshot for the SendIntent and the entire Post chain, increments routeRevision, and then creates the execution reservation. A failed reservation or media preparation rolls back the first binding; claim does not pre-reserve send count — start does.
 
 After a successful binding accountResolution=RESOLVED and bindingSource=CURRENT_SESSION, and the target will not be re-selected when the terminal switches accounts, the claim lease expires, or the default configuration changes. First binding happens on the first qualifying terminal, which is not guaranteed to be the browser the user opened the web page in.
@@ -61,7 +61,7 @@ Given a known trusted identity, OAuth-connecting-first, extension-discovering-fi
 
 OAuth connect and refresh share the resolution, credential writes remain in the same transaction, and the original ID with its Post/IntegrationProject references is preserved; concurrent discovery retries the whole transaction. Registering an existing account via the extension no longer consumes account quantity quota; a new account reads the count and creates within the transaction, preventing multiple browsers each seeing one remaining slot. The limit comes from the existing user plan or Stripe entitlement snapshot; it conservatively counts all non-deleted accounts and does not use refreshNeeded exclusion to evade it. When there is no reliable quota snapshot, new creations stop while existing accounts can still report.
 
-New accounts are not automatically added to a project and are not automatically set to rolloutReady. Account creation, project authorization and execution audit are three independent steps.
+New accounts are not automatically added to a project. Controlled sending enrollment creates a missing account-state row with rolloutReady=true; existing switches are preserved. Identity synchronization never modifies rolloutReady, ownership, clocks or quota state. Project authorization remains explicit (design §14.18).
 
 ## Read-Only Verification Entry Point for Historical OAuth Accounts
 
@@ -96,7 +96,7 @@ The original eight expand migrations must still first be reviewed and applied by
 
 [contract-integration-identity.sql](../libraries/nestjs-libraries/src/database/prisma/migrations/contract-integration-identity.sql) is still not part of the initial expand. The INTEGRATION_IDENTITY_CONTRACTED manual marker has been removed; when code needs to handle identity key conflicts/changes it only reads the current schema's actual unique indexes to decide whether to keep the old organization/bare-ID collision check. Only when the old key has actually been removed and the new scoped key exists is a different provider allowed to use the same bare ID. The pre-contract audit and legacy-writer exit are still guaranteed by the release process; the program does not execute DDL automatically.
 
-All database operations are performed by the user or the deployment pipeline; the target must be confirmed to be aisee_postiz_dev. **This round did not connect to a database, execute SQL, apply migrations or db push.** All sending feature flags and the rolloutReady launch gate remain; passing simulation tests cannot be used to enable real sending directly.
+All database operations are performed by the user or the deployment pipeline; the target must be confirmed to be aisee_postiz_dev. **This round did not connect to a database, execute SQL, apply migrations or db push.** All sending feature flags and execution-quarantine checks remain; new account-state rows default to enabled under design §14.18, and passing simulation tests cannot be used to enable real sending directly.
 
 ## Verification and Remaining Scope
 
@@ -143,7 +143,7 @@ Tests explicitly clear DATABASE_URL/REDIS_URL and keep the existing 96 skip cond
 
 X, Reddit, LinkedIn personal/company, Medium, Quora, Hacker News and Dev.to all connect to unified extension-controlled POST/REPLY, including backend enqueue, the automatic reply producer, node capabilities, platform-specific identity, beforeSubmit, short-permit consumption, log recovery and self-resource confirmation. Medium/Quora/Dev.to keep their original single-article capability; a LinkedIn company page cannot be downgraded to a personal send. There is no requirement restriction that "implementing only X/Reddit is enough".
 
-This round does not change the schema, does not execute migrations, and adds no business switch. ACCOUNT_BOUND_SENDING_ENABLED still defaults to false, and legacy unmanaged business keeps its original mechanism. Cross-namespace identity merging and the rolloutReady audit are still completed independently. For detailed boundaries and acceptance see [design §14.9](project-account-extension-node-binding-design.md#149-seven-platform-controlled-sending-completion-2026-10-16).
+This round does not change the schema, does not execute migrations, and adds no business switch. ACCOUNT_BOUND_SENDING_ENABLED still defaults to false, and legacy unmanaged business keeps its original mechanism. Cross-namespace identity conflicts remain isolated; new account-state rows default to enabled under design §14.18 without synchronization changing existing switches. For detailed boundaries and acceptance see [design §14.9](project-account-extension-node-binding-design.md#149-seven-platform-controlled-sending-completion-2026-10-16).
 
 Final full test this round: main repo 4088 passed, 0 failed, 96 skipped; standalone extension 2570 passed, 0 failed. All three TypeScript checks and the Chrome/Firefox temp builds passed. Database migration and real-platform acceptance were not executed.
 
@@ -162,3 +162,10 @@ Final verification for this phase: main repo full non-frozen suite 4098 passed, 
 See [design §14.15](project-account-extension-node-binding-design.md#1415-claim-fairness-and-sending-boundary-corrections-2026-10-19) for the corrected claim pagination, scoped persistent cursor, transaction-time authorization, policy fail-closed behavior, preflight replay, authenticated removal facts, draft INHERIT save contract, and extension-only capability projection. These changes preserve the original content intent, one-shot permit CAS, UNKNOWN protection and quota ledger. The new cursor migration is prepared only and must be applied by the user/deployment pipeline before enabling matching code. This follow-up does not complete the UI, generation-stage deduplication, queued rebinding, outbox or real-platform/database acceptance work above.
 
 The second review in [design §14.16](project-account-extension-node-binding-design.md#1416-second-review-of-claims-retries-and-settlement-2026-10-19) additionally fixes persistent account quarantine after contradictory receipts, late-confirmation accounting in newly initialized quota buckets, and monotonic published-resource projection across conflicting attempts. Conflicts revoke rolloutReady until a new user/deployment audit; ordinary result callbacks cannot restore it. This adds no migration and does not replace real PostgreSQL/browser acceptance or platform idempotency.
+
+
+## Default-On Sending Switch (2026-10-22)
+
+The account sending switch rolloutReady defaults to true for new AccountWriteState rows. Plugin synchronization manages identity and sessions without modifying that switch. Bound enqueue and authorized CURRENT_SESSION claiming create missing canonical account state through one helper; update:{} preserves any existing false/true state, ownership, cooldown and quota. Project permission and per-send live actor checks remain mandatory. Outcome conflicts can still set readiness false, and ordinary synchronization does not undo quarantine.
+
+The prepared default-account-write-ready.sql migration changes only the database default. Existing row values are preserved; no backfill, new fields, administration UI or API is included. The user/deployment pipeline applies the migration. See design §14.18 for the current decision record and acceptance coverage.
