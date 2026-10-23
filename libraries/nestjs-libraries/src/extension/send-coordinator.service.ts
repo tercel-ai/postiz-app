@@ -21,6 +21,7 @@ import { SendPolicyService } from './send-policy.service';
 import { SendQuotaService } from './send-quota.service';
 import {
   canonicalSendAccount,
+  releaseExpiredAccountWriterIn,
   matchesSendActor,
   postSendHash,
   sendHash,
@@ -216,12 +217,13 @@ export class SendCoordinatorService {
         post.integrationId !== intent.integrationId || !intent.target ||
         !matchesSendActor(intent.target as unknown as SendActor, { id: actor.id, idNamespace: actor.namespace })))
       return false;
-    const account = await tx.accountWriteState.findFirst({ where: {
+    let account = await tx.accountWriteState.findFirst({ where: {
       organizationId: org, integrationId: session.integrationId,
       ...(intent.canonicalAccountKey ? { canonicalAccountKey: intent.canonicalAccountKey } : {}),
     } }) ?? await this.enrollAccountIn(tx, org, session.integrationId,
       intent.canonicalAccountKey ?? canonicalSendAccount(org, integration.providerIdentifier,
         integration.identityNamespace, integration.internalId));
+    if (account) account = await releaseExpiredAccountWriterIn(tx, account, now);
     if (!account?.rolloutReady || account.activeExecutionId ||
         (account.nextWriteNotBefore && account.nextWriteNotBefore > now)) return false;
     if (intent.activeExecutionId) {
@@ -675,7 +677,8 @@ export class SendCoordinatorService {
       })
     )
       return null;
-    const account = await this.enrollAccountIn(tx, org, route.integrationId, route.canonicalAccountKey);
+    const account = await releaseExpiredAccountWriterIn(tx,
+      await this.enrollAccountIn(tx, org, route.integrationId, route.canonicalAccountKey), now);
     if (
       !account?.rolloutReady ||
       account.activeExecutionId ||
@@ -823,14 +826,16 @@ export class SendCoordinatorService {
   }
 
   async legacyBlockedPlatforms(org: string) {
-    const state = await this.modes.stateIn(this.db, org);
+    return sendTransaction(this.db, async tx => {
+    const state = await this.modes.stateIn(tx, org);
     if (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed) return [...CONTROLLED_SEND_PLATFORMS, 'linkedin-page'];
-    const blocked = new Set(await controlledBlockedPlatformsIn(this.db, org));
+    const blocked = new Set(await controlledBlockedPlatformsIn(tx, org));
     if (state.legacyDrain) for (const platform of CONTROLLED_SEND_PLATFORMS) {
-      if (await this.modes.legacyAccountBlockedIn(this.db, org, null, platform)) blocked.add(platform);
+      if (await this.modes.legacyAccountBlockedIn(tx, org, null, platform)) blocked.add(platform);
     }
     if (blocked.has('linkedin')) blocked.add('linkedin-page');
     return [...blocked];
+    });
   }
 
   async assertLegacyPosts(org: string, posts: { id: string; projectId?: string | null; sendIntentId?: string | null; executionProtocol?: string | null }[]) {
@@ -929,6 +934,10 @@ export class SendCoordinatorService {
       reject('SEND_INTENT_REQUIRED');
     if (await this.modes.legacyAccountBlockedIn(tx, org, intent.integrationId))
       reject('LEGACY_ACCOUNT_DRAIN_REQUIRED');
+    const account = await tx.accountWriteState.findUnique({ where: {
+      organizationId_canonicalAccountKey: { organizationId: org, canonicalAccountKey: intent.canonicalAccountKey },
+    } });
+    if (account) await releaseExpiredAccountWriterIn(tx, account, now);
     const requestKey = sendHash([root.id, executorKey]);
     const prior = await tx.sendExecution.findUnique({
       where: {
@@ -1049,7 +1058,7 @@ export class SendCoordinatorService {
     await this.verifyPolicyIn(tx);
     if (await this.modes.legacyAccountBlockedIn(tx, org, execution.integrationId))
       reject('LEGACY_ACCOUNT_DRAIN_REQUIRED');
-    const account = await tx.accountWriteState.findUnique({
+    let account = await tx.accountWriteState.findUnique({
       where: {
         organizationId_canonicalAccountKey: {
           organizationId: org,
@@ -1057,6 +1066,7 @@ export class SendCoordinatorService {
         },
       },
     });
+    if (account) account = await releaseExpiredAccountWriterIn(tx, account, now);
     if (!account?.rolloutReady) reject('ACCOUNT_COORDINATION_AUDIT_REQUIRED');
     // A revision update obtains the account lock before any intent or quota row.
     const locked = await tx.accountWriteState.updateMany({

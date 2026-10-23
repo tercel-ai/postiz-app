@@ -339,10 +339,32 @@ export class SendExecutionService {
           },
         },
       });
+      let reply: { sentReplyId: string; opportunityId: string; targetUrl: string; createdAt: Date } | undefined;
+      if (execution.action === 'REPLY') {
+        const intent = await tx.sendIntent.findFirst({ where: {
+          id: execution.sendIntentId, organizationId: auth.org, projectId: execution.projectId, action: 'REPLY',
+        }, select: { id: true, rootPostId: true } });
+        const root = intent ? await tx.post.findFirst({ where: {
+          id: intent.rootPostId, organizationId: auth.org, projectId: execution.projectId, sendIntentId: intent.id,
+        }, select: { id: true, source: true } }) : null;
+        if (!intent || !root) throw new ConflictException('SEND_REPLY_SCOPE_MISMATCH');
+        const saved = await tx.engageSentReply.findFirst({ where: {
+          postId: root.id, organizationId: auth.org, projectId: execution.projectId,
+        }, select: { id: true, opportunityId: true, createdAt: true } });
+        if (root.source === 'engage' && !saved) throw new ConflictException('SEND_REPLY_SCOPE_MISMATCH');
+        if (saved) {
+          const opportunity = await tx.engageOpportunity.findUnique({ where: { id: saved.opportunityId },
+            select: { externalPostUrl: true } });
+          if (!opportunity?.externalPostUrl) throw new ConflictException('SEND_REPLY_SCOPE_MISMATCH');
+          reply = { sentReplyId: saved.id, opportunityId: saved.opportunityId,
+            targetUrl: opportunity.externalPostUrl, createdAt: saved.createdAt };
+        }
+      }
       return {
         executionId: id,
         status: execution.status,
         segments,
+        ...(reply ? { reply } : {}),
         leaseExpiresAt: execution.leaseExpiresAt,
         nextWriteNotBefore: account?.nextWriteNotBefore ?? null,
         serverNow: new Date().toISOString(),

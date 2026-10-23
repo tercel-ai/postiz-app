@@ -301,4 +301,4 @@ does not enqueue, claim a controlled execution, reserve quota, or post a comment
 
 LinkedIn 公司账号的 `EXTENSION` 队列和未绑定 Intent 的草稿暂不交接自主执行，保留原受控绑定并在 `controlledDrain.issues` 返回 `HANDOVER_LINKEDIN_COMPANY_UNSUPPORTED`，直到自主执行器支持公司身份；公司账号的 API 路径和个人 LinkedIn 交接保持原有行为。
 
-新自主写入仍登记一次性回执。活跃受控执行、未知片段、HELD 配额和账号锁按 canonical account 保护；浏览器写入按平台族保护。未知执行没有超时解锁路径。先前自主收尾的事实在再次反向切换后仍保留，不能借反复切换发送同一内容。无数据库结构变更，无直接数据库写入或部署操作。
+新自主写入仍登记一次性回执。活跃受控执行及未到期提交许可按 canonical account 保护；浏览器写入按平台族保护。已经处于 RECONCILING、持有 UNKNOWN 且全部相关 AUTHORIZED/UNKNOWN 提交许可具有明确且已结束的 submitBefore 时，正常领取和授权链路可以按原 owner 与 revision 比较清除账号写入占用；原 Intent、UNKNOWN、HELD 配额及防重保护保持不变，迟到结果不能清除新 owner。没有有效到期证明、仍在 SENDING/RESERVED 或被隔离的账号保持保护。先前自主收尾的事实在再次反向切换后仍保留，不能借反复切换发送同一内容。无数据库结构变更，无直接数据库写入或部署操作。

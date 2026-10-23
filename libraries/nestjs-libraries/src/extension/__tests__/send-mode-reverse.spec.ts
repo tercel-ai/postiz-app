@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SendModeService } from '../send-mode.service';
 import { setupSend, sendNow } from './support/send-fixture';
 
-beforeEach(() => vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true'));
-afterEach(() => vi.unstubAllEnvs());
+beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(sendNow); vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true'); });
+afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 const owner = { expectedOrganizationId: 'org', expectedUserId: 'user' };
 function setup() {
   const fixture = setupSend();
@@ -477,4 +477,18 @@ describe('LinkedIn company autonomous handover compatibility', () => {
       sendTarget: { id: '123', idNamespace: namespace, handoverMode: 'AUTONOMOUS' } });
     expect(db.rows('sendIntent')[0].status).toBe('HANDED_OVER');
   });
+});
+
+
+it('allows independent autonomous work after the original controlled permit expires while retaining reconciliation', async () => {
+  const { db, service, create, reverse, modes } = setup(); await create();
+  const old = await service.reserveApi('org', 'root', 'worker', sendNow);
+  await service.authorizeApiSegment('org', old.id, 0, { id: '123', idNamespace: 'x.rest_id' }, sendNow);
+  await service.apiOutcome('org', old.id, 0, { status: 'unknown', eventId: 'lost' }, sendNow);
+  await reverse();
+  vi.setSystemTime(new Date(sendNow.getTime() + 31000));
+  expect(await modes.beginBrowserWrite('org', 'user', { ...owner, requestId: 'independent', platform: 'x', contentHash: 'a'.repeat(64) })).toMatchObject({ admitted: true });
+  expect(db.rows('sendIntent')[0]).toMatchObject({ status: 'RECONCILING', activeExecutionId: old.id });
+  expect(db.rows('sendQuotaReservation')[0].state).toBe('HELD');
+  expect(db.rows('sendSegment')[0].status).toBe('UNKNOWN');
 });

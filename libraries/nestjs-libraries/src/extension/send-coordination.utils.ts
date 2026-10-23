@@ -1,6 +1,6 @@
 import { createHash, createHmac } from 'node:crypto';
 import { ServiceUnavailableException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { AccountWriteState, Prisma, SendExecution } from '@prisma/client';
 
 export function sendHash(value: unknown): string {
   const normalize = (v: any): any =>
@@ -120,4 +120,40 @@ export async function sendTransaction<T>(
       throw error;
     }
   }
+}
+
+
+/** Reconciliation fences further starts; only persisted expired permits end its writer occupancy. */
+export async function uncertainWriterExpiredIn(
+  tx: Prisma.TransactionClient, execution: SendExecution, now: Date
+): Promise<boolean> {
+  if (execution.status !== 'RECONCILING') return false;
+  const segments = await tx.sendSegment.findMany({ where: {
+    organizationId: execution.organizationId, executionId: execution.id,
+    status: { in: ['AUTHORIZED', 'UNKNOWN'] },
+  } });
+  return segments.some(segment => segment.status === 'UNKNOWN') &&
+    segments.every(segment => segment.submitBefore &&
+      Number.isFinite(segment.submitBefore.getTime()) && segment.submitBefore <= now);
+}
+
+/** Clear only an expired reconciliation mutex, preserving the original task and held quota. */
+export async function releaseExpiredAccountWriterIn(
+  tx: Prisma.TransactionClient, account: AccountWriteState, now: Date
+): Promise<AccountWriteState> {
+  if (!account.activeExecutionId || !account.rolloutReady) return account;
+  const execution = await tx.sendExecution.findFirst({ where: {
+    organizationId: account.organizationId, id: account.activeExecutionId,
+    canonicalAccountKey: account.canonicalAccountKey,
+  } });
+  if (!execution || !await uncertainWriterExpiredIn(tx, execution, now)) return account;
+  const changed = await tx.accountWriteState.updateMany({ where: {
+    id: account.id, organizationId: account.organizationId,
+    activeExecutionId: execution.id, revision: account.revision,
+  }, data: { activeExecutionId: null, revision: { increment: 1 } } });
+  if (changed.count !== 1) throw Object.assign(new Error('ACCOUNT_WRITE_STATE_CHANGED'), { code: 'P2034' });
+  console.log('[sending-writer] released expired reconciliation occupancy', {
+    organizationId: account.organizationId, executionId: execution.id, accountId: account.id,
+  });
+  return { ...account, activeExecutionId: null, revision: account.revision + 1 };
 }

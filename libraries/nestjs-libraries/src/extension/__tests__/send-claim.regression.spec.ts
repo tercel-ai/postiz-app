@@ -232,3 +232,66 @@ it('starts a fresh cycle immediately after an empty queue receives newly created
   expect((await f.claim('empty')).items).toEqual([]);
   expect((await f.claim('fresh')).items[0].segments[0].id).toBe('new');
 });
+
+
+it('claims an independent task after an old unknown permit expires without reopening the old intent or quota', async () => {
+  const f = fixture(); await f.create();
+  const old = (await f.claim('old-claim')).items[0]; await f.proof(old);
+  await f.executions.start(auth, old.executionId, 0, old.leaseToken);
+  await f.executions.outcome(auth, old.executionId, 0, old.leaseToken, { status: 'unknown', eventId: 'lost' });
+  await f.create('independent');
+  expect((await f.claim('fresh-permit')).items).toEqual([]);
+  const held = structuredClone(f.db.rows('sendQuotaReservation'));
+  vi.setSystemTime(new Date(sendNow.getTime() + 31000));
+  const next = (await f.claim('expired-permit')).items[0];
+  expect(next?.segments[0].id).toBe('independent');
+  expect(f.db.rows('sendIntent').find(row => row.id === old.sendIntentId)).toMatchObject({ status: 'RECONCILING', activeExecutionId: old.executionId });
+  expect(f.db.rows('sendSegment').find(row => row.executionId === old.executionId).status).toBe('UNKNOWN');
+  expect(f.db.rows('sendQuotaReservation')).toEqual(held);
+  expect(f.db.rows('accountWriteState')[0]).toMatchObject({ activeExecutionId: null, rolloutReady: true });
+  await expect(f.service.retry('org', 'root', 'user')).rejects.toThrow();
+});
+
+
+async function replyStatusFixture() {
+  const f = fixture(); await f.create();
+  const item = (await f.claim()).items[0];
+  Object.assign(f.db.rows('sendExecution')[0], { action: 'REPLY', status: 'RECONCILING' });
+  Object.assign(f.db.rows('sendIntent')[0], { action: 'REPLY', status: 'RECONCILING' });
+  f.db.rows('post')[0].source = 'engage';
+  f.db.seed('engageOpportunity', { id: 'opportunity', externalPostUrl: 'https://x.com/noahkagan/status/123' });
+  f.db.seed('engageSentReply', { id: 'saved-reply', organizationId: 'org', projectId: 'project', postId: 'root', opportunityId: 'opportunity', createdAt: sendNow });
+  return { ...f, item };
+}
+
+it('returns sanitized original reply context for an authenticated historical execution without changing its state', async () => {
+  const f = await replyStatusFixture();
+  const before = structuredClone(f.db.rows('sendExecution'));
+  const status = await f.executions.status(auth, f.item.executionId, f.item.leaseToken);
+  expect(status).toMatchObject({ status: 'RECONCILING', reply: {
+    sentReplyId: 'saved-reply', opportunityId: 'opportunity', targetUrl: 'https://x.com/noahkagan/status/123', createdAt: sendNow,
+  } });
+  expect(Object.keys(status.reply!)).toEqual(['sentReplyId', 'opportunityId', 'targetUrl', 'createdAt']);
+  expect(status).not.toHaveProperty('leaseToken');
+  expect(status).not.toHaveProperty('leaseTokenHash');
+  expect(f.db.rows('sendExecution')).toEqual(before);
+});
+
+it('leaves ordinary post execution status free of reply context', async () => {
+  const f = fixture(); await f.create(); const item = (await f.claim()).items[0];
+  expect(await f.executions.status(auth, item.executionId, item.leaseToken)).not.toHaveProperty('reply');
+});
+
+it.each(['reply-organization', 'reply-project', 'post-project', 'root-binding'])('does not expose reply context across a mismatched scope: %s', async kind => {
+  const f = await replyStatusFixture();
+  if (kind === 'reply-organization') f.db.rows('engageSentReply')[0].organizationId = 'other';
+  if (kind === 'reply-project') f.db.rows('engageSentReply')[0].projectId = 'other';
+  if (kind === 'post-project') f.db.rows('post')[0].projectId = 'other';
+  if (kind === 'root-binding') f.db.rows('post')[0].sendIntentId = 'other';
+  await expect(f.executions.status(auth, f.item.executionId, f.item.leaseToken)).rejects.toThrow('SEND_REPLY_SCOPE_MISMATCH');
+});
+
+it('requires the original lease before returning reply context', async () => {
+  const f = await replyStatusFixture();
+  await expect(f.executions.status(auth, f.item.executionId, 'wrong-lease')).rejects.toThrow('SEND_LEASE_AUTHENTICATION_FAILED');
+});

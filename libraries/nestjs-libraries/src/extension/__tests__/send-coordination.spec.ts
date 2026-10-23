@@ -286,3 +286,45 @@ describe('shared content send coordination', () => {
     ).rejects.toThrow('SEND_MODE_AUTONOMOUS_REQUIRED');
   });
 });
+
+
+describe('account writer lifetime independent of uncertain result lifetime', () => {
+  async function uncertain(status: 'unknown' | 'authorized' = 'unknown') {
+    const f = setup();
+    f.quotas.resolve.mockResolvedValue({ gapMs: 60000, budgets: [{ key: 'shared-project', scope: 'PROJECT', dimension: 'ROOT_SENDS', limit: 10, units: 1,
+      windowStart: new Date('2026-10-15T00:00:00Z'), windowEnd: new Date('2026-10-16T00:00:00Z'), timezone: 'UTC', policyVersion: 'test' }] });
+    await f.create();
+    const old = await f.service.reserveApi('org', 'root', 'old', now);
+    await f.service.authorizeApiSegment('org', old.id, 0, { id: '123', idNamespace: 'x.rest_id' }, now);
+    if (status === 'unknown') await f.service.apiOutcome('org', old.id, 0, { status: 'unknown', eventId: 'lost' }, now);
+    await f.create('independent');
+    return { ...f, old, later: new Date(now.getTime() + 31000) };
+  }
+
+  it('retains a live sending execution even when its existing authorization expired', async () => {
+    const f = await uncertain('authorized');
+    const next = await f.service.reserveApi('org', 'independent', 'new', f.later);
+    await expect(f.service.authorizeApiSegment('org', next.id, 0, { id: '123', idNamespace: 'x.rest_id' }, f.later)).rejects.toThrow('ACCOUNT_WRITE_BUSY');
+    expect(f.db.rows('sendExecution').find(row => row.id === f.old.id).status).toBe('SENDING');
+    expect(f.db.rows('sendSegment').find(row => row.executionId === f.old.id).status).toBe('AUTHORIZED');
+    expect(f.db.rows('accountWriteState')[0].activeExecutionId).toBe(f.old.id);
+  });
+
+  it('does not let a late old confirmation clear the newer writer or settle its quota', async () => {
+    const f = await uncertain();
+    const next = await f.service.reserveApi('org', 'independent', 'new', f.later);
+    await f.service.authorizeApiSegment('org', next.id, 0, { id: '123', idNamespace: 'x.rest_id' }, f.later);
+    await f.service.apiOutcome('org', f.old.id, 0, { status: 'confirmed', eventId: 'late', platformId: 'old-result' }, f.later);
+    expect(f.db.rows('accountWriteState')[0].activeExecutionId).toBe(next.id);
+    expect(f.db.rows('sendQuotaReservation').find(row => row.executionId === next.id).state).toBe('HELD');
+    expect(f.db.rows('sendIntent').find(row => row.id === f.old.sendIntentId).status).toBe('SUCCEEDED');
+  });
+
+  it('keeps an uncertain writer locked without a persisted permit expiry', async () => {
+    const f = await uncertain();
+    f.db.rows('sendSegment')[0].submitBefore = null;
+    const next = await f.service.reserveApi('org', 'independent', 'new', f.later);
+    await expect(f.service.authorizeApiSegment('org', next.id, 0, { id: '123', idNamespace: 'x.rest_id' }, f.later)).rejects.toThrow('ACCOUNT_WRITE_BUSY');
+    expect(f.db.rows('accountWriteState')[0].activeExecutionId).toBe(f.old.id);
+  });
+});

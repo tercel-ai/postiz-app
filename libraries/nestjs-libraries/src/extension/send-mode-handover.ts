@@ -1,7 +1,7 @@
 import { ConflictException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { CONTROLLED_SEND_PLATFORMS, canonicalControlledPlatform } from './controlled-platforms';
-import { canonicalSendAccount, sendHash } from './send-coordination.utils';
+import { canonicalSendAccount, sendHash, uncertainWriterExpiredIn, releaseExpiredAccountWriterIn } from './send-coordination.utils';
 import type {
   SendModeBlockers,
   SendModeTransitionState,
@@ -404,27 +404,29 @@ async function controlledHoldsIn(tx: Prisma.TransactionClient, org: string) {
   const uncertain = await tx.sendSegment.findMany({
     where: { organizationId: org, status: { in: ['AUTHORIZED', 'UNKNOWN'] } },
   });
-  const [executions, locks, reservations] = await Promise.all([
-    tx.sendExecution.findMany({
-      where: {
-        organizationId: org,
-        OR: [
-          { status: { in: activeExecutions } },
-          { id: { in: uncertain.map((segment) => segment.executionId) } },
-        ],
-      },
-    }),
-    tx.accountWriteState.findMany({
-      where: { organizationId: org, activeExecutionId: { not: null } },
-    }),
-    tx.sendQuotaReservation.findMany({
-      where: { organizationId: org, state: 'HELD' },
-    }),
+  const [locks, reservations] = await Promise.all([
+    tx.accountWriteState.findMany({ where: { organizationId: org, activeExecutionId: { not: null } } }),
+    tx.sendQuotaReservation.findMany({ where: { organizationId: org, state: 'HELD' } }),
   ]);
-  const orphaned = uncertain.some(segment => !executions.some(execution => execution.id === segment.executionId)) ||
-    locks.some(lock => !executions.some(execution => execution.id === lock.activeExecutionId)) ||
-    reservations.some(reservation => !executions.some(execution => execution.id === reservation.executionId));
-  return { executions, locks, reservations, orphaned };
+  const referenced = new Set([
+    ...uncertain.map(segment => segment.executionId),
+    ...locks.map(lock => lock.activeExecutionId!),
+    ...reservations.map(reservation => reservation.executionId),
+  ]);
+  const executions = await tx.sendExecution.findMany({ where: {
+    organizationId: org, OR: [{ status: { in: activeExecutions } }, { id: { in: [...referenced] } }],
+  } });
+  const orphaned = [...referenced].some(id => !executions.some(execution => execution.id === id));
+  const currentLocks = await Promise.all(locks.map(lock => releaseExpiredAccountWriterIn(tx, lock, new Date())));
+  const live = [];
+  for (const execution of executions) {
+    const retainedWriter = currentLocks.some(lock => lock.activeExecutionId === execution.id);
+    if (retainedWriter || !await uncertainWriterExpiredIn(tx, execution, new Date())) live.push(execution);
+  }
+  const liveIds = new Set(live.map(execution => execution.id));
+  return { executions: live,
+    locks: currentLocks.filter(lock => lock.activeExecutionId && liveIds.has(lock.activeExecutionId)),
+    reservations: reservations.filter(reservation => liveIds.has(reservation.executionId)), orphaned };
 }
 
 /** Due discovery and final admission use the same observed account holds. */
