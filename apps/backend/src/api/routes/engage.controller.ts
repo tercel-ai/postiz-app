@@ -1407,9 +1407,10 @@ export class EngageController {
   @Get('/sent')
   listSentReplies(
     @GetOrgFromRequest() org: Organization,
-    @Query() query: ListSentDto
+    @Query() query: ListSentDto,
+    @GetUserFromRequest() user: User
   ) {
-    return this._engageService.listSentReplies(org, query);
+    return this._engageService.listSentReplies(org, query, user.id);
   }
 
   @ApiOperation({
@@ -1479,9 +1480,10 @@ export class EngageController {
   @Get('/sent/:id')
   getSentReplyById(
     @GetOrgFromRequest() org: Organization,
-    @Param('id') id: string
+    @Param('id') id: string,
+    @GetUserFromRequest() user: User
   ) {
-    return this._engageService.getSentReplyItemById(org, id);
+    return this._engageService.getSentReplyItemById(org, id, user.id);
   }
 
   @ApiOperation({

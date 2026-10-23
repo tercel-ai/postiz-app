@@ -1,3 +1,4 @@
+import { assertAutonomousAccountIn, controlledBlockedPlatformsIn } from './send-mode-handover';
 import { SendModeService } from './send-mode.service';
 import { CONTROLLED_SEND_PLATFORMS, canonicalControlledPlatform, controlledReplySettings, hasControlledReplyTarget } from './controlled-platforms';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
@@ -80,13 +81,13 @@ export class SendCoordinatorService {
 
   async enabled(org: string) {
     const state = await this.modes.stateIn(this.db, org);
-    if (state.mode !== 'CONTROLLED') throw new ConflictException('SEND_MODE_CONTROLLED_REQUIRED');
+    if (state.mode !== 'CONTROLLED' && !(state.systemEnabled && state.controlledDrain?.remainingCount)) throw new ConflictException('SEND_MODE_CONTROLLED_REQUIRED');
   }
 
   isControlled(org: string, tx?: Prisma.TransactionClient) { return this.modes.isControlled(org, tx); }
 
-  assertControlledIn(tx: Prisma.TransactionClient, org: string) {
-    return this.modes.assertControlledIn(tx, org);
+  assertControlledIn(tx: Prisma.TransactionClient, org: string, reference: { rootPostId?: string; executionId?: string; drainDiscovery?: boolean } = {}) {
+    return this.modes.assertControlledIn(tx, org, reference);
   }
 
   async autonomousTransaction<T>(org: string, work: (tx: Prisma.TransactionClient) => Promise<T>, existingPostIds?: string[]) {
@@ -136,7 +137,10 @@ export class SendCoordinatorService {
         if (legacy.size && (await this.chain(tx, org, root.id)).some(item => legacy.has(item.id)))
           blockCode = 'LEGACY_CONTENT_DRAIN_REQUIRED';
       }
-      return sendBusinessSummary(root, intent, executions, segments, blockCode, await this.isControlled(org, tx));
+      const modeState = await this.modes.stateIn(tx, org);
+      const continuing = modeState.systemEnabled && Boolean(modeState.controlledDrain?.remainingCount) &&
+        executions.some(execution => active.includes(execution.status));
+      return sendBusinessSummary(root, intent, executions, segments, blockCode, modeState.mode === 'CONTROLLED', continuing);
     });
   }
 
@@ -388,7 +392,9 @@ export class SendCoordinatorService {
       if (existing && existing.rootPostId !== first.id) reject('CONTENT_ROOT_CONFLICT');
       // The saved reply itself is the idempotency key. A replay never grants
       // another execution, changes the frozen actor, or touches quota ledgers.
-      if (existing && options.sentReplyId && !receiptRequestId) {
+      const handedOver = existing?.status === 'HANDED_OVER' && !first.sendIntentId;
+      if (handedOver && await tx.sendExecution.count({ where: { organizationId: org, sendIntentId: existing.id } })) reject('SEND_INTENT_IMMUTABLE');
+      if (existing && !handedOver && options.sentReplyId && !receiptRequestId) {
         if (first.sendIntentId !== existing.id || existing.action !== 'REPLY')
           reject('SEND_CONTENT_CHANGED');
         const requestedAccount = selection?.integrationId;
@@ -399,7 +405,7 @@ export class SendCoordinatorService {
       }
       if (first.state === 'PUBLISHED' || first.releaseId)
         reject('CONTENT_ALREADY_SUBMITTED');
-      if (existing) {
+      if (existing && !handedOver) {
         if (selection) reject('SEND_INTENT_IMMUTABLE');
         if (existing.status !== 'QUEUED')
           reject('SEND_INTENT_REQUIRES_EXPLICIT_RETRY');
@@ -511,8 +517,7 @@ export class SendCoordinatorService {
         throw new BadRequestException('LINKEDIN_COMPANY_ACCOUNT_REQUIRED');
       // Enroll controlled sending without changing an existing account switch.
       if (route) await this.enrollAccountIn(tx, org, route.integrationId, route.canonicalAccountKey);
-      const intent = await tx.sendIntent.create({
-        data: {
+      const intentData = {
           organizationId: org,
           contentUnitId: unit,
           rootPostId: first.id,
@@ -538,8 +543,10 @@ export class SendCoordinatorService {
                 ),
               }
             : {}),
-        },
-      });
+      };
+      const intent = handedOver
+        ? await tx.sendIntent.update({ where: { id: existing!.id }, data: { ...intentData, revision: { increment: 1 } } })
+        : await tx.sendIntent.create({ data: intentData });
       const queued = await tx.post.updateMany({
         where: {
           organizationId: org,
@@ -811,14 +818,19 @@ export class SendCoordinatorService {
     }));
   }
 
-  async assertLegacyAccount(org: string, _integrationId: string, existingPostIds?: string[]) {
-    await this.autonomousTransaction(org, async () => undefined, existingPostIds);
+  async assertLegacyAccount(org: string, integrationId: string, existingPostIds?: string[]) {
+    await this.autonomousTransaction(org, tx => assertAutonomousAccountIn(tx, org, { integrationId }), existingPostIds);
   }
 
   async legacyBlockedPlatforms(org: string) {
     const state = await this.modes.stateIn(this.db, org);
-    return state.mode === 'AUTONOMOUS' && state.autonomousAllowed
-      ? [] : [...CONTROLLED_SEND_PLATFORMS, 'linkedin-page'];
+    if (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed) return [...CONTROLLED_SEND_PLATFORMS, 'linkedin-page'];
+    const blocked = new Set(await controlledBlockedPlatformsIn(this.db, org));
+    if (state.legacyDrain) for (const platform of CONTROLLED_SEND_PLATFORMS) {
+      if (await this.modes.legacyAccountBlockedIn(this.db, org, null, platform)) blocked.add(platform);
+    }
+    if (blocked.has('linkedin')) blocked.add('linkedin-page');
+    return [...blocked];
   }
 
   async assertLegacyPosts(org: string, posts: { id: string; projectId?: string | null; sendIntentId?: string | null; executionProtocol?: string | null }[]) {
@@ -1033,7 +1045,7 @@ export class SendCoordinatorService {
     now: Date
   ) {
     const org = execution.organizationId;
-    await this.assertControlledIn(tx, org);
+    await this.assertControlledIn(tx, org, { executionId: execution.id });
     await this.verifyPolicyIn(tx);
     if (await this.modes.legacyAccountBlockedIn(tx, org, execution.integrationId))
       reject('LEGACY_ACCOUNT_DRAIN_REQUIRED');

@@ -5011,6 +5011,8 @@ export class EngageRepository {
               id: true,
               content: true,
               state: true,
+              executionProtocol: true,
+              sendIntentId: true,
               releaseURL: true,
               publishDate: true,
               impressions: true,
@@ -6549,6 +6551,8 @@ export class EngageRepository {
             id: true,
             content: true,
             state: true,
+            executionProtocol: true,
+            sendIntentId: true,
             releaseURL: true,
             // Same as listSentReplies — and this is the path a page takes to
             // re-read ONE row right after an attempt failed, so without it the

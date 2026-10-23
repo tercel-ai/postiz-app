@@ -12,7 +12,7 @@ export const needsSendSummary = (post: PublicPost, controlled = false) => contro
   post?.executionProtocol === 'ACCOUNT_BOUND_V1' || !!post?.sendIntentId;
 
 /** Public projection only: execution credentials and raw evidence must never escape. */
-export function sendBusinessSummary(post: PublicPost, intent: PublicIntent | null, executions: PublicExecution[], segments: PublicSegment[], operationBlockCode: string | null = null, enabled = isAccountBoundSendingEnabled()) {
+export function sendBusinessSummary(post: PublicPost, intent: PublicIntent | null, executions: PublicExecution[], segments: PublicSegment[], operationBlockCode: string | null = null, enabled = isAccountBoundSendingEnabled(), continuingExecution = false) {
   const controlled = !!intent || post.executionProtocol === 'ACCOUNT_BOUND_V1';
   const latest = executions.find(e => e.id === intent?.activeExecutionId) ?? executions[0];
   const confirmed = intent?.hasConfirmedSegments === true || segments.some(s => s.status === 'CONFIRMED');
@@ -26,7 +26,7 @@ export function sendBusinessSummary(post: PublicPost, intent: PublicIntent | nul
   const actor = intent?.target as { id?: string; idNamespace?: string; handle?: string } | null;
   return {
     protocol: controlled || enabled ? 'ACCOUNT_BOUND_V1' : 'LEGACY',
-    paused: (controlled || enabled) && !enabled,
+    paused: (controlled || enabled) && !enabled && !continuingExecution,
     rootPostId: post.id,
     sendIntentId: intent?.id ?? null,
     intentStatus: intent?.status ?? null,

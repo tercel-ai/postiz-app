@@ -18,6 +18,7 @@ import {
   SaveSendModeDto,
   SaveSystemSendModeDto,
 } from './send-mode.dto';
+import { TERMINAL_SEND_INTENT_STATUSES, parseControlledDrain, handoverControlledIn, controlledDrainStateIn, controlledDrainAllowsIn, assertAutonomousAccountIn } from './send-mode-handover';
 import { isLegacyExecution } from './legacy-execution';
 import { canonicalControlledPlatform } from './controlled-platforms';
 
@@ -117,6 +118,7 @@ export interface SendModeState {
   blockers: SendModeBlockers;
   transition: SendModeTransitionState | null;
   legacyDrain: SendModeTransitionState | null;
+  controlledDrain?: (SendModeTransitionState & { issues: Array<{ postId: string; code: string }> }) | null;
   reallocation: { remainingCount: number; completedCount: number; blockedCount: number;
     issues: Array<{ postId: string; code: string }> } | null;
 }
@@ -174,7 +176,6 @@ export class SendModeService {
     )
       throw new ServiceUnavailableException('SEND_MODE_CONFIGURATION_INVALID');
     if ((value.transition != null && value.mode !== 'AUTONOMOUS') ||
-        (value.legacyDrain != null && value.mode !== 'CONTROLLED') ||
         (value.transition != null && value.legacyDrain != null))
       throw new ServiceUnavailableException('SEND_MODE_CONFIGURATION_INVALID');
     const pending = value.transition ?? value.legacyDrain;
@@ -276,7 +277,7 @@ export class SendModeService {
       tx.sendIntent.count({
         where: {
           ...scope,
-          status: { notIn: ['SUCCEEDED', 'FAILED_FINAL', 'CANCELLED'] },
+          status: { notIn: TERMINAL_SEND_INTENT_STATUSES },
         },
       }),
       tx.sendExecution.count({
@@ -354,6 +355,7 @@ export class SendModeService {
       where: { key: organizationSendModeKey(organizationId) },
     });
     const configured = this.parseOrganization(row?.value);
+    const reverse = parseControlledDrain(row?.value);
     const blockers = await this.blockersIn(tx, organizationId);
     const history =
       configured.mode === null &&
@@ -361,7 +363,7 @@ export class SendModeService {
     const autonomousAllowed =
       configured.mode !== 'CONTROLLED' &&
       !history &&
-      this.controlledObligations(blockers) === 0;
+      (this.controlledObligations(blockers) === 0 || reverse !== null);
     const mode =
       configured.mode === 'CONTROLLED'
         ? system.effectiveEnabled
@@ -390,7 +392,8 @@ export class SendModeService {
       legacyDrain: configured.legacyDrain
         ? await this.transitionStateIn(tx, organizationId, configured.legacyDrain, system.effectiveEnabled)
         : null,
-      reallocation: await this.reallocationStateIn(tx, organizationId, row?.value),
+      controlledDrain: reverse ? await controlledDrainStateIn(tx, organizationId, reverse, blockers) : null,
+      reallocation: configured.mode === 'CONTROLLED' ? await this.reallocationStateIn(tx, organizationId, row?.value) : null,
     };
   }
 
@@ -776,7 +779,8 @@ export class SendModeService {
       where: {
         key: { startsWith: SEND_MODE_ORGANIZATION_PREFIX },
         OR: [{ value: { path: ['transition', 'targetMode'], equals: 'CONTROLLED' } },
-          { value: { path: ['legacyDrain', 'targetMode'], equals: 'CONTROLLED' } }],
+          { value: { path: ['legacyDrain', 'targetMode'], equals: 'CONTROLLED' } },
+          { value: { path: ['controlledDrain', 'targetMode'], equals: 'AUTONOMOUS' } }],
       },
       select: { key: true },
     });
@@ -800,6 +804,15 @@ export class SendModeService {
             }
             const setting = await tx.settings.findUnique({ where: { key: row.key } });
             const config = this.parseOrganization(setting?.value);
+            const reverse = parseControlledDrain(setting?.value);
+            if (config.mode === 'AUTONOMOUS' && reverse) {
+              const { controlledDrain: _reverse, legacyDrain: _legacy, reallocation: _allocation, ...rest } = setting!.value as Prisma.JsonObject;
+              await tx.settings.updateMany({ where: { key: row.key }, data: { value: sendJson({ ...rest,
+                ...(state.controlledDrain?.remainingCount ? { controlledDrain: reverse } : {}),
+                ...(state.legacyDrain?.remainingCount ? { legacyDrain: config.legacyDrain } : {}),
+              }) } });
+              return false;
+            }
             if (config.legacyDrain) {
               const reallocation = this.parseReallocation(setting?.value) ??
                 await this.newReallocationIn(tx, organizationId, config.legacyDrain.requestedByUserId);
@@ -862,10 +875,12 @@ export class SendModeService {
 
   async assertControlledIn(
     tx: Prisma.TransactionClient,
-    organizationId: string
+    organizationId: string,
+    reference: { rootPostId?: string; executionId?: string; drainDiscovery?: boolean } = {}
   ) {
     const state = await this.lockIn(tx, organizationId);
-    if (state.mode !== 'CONTROLLED')
+    const row = await tx.settings.findUnique({ where: { key: organizationSendModeKey(organizationId) } });
+    if (state.mode !== 'CONTROLLED' && !(state.systemEnabled && ((reference.drainDiscovery && state.controlledDrain) || await controlledDrainAllowsIn(tx, organizationId, parseControlledDrain(row?.value), reference))))
       throw new ConflictException('SEND_MODE_CONTROLLED_REQUIRED');
     return state;
   }
@@ -914,7 +929,7 @@ export class SendModeService {
     return (await this.pendingPostsIn(tx, organizationId)).map(post => post.id);
   }
 
-  async legacyAccountBlockedIn(tx: Prisma.TransactionClient, organizationId: string, integrationId: string) {
+  async legacyAccountBlockedIn(tx: Prisma.TransactionClient, organizationId: string, integrationId: string | null, browserPlatform?: string) {
     const [posts, records, captured] = await Promise.all([
       this.pendingPostsIn(tx, organizationId), this.autonomousRecordsIn(tx, organizationId),
       this.capturedWorkIn(tx, organizationId),
@@ -937,7 +952,8 @@ export class SendModeService {
       (result.status !== 'CONFIRMED' || result.postIds?.some(id => associated.has(id) &&
         (!result.recurring || Date.parse(result.occurrenceKey ?? '') === new Date(associated.get(id)!.publishDate).getTime()))));
     if (!posts.length && !relevant.length) return false;
-    const target = await tx.integration.findFirst({ where: { id: integrationId, organizationId } });
+    const target: { id: string | null; providerIdentifier: string; identityNamespace: string | null; internalId: string | null } | null = integrationId ? await tx.integration.findFirst({ where: { id: integrationId, organizationId } })
+      : browserPlatform ? { id: null, providerIdentifier: browserPlatform, identityNamespace: null, internalId: null } : null;
     if (!target) return true;
     const platform = canonicalControlledPlatform(target.providerIdentifier);
     const affected = async (id: string | null, family?: string | null, browser = false) => {
@@ -1040,6 +1056,7 @@ export class SendModeService {
       body.expectedUserId !== userId
     )
       throw new ForbiddenException('SEND_OWNER_CHANGED');
+    console.log('[sending-mode] request', { organizationId, userId, requestId: body.requestId, mode: body.mode, expectedRevision: body.expectedRevision });
     const requestHash = sendHash({
       mode: body.mode,
       expectedRevision: body.expectedRevision,
@@ -1105,23 +1122,14 @@ export class SendModeService {
             effectReceiptIds: effects.map(({ row }) => row.id),
           };
         }
-      } else if (
-        body.mode === 'AUTONOMOUS' &&
-        this.controlledObligations(current.blockers) +
-          current.blockers.autonomousEffects + (current.legacyDrain?.remainingCount ?? 0) >
-          0 &&
-        current.configuredMode !== body.mode
-      ) {
-        throw new ConflictException({
-          code: 'SEND_MODE_SWITCH_UNSAFE',
-          message: 'SEND_MODE_SWITCH_UNSAFE',
-          blockers: current.blockers,
-        });
       }
       const currentSetting = await tx.settings.findUnique({ where: { key: organizationSendModeKey(organizationId) } });
       const existingConfig = this.parseOrganization(currentSetting?.value);
-      const legacyDrain = body.mode === 'CONTROLLED'
-        ? existingConfig.legacyDrain ?? (existingConfig.transition ? await this.normalizeTransitionIn(tx, organizationId, existingConfig.transition) : transition) : null;
+      const controlledDrain = body.mode === 'CONTROLLED' ? null
+        : current.configuredMode !== 'AUTONOMOUS' ? await handoverControlledIn(tx, organizationId, userId)
+        : parseControlledDrain(currentSetting?.value);
+      const legacyDrain = existingConfig.legacyDrain ?? (body.mode === 'CONTROLLED'
+        ? (existingConfig.transition ? await this.normalizeTransitionIn(tx, organizationId, existingConfig.transition) : transition) : null);
       const reallocation = body.mode === 'CONTROLLED'
         ? this.parseReallocation(currentSetting?.value) ?? await this.newReallocationIn(tx, organizationId, userId) : null;
       await tx.settings.updateMany({
@@ -1131,6 +1139,7 @@ export class SendModeService {
             mode: body.mode,
             revision: current.revision + 1,
             ...(legacyDrain ? { legacyDrain } : {}),
+            ...(controlledDrain ? { controlledDrain } : {}),
             ...(reallocation ? { reallocation } : {}),
           }),
         },
@@ -1143,6 +1152,7 @@ export class SendModeService {
       await tx.sendMutationReceipt.create({
         data: { ...key, requestHash, result: sendJson(result) },
       });
+      console.log('[sending-mode] parsed result', { requestId: body.requestId, result });
       return result;
     });
   }
@@ -1415,9 +1425,15 @@ export class SendModeService {
           'AUTONOMOUS_EFFECT_RECONCILIATION_REQUIRED'
         );
       }
-      if (!state.transition && !state.legacyDrain && (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed))
+      const captured = state.legacyDrain ? await this.capturedWorkIn(tx, organizationId) : null;
+      const pending = captured ? new Set((await this.pendingPostsIn(tx, organizationId)).map(post => post.id)) : null;
+      const legacyContinuation = Boolean(captured && ['POST', 'COMMENT'].includes(request.action) &&
+        Array.isArray(request.postIds) && request.postIds.length > 0 &&
+        request.postIds.every(id => captured.eligiblePostIds.includes(id) && pending!.has(id)));
+      const draining = Boolean(state.transition || (state.configuredMode === 'CONTROLLED' && state.legacyDrain) || legacyContinuation);
+      if (!draining && (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed))
         throw new ConflictException('SEND_MODE_AUTONOMOUS_REQUIRED');
-      if (state.transition || state.legacyDrain) {
+      if (draining) {
         if (
           !['POST', 'COMMENT'].includes(request.action) ||
           !Array.isArray(request.postIds)
@@ -1429,6 +1445,9 @@ export class SendModeService {
           request.postIds as string[]
         );
       }
+      await assertAutonomousAccountIn(tx, organizationId, { integrationId: request.integrationId });
+      if (state.configuredMode === 'AUTONOMOUS' && state.legacyDrain && !legacyContinuation && await this.legacyAccountBlockedIn(tx, organizationId, request.integrationId))
+        throw new ConflictException('LEGACY_ACCOUNT_DRAIN_REQUIRED');
       const integration = await tx.integration.findFirst({
         where: {
           id: request.integrationId,
@@ -1507,7 +1526,7 @@ export class SendModeService {
           )
         )
           throw new ConflictException('AUTONOMOUS_EFFECT_CONTENT_CHANGED');
-        if (state.transition || state.legacyDrain) {
+        if (draining) {
           const captured = (await this.capturedWorkIn(tx, organizationId))!;
           if (
             posts.some(
@@ -1853,6 +1872,9 @@ export class SendModeService {
       // already admitted receipt may finish after cutover; never grant a new one.
       if (state.configuredMode === 'CONTROLLED')
         throw new ConflictException('SEND_MODE_AUTONOMOUS_REQUIRED');
+      await assertAutonomousAccountIn(tx, organizationId, { platform });
+      if (state.legacyDrain && await this.legacyAccountBlockedIn(tx, organizationId, null, platform))
+        throw new ConflictException('LEGACY_ACCOUNT_DRAIN_REQUIRED');
       let storedPostId = body.postId;
       let storedPlatform: string | null | undefined;
       if (body.sentReplyId) {
@@ -1885,6 +1907,8 @@ export class SendModeService {
               releaseURL: true,
               releaseId: true,
               claimedAt: true,
+              sendTarget: true,
+              contentUnitId: true,
             },
           })
         : null;
@@ -1926,9 +1950,9 @@ export class SendModeService {
         if (this.browserPlatform(storedPlatform) !== platform)
           throw new ConflictException('BROWSER_WRITE_PLATFORM_CHANGED');
       }
-      if (!state.transition && !state.legacyDrain && (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed))
+      if (!state.transition && (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed))
         throw new ConflictException('SEND_MODE_AUTONOMOUS_REQUIRED');
-      if (state.transition || state.legacyDrain) {
+      if (state.transition) {
         if (!post) throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
         await this.assertAutonomousIn(tx, organizationId, [post.id]);
         const pending = (await this.capturedWorkIn(tx, organizationId))!;
@@ -1940,6 +1964,13 @@ export class SendModeService {
         if (pending.eligiblePostOccurrences[post.id] !== occurrence)
           throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
       }
+      const handedOverIntent = post ? await tx.sendIntent.findFirst({ where: { organizationId,
+        ...(post.contentUnitId ? { contentUnitId: post.contentUnitId } : { rootPostId: post.id }), status: 'HANDED_OVER' } }) : null;
+      const handoverTarget = (post?.sendTarget as Prisma.JsonObject | null)?.handoverMode === 'AUTONOMOUS' ? post?.sendTarget : undefined;
+      if (handedOverIntent && post?.integrationId !== handedOverIntent.integrationId)
+        throw new ConflictException('HANDOVER_ACCOUNT_CHANGED');
+      if (handoverTarget && body.handoverAccountVerification !== true)
+        throw new ConflictException('HANDOVER_EXTENSION_UPGRADE_REQUIRED');
       const records = await this.autonomousRecordsIn(tx, organizationId);
       if (
         records.some(
@@ -1997,6 +2028,7 @@ export class SendModeService {
       });
       return {
         id: row.id,
+        ...(handoverTarget ? { targetAccount: handoverTarget } : {}),
         admitted: true,
         status: result.status,
         organizationId,

@@ -236,7 +236,9 @@ export class IntegrationsController {
     @Headers('x-extension-protocol-version') protocolVersion?: string
   ) {
     if (nodeId || nodeToken || protocolVersion || body.reportSequence !== undefined) {
-      if (!(await this.controlled(org.id)) || !this._extensionNodes) throw new ServiceUnavailableException('EXTENSION_NODES_NOT_ENABLED');
+      const controlled = await this.controlled(org.id);
+      const state = !controlled && this._sendModes ? await this._sendModes.get(org.id, user.id) : null;
+      if ((!controlled && !(state?.systemEnabled && state.controlledDrain?.remainingCount)) || !this._extensionNodes) throw new ServiceUnavailableException('EXTENSION_NODES_NOT_ENABLED');
       if (protocolVersion && protocolVersion !== 'ACCOUNT_BOUND_V1') throw new HttpException('EXTENSION_PROTOCOL_UNSUPPORTED', 400);
       let maxChannels: number | null | undefined;
       try { maxChannels = await this._permissionsService.channelCreationLimit(org.id, user.id); }

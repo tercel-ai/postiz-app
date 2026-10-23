@@ -1,6 +1,7 @@
 import { SendModeService } from '../extension/send-mode.service';
 import { controlledReplySettings } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
 import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
+import { needsSendSummary } from '@gitroom/nestjs-libraries/extension/send-business-summary';
 import { AutomaticSendProducerService } from '../extension/automatic-send-producer.service';
 import { isLegacyExecution } from '../extension/legacy-execution';
 import { AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
@@ -2258,8 +2259,28 @@ export class EngageService implements OnApplicationBootstrap {
 
   // ─── Sent Replies ─────────────────────────────────────────────────────────
 
-  async listSentReplies(org: Organization, dto: ListSentDto) {
-    return this._engageRepository.listSentReplies(org.id, dto);
+  private async attachSentReplySending<T extends { postId: string; post?: { id: string; executionProtocol?: string | null; sendIntentId?: string | null } | null }>(
+    org: Organization, userId: string | undefined, items: T[]
+  ): Promise<Array<T & { sending?: Awaited<ReturnType<PostsService['getSendingSummary']>> }>> {
+    if (!userId || !items.length) return items;
+    const controlled = await this.isControlled(org.id);
+    const summaries = new Map<string, ReturnType<PostsService['getSendingSummary']>>();
+    return Promise.all(items.map(async item => {
+      const post = item.post;
+      if (!post || !needsSendSummary(post, controlled)) return item;
+      let summary = summaries.get(post.id);
+      if (!summary) {
+        summary = this._postsService.getSendingSummary(org.id, userId, post.id);
+        summaries.set(post.id, summary);
+      }
+      const sending = await summary;
+      return { ...item, sending, post: { ...post, sending } };
+    }));
+  }
+
+  async listSentReplies(org: Organization, dto: ListSentDto, userId?: string) {
+    const result = await this._engageRepository.listSentReplies(org.id, dto);
+    return { ...result, items: await this.attachSentReplySending(org, userId, result.items) };
   }
 
   // Cross-org Engage reply list for the admin console. Not org-scoped — the
@@ -2318,11 +2339,13 @@ export class EngageService implements OnApplicationBootstrap {
   // extension has backfilled the permalink (replyUrl non-null).
   async getSentReplyStatus(org: Organization, sentReplyId: string, userId?: string) {
     const result = await this._engageRepository.getSentReplyStatus(org.id, sentReplyId);
-    return userId && result.postId && (result.executionProtocol === 'ACCOUNT_BOUND_V1' || result.sendIntentId || await this.isControlled(org.id)) ? { ...result, sending: await this._postsService.getSendingSummary(org.id, userId, result.postId) } : result;
+    return userId && result.postId && needsSendSummary(result, await this.isControlled(org.id)) ? { ...result, sending: await this._postsService.getSendingSummary(org.id, userId, result.postId) } : result;
   }
 
-  async getSentReplyItemById(org: Organization, sentReplyId: string) {
-    return this._engageRepository.getSentReplyItemById(org.id, sentReplyId);
+  async getSentReplyItemById(org: Organization, sentReplyId: string, userId?: string) {
+    const result = await this._engageRepository.getSentReplyItemById(org.id, sentReplyId);
+    const [item] = await this.attachSentReplySending(org, userId, [result]);
+    return item;
   }
 
   async updateScheduledReply(

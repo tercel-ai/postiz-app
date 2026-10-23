@@ -43,17 +43,18 @@ export async function claimControlledSend<T>(
     if (!receipt && !original) return null;
     if ((receipt?.requestHash ?? original!.requestHash) !== fingerprint)
       throw new ConflictException('CLAIM_REQUEST_CONFLICT');
-    if (!original) return { items: [] };
+    if (!original) return { items: [] as T[] };
     if (original.status !== 'RESERVED' || original.leaseExpiresAt <= new Date() ||
         original.nodeCredentialVersion !== node.credentialVersion)
       return { items: [], executionId: original.id, status: original.status };
     return { items: [response(original, node.nodeId)] };
   };
   const initial = await sendTransaction(db, async (tx) => {
-    await sends.assertControlledIn(tx, auth.org);
+    const modeState = await sends.assertControlledIn(tx, auth.org, { drainDiscovery: true });
     const node = await nodes.authenticateIn(tx, auth.org, auth.user, auth.nodeId, auth.token);
     const replay = await replayIn(tx, node);
     if (replay) return { replay };
+    if (modeState.mode !== 'CONTROLLED') return { replay: { items: [] as T[] } };
     await sends.verifyPolicyIn(tx);
     const sessions = (await tx.extensionNodeSession.findMany({ where: {
       extensionNodeId: node.id, organizationId: auth.org, verificationStatus: 'VERIFIED',

@@ -4,6 +4,7 @@ import { SendModeService } from '../send-mode.service';
 import { sendBusinessSummary } from '../send-business-summary';
 import { EngageRepository } from '../../engage/engage.repository';
 import { EngageService } from '../../engage/engage.service';
+import { EngageController } from '../../../../../apps/backend/src/api/routes/engage.controller';
 import { IntegrationsController } from '../../../../../apps/backend/src/api/routes/integrations.controller';
 import { PostsController } from '../../../../../apps/backend/src/api/routes/posts.controller';
 import { CONTROLLED_SEND_PLATFORMS } from '../controlled-platforms';
@@ -570,4 +571,90 @@ it('automatically settles a proven unsent old claim and enqueues the same reply 
   expect(db.rows('sendIntent')).toHaveLength(1);
   expect(db.rows('engageSentReply')).toHaveLength(1);
   expect(db.rows('post')[0]).toMatchObject({ state: 'QUEUE', executionProtocol: 'ACCOUNT_BOUND_V1', releaseId: null });
+});
+
+
+describe('Engage list and detail sending projections', () => {
+  function fixture(controlled = true, protocol: string | null = 'ACCOUNT_BOUND_V1') {
+    const item = { id: 'reply', postId: 'root', post: { id: 'root', state: 'QUEUE', executionProtocol: protocol, sendIntentId: protocol ? 'intent' : null } };
+    const summary = { status: 'RECONCILING', rootPostId: 'root', allowedActions: { retry: { allowed: false, reason: 'SEND_RETRY_UNSAFE' } } };
+    const service = Object.assign(Object.create(EngageService.prototype), {
+      _sendModes: { isControlled: vi.fn().mockResolvedValue(controlled) },
+      _postsService: { getSendingSummary: vi.fn().mockResolvedValue(summary) },
+      _engageRepository: {
+        listSentReplies: vi.fn().mockResolvedValue({ items: [item], total: 1, page: 1, limit: 20 }),
+        getSentReplyItemById: vi.fn().mockResolvedValue(item),
+      },
+    }) as any;
+    return { item, summary, service };
+  }
+
+  it('returns the same sanitized reconciliation status in list and detail, preserving pagination', async () => {
+    const { item, summary, service } = fixture();
+    const list = await service.listSentReplies({ id: 'org' }, { page: 1, limit: 20 }, 'user');
+    const detail = await service.getSentReplyItemById({ id: 'org' }, item.id, 'user');
+    expect(list).toMatchObject({ total: 1, page: 1, limit: 20, items: [{ sending: summary, post: { sending: summary } }] });
+    expect(detail).toMatchObject({ sending: summary, post: { sending: summary } });
+    expect(service._postsService.getSendingSummary).toHaveBeenCalledWith('org', 'user', 'root');
+    expect(item).not.toHaveProperty('sending');
+  });
+
+  it('still projects stored controlled replies after the organization returns to autonomous mode', async () => {
+    const { service } = fixture(false);
+    expect((await service.listSentReplies({ id: 'org' }, {}, 'user')).items[0].sending.status).toBe('RECONCILING');
+    expect((await service.getSentReplyItemById({ id: 'org' }, 'reply', 'user')).sending.status).toBe('RECONCILING');
+  });
+
+  it('uses current controlled mode for a legacy draft while leaving autonomous legacy replies untouched', async () => {
+    const { service } = fixture(true, null);
+    expect((await service.listSentReplies({ id: 'org' }, {}, 'user')).items[0].sending.status).toBe('RECONCILING');
+    service._sendModes.isControlled.mockResolvedValue(false);
+    service._postsService.getSendingSummary.mockClear();
+    expect((await service.listSentReplies({ id: 'org' }, {}, 'user')).items[0]).not.toHaveProperty('sending');
+    expect(await service.getSentReplyItemById({ id: 'org' }, 'reply', 'user')).not.toHaveProperty('sending');
+    expect(service._postsService.getSendingSummary).not.toHaveBeenCalled();
+  });
+
+  it('checks mode once and shares one summary read per post within the current page', async () => {
+    const { item, service } = fixture();
+    service._engageRepository.listSentReplies.mockResolvedValue({ items: [item, { ...item, id: 'second' }], total: 200 });
+    const result = await service.listSentReplies({ id: 'org' }, {}, 'user');
+    expect(result.items).toHaveLength(2);
+    expect(service._sendModes.isControlled).toHaveBeenCalledTimes(1);
+    expect(service._postsService.getSendingSummary).toHaveBeenCalledTimes(1);
+    expect(service._engageRepository.listSentReplies).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['ORGANIZATION_MEMBERSHIP_REQUIRED', 'PROJECT_ACCESS_DENIED', 'SEND_STATUS_UNAVAILABLE'])('does not hide a summary refusal and restore legacy send buttons: %s', async reason => {
+    const { service } = fixture();
+    service._postsService.getSendingSummary.mockRejectedValue(new Error(reason));
+    await expect(service.listSentReplies({ id: 'org' }, {}, 'user')).rejects.toThrow(reason);
+    await expect(service.getSentReplyItemById({ id: 'org' }, 'reply', 'user')).rejects.toThrow(reason);
+  });
+
+  it('passes the authenticated user through both HTTP read routes', async () => {
+    const service = { listSentReplies: vi.fn(), getSentReplyItemById: vi.fn() };
+    const controller = Object.assign(Object.create(EngageController.prototype), { _engageService: service }) as any;
+    const org = { id: 'org' }, user = { id: 'user' }, query = { page: 1 };
+    controller.listSentReplies(org, query, user);
+    controller.getSentReplyById(org, 'reply', user);
+    expect(service.listSentReplies).toHaveBeenCalledWith(org, query, 'user');
+    expect(service.getSentReplyItemById).toHaveBeenCalledWith(org, 'reply', 'user');
+  });
+
+  it.each(['listSentReplies', 'getSentReplyItemById'] as const)('selects stored execution markers on the repository %s read', async method => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const repository = Object.assign(Object.create(EngageRepository.prototype), {
+      _sentReply: { model: { engageSentReply: { findMany, findFirst, count: vi.fn().mockResolvedValue(0) } } },
+      _opportunityState: { model: { engageOpportunityState: { findMany: vi.fn().mockResolvedValue([]) } } },
+    }) as any;
+    if (method === 'listSentReplies') {
+      await repository.listSentReplies('org', {});
+      expect(findMany.mock.calls[0][0].include.post.select).toMatchObject({ executionProtocol: true, sendIntentId: true });
+    } else {
+      await expect(repository.getSentReplyItemById('org', 'reply')).rejects.toThrow();
+      expect(findFirst.mock.calls[0][0].include.post.select).toMatchObject({ executionProtocol: true, sendIntentId: true });
+    }
+  });
 });

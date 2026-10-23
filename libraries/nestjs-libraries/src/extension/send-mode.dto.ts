@@ -83,6 +83,10 @@ class BrowserWriteOwnerDto {
 }
 
 export class BeginBrowserWriteDto extends BrowserWriteOwnerDto {
+  @IsOptional()
+  @IsBoolean()
+  handoverAccountVerification?: boolean;
+
   @IsString()
   @Matches(/\S/)
   @MaxLength(128)

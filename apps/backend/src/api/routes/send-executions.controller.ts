@@ -192,6 +192,7 @@ export class SendProtocolController {
     return { protocol: controlled ? 'ACCOUNT_BOUND_V1' : 'LEGACY',
       sendingMode: state.mode, modeRevision: state.revision,
       autonomousAllowed: state.autonomousAllowed,
+      controlledDrain: Boolean(state.controlledDrain?.remainingCount),
       sessionBoundActors: true,
       coordinationRequired: state.mode !== 'AUTONOMOUS', nodesEnabled: controlled,
       userId: user.id, organizationId: org.id, serverNow: new Date().toISOString() };

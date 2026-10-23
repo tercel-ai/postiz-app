@@ -248,7 +248,7 @@ describe('organization sending mode', () => {
     ).toMatchObject({ mode: 'CONTROLLED' });
   });
   it.each([
-    ['sendIntent', { status: 'QUEUED' }, 'nonterminalIntents'],
+    ['sendIntent', { status: 'QUEUED', rootPostId: 'root' }, 'nonterminalIntents'],
     ['sendExecution', { status: 'RESERVED' }, 'activeExecutions'],
     ['sendExecution', { status: 'SENDING' }, 'activeExecutions'],
     ['sendExecution', { status: 'RECONCILING' }, 'activeExecutions'],
@@ -275,7 +275,7 @@ describe('organization sending mode', () => {
       'controlledPendingPosts',
     ],
   ])(
-    'prevents downgrade with live %s obligation',
+    'switches immediately while preserving live %s obligation',
     async (table, fields, blocker) => {
       vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true');
       const { db, service } = setup();
@@ -284,19 +284,15 @@ describe('organization sending mode', () => {
         value: { mode: 'CONTROLLED', revision: 1 },
       });
       db.seed(table, { organizationId: 'org', ...fields });
-      await expect(
-        service.save('org', 'admin', save('AUTONOMOUS', 1))
-      ).rejects.toMatchObject({
-        response: {
-          code: 'SEND_MODE_SWITCH_UNSAFE',
-          blockers: { [blocker]: 1 },
-        },
-      });
-      expect(
-        db
-          .rows('settings')
-          .find((row) => row.key === organizationSendModeKey('org')).value.mode
-      ).toBe('CONTROLLED');
+      const result = await service.save('org', 'admin', save('AUTONOMOUS', 1));
+      expect(result).toMatchObject({ mode: 'AUTONOMOUS', autonomousAllowed: true, revision: 2 });
+      const inertDraft = table === 'post' && fields.state === 'DRAFT';
+      if (!inertDraft) {
+        expect(result.blockers[blocker]).toBe(1);
+        expect(result.controlledDrain?.remainingCount).toBeGreaterThan(0);
+      } else expect(db.rows('post')[0].executionProtocol).toBe('LEGACY');
+      expect(db.rows(table)).toHaveLength(1);
+
     }
   );
   it('permits an explicit safe downgrade with terminal history and keeps history unchanged', async () => {

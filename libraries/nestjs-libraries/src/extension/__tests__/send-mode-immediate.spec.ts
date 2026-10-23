@@ -67,9 +67,9 @@ it('isolates unknown browser writes by platform without guessing a historical ac
  expect(await modes.legacyAccountBlockedIn(db, 'org', 'account')).toBe(true);
  expect(await modes.legacyAccountBlockedIn(db, 'org', 'reddit')).toBe(false);
 });
-it('retains reverse-switch safety while any legacy work is still unsettled', async () => {
+it('preserves legacy ownership independently of an immediate reverse switch', async () => {
  const { modes, post } = setup(); post('claimed', { releaseId: 'lease' }); await modes.save('org', 'admin', change);
- await expect(modes.save('org', 'admin', { ...owner, mode: 'AUTONOMOUS', expectedRevision: 1, requestId: 'reverse' })).rejects.toThrow('SEND_MODE_SWITCH_UNSAFE');
+ expect(await modes.save('org', 'admin', { ...owner, mode: 'AUTONOMOUS', expectedRevision: 1, requestId: 'reverse' })).toMatchObject({ mode: 'AUTONOMOUS', legacyDrain: { remainingCount: 1 } });
 });
 it('checks legacy account ownership again at controlled reservation rather than only during discovery', async () => {
  const { db, service, create, now } = setupSend(); await create();
