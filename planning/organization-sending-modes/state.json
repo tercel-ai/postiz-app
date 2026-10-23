@@ -1,7 +1,7 @@
 {
   "feature": "organization-sending-modes",
   "created": "2026-10-20T02:39:20Z",
-  "updated": "2026-10-20T03:25:51.310259Z",
+  "updated": "2026-10-23T08:09:21Z",
   "status": "completed",
   "execution_order": [
     "mode-configuration",
@@ -72,6 +72,26 @@
         "backend-routing",
         "extension-negotiation"
       ]
+    }
+  ],
+  "fixes": [
+    {
+      "bug": "Settled historical browser reply retains platform writer occupancy and blocks independent controlled sends",
+      "root_cause_level": 1,
+      "root_cause": "Legacy account guard conflated task quarantine with writer occupancy; the prior expired controlled-writer fix did not cover terminal unbound browser receipts.",
+      "fixed_files": [
+        "libraries/nestjs-libraries/src/extension/send-mode.service.ts",
+        "libraries/nestjs-libraries/src/extension/__tests__/send-mode-legacy-writer-isolation.spec.ts",
+        "libraries/nestjs-libraries/src/extension/__tests__/send-claim.regression.spec.ts"
+      ],
+      "commits": [],
+      "doc_updates": [
+        "docs/organization-sending-modes.md",
+        "planning/organization-sending-modes/tasks/backend-routing.md",
+        "planning/organization-sending-modes/verification.md"
+      ],
+      "tests": { "passed": 4692, "failed": 0, "skipped": 97 },
+      "fixed_at": "2026-10-23T08:09:21Z"
     }
   ],
   "metadata": {

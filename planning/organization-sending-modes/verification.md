@@ -1,5 +1,51 @@
 # Verification and Acceptance Evidence
 
+## Historical legacy writer isolation: 2026-10-23
+
+The account-occupancy guard now distinguishes a quarantined historical reply
+from a live browser writer. It leaves the old Post, claim, captured drain and
+receipt records untouched. Complete current-claim-compatible `NOT_SUBMITTED`
+proof permits independent controlled sends, not resubmission of the old reply.
+
+Fresh regression evidence:
+
+| Acceptance boundary | Executed regression |
+| --- | --- |
+| Unbound historical LinkedIn proof stops holding the platform but preserves the original content quarantine and denies fresh autonomous admission | `send-mode-legacy-writer-isolation.spec.ts`: quarantines a historical unsent LinkedIn reply without retaining a platform writer |
+| Reservation and final authorization admit independent work without clearing the old lease | Same file: admits and authorizes an independent controlled send through the same historical guard |
+| Timer polling and explicit root claims both reach a fresh one-shot submission permit | `send-claim.regression.spec.ts`: claims and starts independent work past a settled historical browser reply (poll / direct) |
+| AUTHORIZED, UNKNOWN, CONFIRMED, absent/stale/mismatched/foreign proof, newer claims, API work, threads, recurrence and publication evidence retain protection | Negative cases in `send-mode-legacy-writer-isolation.spec.ts`; existing immediate-mode and historical recovery suites |
+
+Test-first verification reproduced three failures against the previous source:
+the LinkedIn platform remained blocked, independent reservation returned
+`LEGACY_ACCOUNT_DRAIN_REQUIRED`, and exact-bound proof still retained occupancy.
+All three passed after the fix. The final new isolation file has 24 passing
+cases, and the claim regression file has 27 passing cases including two new
+poll/direct cases.
+
+Final Node 22.22.0 non-frozen workspace run: **4,692 passed, 0 failed,
+97 skipped**; 294 passed files and 5 skipped files; exit 0. The 97 skips comprise
+96 existing gated infrastructure/provider cases and the explicitly excluded
+test name `reports reachability of each candidate endpoint` from the one-off
+Reddit `probe-flairs.spec.ts` diagnostic. Initial unrestricted runs were stopped
+while waiting on that external probe; they are not counted as completed runs.
+
+Command: `env DATABASE_URL= REDIS_URL= pnpm exec vitest run --exclude 'apps/extension/**' --testNamePattern '^(?!.*reports reachability of each candidate endpoint)' --silent --reporter=dot --reporter=json --outputFile.json=/tmp/postiz-legacy-writer-node22-tests.json`
+
+The Node 22 PATH was selected explicitly. Final output:
+`/tmp/postiz-legacy-writer-node22-tests.log`; machine-readable per-test evidence:
+`/tmp/postiz-legacy-writer-node22-tests.json`. The modified service and its
+production dependency graph also passed TypeScript `--noEmit` using
+`/tmp/postiz-legacy-writer-typecheck.json`, with no diagnostics in
+`/tmp/postiz-legacy-writer-node22-types.log`. Whitespace checks passed.
+
+No database mutation, schema migration, deployment, browser extension rebuild,
+or live social-platform write was performed for this fix. Frozen
+`postiz-app/apps/extension/` remains excluded. This is application-level memory
+transaction evidence, not deployed PostgreSQL concurrency or live LinkedIn
+acceptance. Build and restart consumers of the backend shared service before
+checking the previously queued independent reply.
+
 Scope: current backend, orchestrator, shared libraries and standalone browser extension. Frozen `postiz-app/apps/extension/` is excluded. No database connections, migration execution or live social writes were performed.
 
 ## Safety Criteria

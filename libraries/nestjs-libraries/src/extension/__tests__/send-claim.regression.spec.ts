@@ -264,6 +264,25 @@ async function replyStatusFixture() {
   return { ...f, item };
 }
 
+it.each(['poll', 'direct'])('claims and starts independent work past a settled historical browser reply: %s', async kind => {
+  const f = fixture(); await f.create();
+  const claimedAt = new Date(sendNow.getTime() - 60_000);
+  f.db.seed('post', { id: 'historical-reply', organizationId: 'org', projectId: 'project',
+    state: 'QUEUE', executionProtocol: 'LEGACY', source: 'engage', publishMethod: 'EXTENSION',
+    providerIdentifier: 'x', parentPostId: null, releaseId: 'old-lease', claimedAt, publishDate: claimedAt });
+  f.db.seed('sendMutationReceipt', { id: 'old-unsent', organizationId: 'org', userId: 'previous-browser',
+    operation: 'autonomous-side-effect', createdAt: new Date(claimedAt.getTime() + 1_000),
+    result: { status: 'NOT_SUBMITTED', revision: 2, source: 'BROWSER', platform: 'x', browserUserId: 'previous-browser',
+      integrationId: 'browser:previous-browser:x', action: 'COMMENT', postIds: ['historical-reply'],
+      recurring: false, occurrenceKey: 'single' } });
+  const item = (await f.claim(`legacy-${kind}`, kind === 'direct' ? 'root' : undefined)).items[0];
+  expect(item?.segments[0].id).toBe('root');
+  await f.proof(item);
+  expect(await f.executions.start(auth, item.executionId, 0, item.leaseToken)).toMatchObject({ granted: true });
+  expect(f.db.rows('post').find(row => row.id === 'historical-reply').releaseId).toBe('old-lease');
+  expect(f.db.rows('sendIntent').filter(row => row.rootPostId === 'historical-reply')).toEqual([]);
+});
+
 it('returns sanitized original reply context for an authenticated historical execution without changing its state', async () => {
   const f = await replyStatusFixture();
   const before = structuredClone(f.db.rows('sendExecution'));

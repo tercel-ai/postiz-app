@@ -929,11 +929,49 @@ export class SendModeService {
     return (await this.pendingPostsIn(tx, organizationId)).map(post => post.id);
   }
 
+  private async settledLegacyReplyWritersIn(
+    tx: Prisma.TransactionClient, organizationId: string,
+    posts: Awaited<ReturnType<SendModeService['pendingPostsIn']>>,
+    records: Awaited<ReturnType<SendModeService['autonomousRecordsIn']>>
+  ) {
+    const byPost = new Map<string, typeof records>();
+    for (const record of records) for (const id of record.result.postIds ?? []) {
+      const proofs = byPost.get(id) ?? [];
+      proofs.push(record); byPost.set(id, proofs);
+    }
+    const candidates = posts.filter(post => {
+      if (post.source !== 'engage' || !isLegacyExecution(post.executionProtocol) ||
+          post.publishMethod === 'API' || post.parentPostId ||
+          post.intervalInDays || post.releaseURL || !post.providerIdentifier ||
+          !(post.claimedAt instanceof Date) || !Number.isFinite(post.claimedAt.getTime())) return false;
+      const proofs = byPost.get(post.id) ?? [];
+      if (!proofs.length || !proofs.every(({ result }) =>
+        result.status === 'NOT_SUBMITTED' && result.source === 'BROWSER' && result.action === 'COMMENT' &&
+        result.postIds?.length === 1 && result.recurring === false && result.occurrenceKey === 'single' &&
+        canonicalControlledPlatform(result.platform!) === canonicalControlledPlatform(post.providerIdentifier!))) return false;
+      // An old receipt cannot settle a newer claim. Historical receipts without
+      // a lease binding must have been admitted after the current claim began.
+      return proofs.some(({ row, result }) => result.legacyClaim
+        ? result.legacyClaim.releaseId === post.releaseId &&
+          Date.parse(result.legacyClaim.claimedAt) === post.claimedAt!.getTime()
+        : row.createdAt instanceof Date && Number.isFinite(row.createdAt.getTime()) &&
+          row.createdAt >= post.claimedAt!);
+    });
+    if (!candidates.length) return new Set<string>();
+    // Even settled or removed children keep a thread out of single-reply isolation.
+    const children = await tx.post.findMany({ where: { organizationId,
+      parentPostId: { in: candidates.map(post => post.id) } }, select: { parentPostId: true } });
+    const parents = new Set(children.map(child => child.parentPostId));
+    return new Set(candidates.filter(post => !parents.has(post.id)).map(post => post.id));
+  }
+
   async legacyAccountBlockedIn(tx: Prisma.TransactionClient, organizationId: string, integrationId: string | null, browserPlatform?: string) {
-    const [posts, records, captured] = await Promise.all([
+    const [posts, records, setting] = await Promise.all([
       this.pendingPostsIn(tx, organizationId), this.autonomousRecordsIn(tx, organizationId),
-      this.capturedWorkIn(tx, organizationId),
+      tx.settings.findUnique({ where: { key: organizationSendModeKey(organizationId) } }),
     ]);
+    const config = this.parseOrganization(setting?.value);
+    const captured = config.legacyDrain ?? config.transition;
     if (captured?.eligiblePostIds.length) {
       const existing = await tx.post.findMany({ where: { organizationId, id: { in: captured.eligiblePostIds } }, select: { id: true } });
       if (existing.length !== captured.eligiblePostIds.length) return true;
@@ -970,7 +1008,13 @@ export class SendModeService {
     for (const { result } of relevant) {
       if (await affected(result.integrationId, result.platform, result.source === 'BROWSER')) return true;
     }
+    // CONTROLLED denies fresh legacy browser grants; terminal non-submission
+    // receipts leave only task quarantine, not a live platform writer. Keep
+    // pendingPostsIn unchanged so this same historical content cannot be resent.
+    const settledWriters = config.mode === 'CONTROLLED'
+      ? await this.settledLegacyReplyWritersIn(tx, organizationId, posts, records) : new Set<string>();
     for (const post of posts) {
+      if (settledWriters.has(post.id)) continue;
       const account = post.integrationId ? await tx.integration.findFirst({ where: { id: post.integrationId, organizationId } }) : null;
       const family = post.providerIdentifier || account?.providerIdentifier;
       if (await affected(post.integrationId, family, post.publishMethod !== 'API')) return true;

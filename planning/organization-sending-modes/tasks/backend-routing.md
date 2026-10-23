@@ -23,6 +23,13 @@ Enforce organization mode in all sending paths without weakening existing root o
 
 Concurrent switch versus claim/enqueue/permit has no cross-mode authorization. Controlled roots, unknown outcomes, held quota and receipts remain immutable. Autonomous mode works for unconfigured organizations using current plugin routes. Paused outcomes settle once.
 
+Historical browser replies with complete, current-claim-compatible
+`NOT_SUBMITTED` proof remain content-quarantined but do not retain platform
+writer occupancy in controlled mode. Independent polling and direct claims,
+reservation and final authorization must proceed; the same old content must
+remain non-enqueueable. Missing/stale proof, newer claims, uncertain or confirmed
+receipts, API work and threads retain their guards.
+
 ## Dependencies
 
 [Mode configuration](mode-configuration.md).

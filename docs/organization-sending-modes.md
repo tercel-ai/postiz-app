@@ -267,6 +267,34 @@ Success returns `nextAction: CHECK_REPLY_STATUS`. Re-read the normal reply statu
 and use ordinary Retry only when its current actions allow sending. Recovery
 does not enqueue, claim a controlled execution, reserve quota, or post a comment.
 
+### Historical task quarantine versus writer occupancy
+
+In configured `CONTROLLED` mode, an old standalone, nonrecurring Engage browser
+reply does not occupy the platform writer once every associated browser COMMENT
+receipt proves `NOT_SUBMITTED` for that same post, platform and single occurrence.
+At least one proof must match the current lease binding; historical unbound
+receipts must have been admitted at or after the current claim time. Missing
+claim/admission timestamps or proof predating a newer claim do not qualify.
+Threads, API work, publication evidence and any `AUTHORIZED`, `UNKNOWN` or
+`CONFIRMED` receipt retain their existing guards. Elapsed time is never used as
+proof of non-submission or to expire an unbounded legacy browser grant.
+
+This is an occupancy decision only: the old claim, captured ownership, receipt
+history and activity time remain unchanged. The old reply remains quarantined
+and cannot be adopted into a new controlled intent without its existing recovery
+checks. Fresh legacy browser admission is denied in controlled mode, and replay
+of a terminal receipt returns `admitted: false`. Independent new controlled work
+can proceed through discovery, reservation and final authorization without an
+administrator clearing the historical reply first. The legacy-drain attention
+count may therefore remain nonzero without blocking independent sends.
+
+This correction uses the existing indexed receipt and Post facts, with one
+batched child lookup to exclude threads. It adds no schema, backfill, endpoint,
+status or client protocol field. Reverting the code restores conservative
+occupancy without losing any historical records. It deliberately does not clear
+claims or reopen old content, which would require the stronger administrator
+attestations described above.
+
 ### Design decisions: historical recovery API
 
 - Necessity: the historical incident has settled browser non-submissions but
