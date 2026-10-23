@@ -1,50 +1,51 @@
-# 多节点发送 API 职责与文档归属
+# Multi-node Sending API Responsibilities and Documentation Ownership
 
-更新：2026-10-20。本索引供后端、插件及平台管理端联调，避免把所有已实现 API 都当作 aisee-app 的接入任务。它不改变任何接口或权限。
+Updated: 2026-10-20. This index supports integration across the backend, extension, and platform administration app. It distinguishes APIs that aisee-app must integrate from other implemented APIs. It does not change any interface or permission.
 
-## 文档放在哪里
+## Documentation Locations
 
-| 文档 | 读者及维护内容 |
+| Document | Audience and maintained content |
 | --- | --- |
-| [aisee-app 前端改造指南](../../aisee-app/docs/aisee-app-multi-node-integration.md) | 页面改动、调用顺序、代码入口、验收 |
-| [aisee-app 前端接口手册](../../aisee-app/docs/aisee-app-multi-node-integration-reference.md) | 前端实际业务调用、字段来源、响应处理；不是完整后端协议 |
-| [组织发送模式](organization-sending-modes.md) | 系统能力、组织状态机、切换保护、平台调用回执及异常处置 |
-| [账号与节点设计](project-account-extension-node-binding-design.md) | 账号绑定、节点与执行协议、并发、许可、配额和存储设计 |
-| [可选账号策略](project-account-optional-identity-implementation.md) | REQUIRED/OPTIONAL、首次领取绑定及服务端保护 |
-| [管理端页面](../../aisee-manage/app/pages/post/config/sending/index.tsx) | 平台系统开关、账号选择政策的展示与修改实现 |
+| [Single-node and multi-node sending upgrade overview](multi-node-sending-before-after.md) | Before-and-after comparisons across the three repositories, cross-repository calls, flowcharts, sequence diagrams, and deployment order |
+| [aisee-app frontend integration guide](../../aisee-app/docs/aisee-app-multi-node-integration.md) | Page changes, call order, code entry points, and acceptance criteria |
+| [aisee-app frontend API reference](../../aisee-app/docs/aisee-app-multi-node-integration-reference.md) | Actual frontend business calls, field sources, and response handling; not the complete backend protocol |
+| [Organization sending modes](organization-sending-modes.md) | System capability, organization state machine, transition safeguards, platform-write receipts, and exception handling |
+| [Account and node design](project-account-extension-node-binding-design.md) | Account binding, node and execution protocols, concurrency, permits, quotas, and storage design |
+| [Optional account selection policy](project-account-optional-identity-implementation.md) | REQUIRED/OPTIONAL, first-claim binding, and server-side safeguards |
+| [Administration page](../../aisee-manage/app/pages/post/config/sending/index.tsx) | Display and modification of the system capability switch and account selection policy |
 
-两份前端文档继续放 aisee-app/docs，内容只服务前端交付；后台设计不复制过去，也不让前端从历史协议中猜当前调用顺序。
+The two frontend integration documents remain in `aisee-app/docs` and focus on frontend delivery. Backend design stays in its owning repository; frontend developers should not have to infer the current call order from historical protocols.
 
-## 接口属于谁的接入范围
+## Integration Responsibilities
 
-| 接口/能力 | 本轮主要调用方 | aisee-app 是否需要额外接入 |
+| API or capability | Primary caller in this release | Additional aisee-app integration required? |
 | --- | --- | --- |
-| 项目 sending-context | aisee-app | 是，统一初始化；已聚合模式、预选策略、账号、上报节点和默认 |
-| 项目 sending-accounts/save | aisee-app | 是，项目默认保存；不要求客户端版本字段 |
-| 原 Post / Engage 业务接口、已保存内容入队、业务状态/重试 | aisee-app | 适配现有入口，保持原记录身份；详见前端手册 |
-| GET/POST /sending/mode | aisee-app 组织设置、插件 Options | 组织设置需要；不是平台超管接口，不需要每个编辑器重复读取 |
-| GET/POST/PUT /admin/settings/sending.account_bound_enabled | aisee-manage | 否，平台能力开关；平台超管权限 |
-| GET/POST/PUT /admin/settings/sending.account_selection_policy | aisee-manage | 否，平台 REQUIRED/OPTIONAL 政策；不是组织自主/受控开关 |
-| /extension/send-protocol | 插件 | 新前端初始化不需要；不再作为 sending-context 前的必调步骤 |
-| /user/send-preferences | 已有个人策略调用方/后端聚合 | 本轮不新增个人设置 UI；项目上下文已返回当前有效预选要求 |
-| GET /projects/:id/sending-accounts、组织 sending-accounts | 兼容调用方、独立默认配置能力 | 本轮项目页面用上下文读取；组织全局默认 UI 暂不做 |
-| GET /integrations/list、项目账号列表、reply-accounts 查询 | 原账号管理/兼容调用方 | 保留已有用途；不要求新选择器重复拼装这些 GET |
-| 账号关联项目、回复权限保存 | 原授权业务 | 保留用户明确授权流程，选择器不自动授予权限 |
-| /extension/nodes 的注册、凭据核验、节点会话上报 | 插件及其诊断/节点管理调用方 | 本轮不接，账号列表展示用上下文 terminals；不生成节点身份或传凭据 |
-| /extension/send-attempts 的 claim/renew/preflight/start/outcome 等 | 插件执行器 | 不接；网页业务入队不等于拥有平台写入许可 |
-| /sending/executions 的查询/对账 | 有对应权限的运维工具 | 不用于普通 Post/Reply 页面；页面读无凭据业务摘要 |
-| /sending/mode/autonomous-effects 及 resolve | 组织管理员异常处置工具 | 当前前端范围未包含，不因模式设置自动新增人工对账 UI |
+| Project sending-context | aisee-app | Yes. Unified initialization already aggregates the mode, preselection policy, accounts, reported nodes, and defaults |
+| Project sending-accounts/save | aisee-app | Yes. Saves Project defaults without requiring a client-supplied revision field |
+| Existing Post / Engage business APIs, saved-content enqueue, business status, and retry | aisee-app | Adapt existing entry points while preserving the original record identity; see the frontend reference |
+| GET/POST /sending/mode | aisee-app organization settings and extension Options | Required for organization settings. This is not a platform super-admin API, and each editor does not need to query it separately |
+| GET/POST/PUT /admin/settings/sending.account_bound_enabled | aisee-manage | No. System capability switch requiring platform super-admin permissions |
+| GET/POST/PUT /admin/settings/sending.account_selection_policy | aisee-manage | No. System REQUIRED/OPTIONAL policy, separate from the organization's autonomous/controlled mode |
+| /extension/send-protocol | Extension | Not required for new frontend initialization; no longer a prerequisite before sending-context |
+| /user/send-preferences | Existing personal-policy clients and backend aggregation | No new personal-settings UI in this release. Project context already returns the effective preselection requirement |
+| GET /projects/:id/sending-accounts and organization sending-accounts | Compatibility clients and standalone default-configuration clients | Project pages use context in this release; organization-wide default-account UI remains deferred |
+| GET /integrations/list, Project account lists, and reply-accounts queries | Existing account-management and compatibility clients | Preserve their existing uses; new selectors do not need to assemble these GET responses again |
+| Project account association and reply-permission updates | Existing authorization flows | Preserve explicit user authorization; selectors do not grant permissions automatically |
+| /extension/nodes registration, credential verification, and node-session reporting | Extension and its diagnostic/node-management clients | Not part of this frontend integration. Account lists use context terminals; the Web app does not generate node identities or transmit node credentials |
+| /extension/send-attempts claim/renew/preflight/start/outcome and related operations | Extension executor | No. Enqueuing business content from the Web app does not grant permission to write to a platform |
+| /sending/executions queries and reconciliation | Operations tools with the required permissions | Not used by ordinary Post/Reply pages; those pages read business summaries without execution credentials |
+| /sending/mode/autonomous-effects and resolve | Organization-admin exception-handling tools | Outside the current frontend scope; mode settings do not implicitly add a manual reconciliation UI |
 
-“本轮不接”不是删除已有功能或改变权限。上表按接入职责分类，具体授权以控制器和服务为准。
+“Not part of this integration” does not remove existing functionality or change permissions. The table classifies integration responsibilities; controllers and services remain authoritative for authorization.
 
-## 前端保留哪些安全信息
+## Safety Information Retained by the Frontend
 
-按接口分别约定：已保存 Reply 入队只需 sentReplyId 和可选 integrationId，后台以原草稿/任务防重，首次入队采用服务器当前保存的内容；不要求前端传版本或请求标识。Post 创建、项目默认保存、模式保存等接口仍按各自契约自动携带标识/版本，不能一概删除或强塞到所有请求。前端保留原记录 ID 与业务 allowedActions，区分请求重试和重新发送，不以新建内容绕过待确认结果。
+Requirements differ by API. Enqueuing a saved Reply needs only `sentReplyId` and optional `integrationId`. The backend prevents duplicates using the original draft/task and uses the content currently stored on the server for the first enqueue; the frontend does not supply a revision or request identifier. Post creation, Project default saves, and mode saves still carry identifiers or revisions automatically according to their own contracts. Do not remove those fields globally or add them indiscriminately to every request. The frontend preserves original record IDs and business `allowedActions`, distinguishes request retries from another send attempt, and never creates new content to bypass an outcome awaiting confirmation.
 
-## 本次整理修正
+## Documentation Corrections
 
-- 删除前端文档中“先读插件协议，再分散查询账号/策略/默认”的旧流程，统一以项目上下文为入口。
-- 前端指南只保留页面任务，接口手册只保留真实业务请求及逐字段解释。
-- 不把平台系统配置、节点注册、执行/对账当成 aisee-app 开发任务。
-- 保留组织管理员模式设置，以及已有账号授权、手动发送确认、自动化和自主发送业务；不因文档收口改变功能。
-- 现有计划提交的旧 planId 适配属于业务兼容项，不能作为新增多节点底层协议依赖。
+- Replace the old frontend flow of “read the extension protocol, then query accounts, policy, and defaults separately” with Project context as the unified entry point.
+- Keep page-level tasks in the frontend guide and actual business requests with field-by-field explanations in the API reference.
+- Keep system configuration, node registration, execution, and reconciliation outside aisee-app development responsibilities.
+- Preserve organization-admin mode settings and existing account authorization, manual-send confirmation, automation, and autonomous sending. Consolidating documentation does not change functionality.
+- Treat legacy `planId` adaptation in existing plan submissions as business compatibility, not as a dependency of the new multi-node protocol.
