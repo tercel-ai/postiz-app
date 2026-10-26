@@ -147,20 +147,21 @@ export class LinkedinPageProvider
     };
   }
 
-  async getSendActor(integration: Integration) {
+  async getSendActor(integration: Integration, signal?: AbortSignal) {
     if (integration.providerIdentifier !== 'linkedin-page' || !this._isValidOrgId(integration.internalId))
       throw new Error('LINKEDIN_ORGANIZATION_ID_REQUIRED');
-    const companies = await this.companies(integration.token);
+    const companies = await this.companies(integration.token, signal);
     if (!companies.some((company: { id: string }) => company.id === integration.internalId))
       throw new Error('LINKEDIN_ORGANIZATION_ADMIN_REQUIRED');
     return { id: integration.internalId, idNamespace: 'linkedin.organization_id' };
   }
 
-  async companies(accessToken: string) {
+  async companies(accessToken: string, signal?: AbortSignal) {
     const { elements, ...all } = await (
       await fetch(
         'https://api.linkedin.com/v2/organizationalEntityAcls?q=roleAssignee&role=ADMINISTRATOR&projection=(elements*(organizationalTarget~(localizedName,vanityName,logoV2(original~:playableStreams))))',
         {
+          signal,
           headers: {
             Authorization: `Bearer ${accessToken}`,
             'X-Restli-Protocol-Version': '2.0.0',

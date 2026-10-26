@@ -3,9 +3,11 @@ import {
   Logger,
   OnApplicationBootstrap,
   OnApplicationShutdown,
+  Optional,
 } from '@nestjs/common';
 import { SendCoordinatorService } from '@gitroom/nestjs-libraries/extension/send-coordinator.service';
 import { SendModeService } from '@gitroom/nestjs-libraries/extension/send-mode.service';
+import { LegacyIdentityReconciliationService } from '@gitroom/nestjs-libraries/extension/legacy-identity-reconciliation.service';
 
 @Injectable()
 export class SendModeTransitionReconciliationService
@@ -16,10 +18,14 @@ export class SendModeTransitionReconciliationService
   );
   private timer?: NodeJS.Timeout;
   private running = false;
+  private identityTimer?: NodeJS.Timeout;
+  private identityRunning = false;
 
   constructor(
     private readonly modes: SendModeService,
-    private readonly coordinator: SendCoordinatorService
+    private readonly coordinator: SendCoordinatorService,
+    @Optional()
+    private readonly identities?: LegacyIdentityReconciliationService
   ) {}
 
   onApplicationBootstrap(): void {
@@ -57,9 +63,34 @@ export class SendModeTransitionReconciliationService
     void run();
     this.timer = setInterval(() => void run(), 15_000);
     this.timer.unref();
+
+    const identities = this.identities;
+    if (identities) {
+      const reconcileIdentities = async () => {
+        if (this.identityRunning) return;
+        this.identityRunning = true;
+        try {
+          await identities.reconcilePendingControlledOrganizations();
+        } catch (error) {
+          this.logger.error(
+            'Legacy identity reconciliation failed',
+            error instanceof Error ? error.stack : error
+          );
+        } finally {
+          this.identityRunning = false;
+        }
+      };
+      void reconcileIdentities();
+      this.identityTimer = setInterval(
+        () => void reconcileIdentities(),
+        15_000
+      );
+      this.identityTimer.unref();
+    }
   }
 
   onApplicationShutdown(): void {
     if (this.timer) clearInterval(this.timer);
+    if (this.identityTimer) clearInterval(this.identityTimer);
   }
 }

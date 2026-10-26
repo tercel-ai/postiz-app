@@ -3619,15 +3619,76 @@ export class EngageRepository {
     sentReplyId: string,
     reason: string
   ): Promise<void> {
-    await this._tx.model.$transaction(async (tx) => {
+    await sendTransaction(this._tx.model, async (tx) => {
+      if (this._sendModes) await this._sendModes.lockIn(tx, organizationId);
       const reply = await tx.engageSentReply.findFirst({
         where: { id: sentReplyId, organizationId },
         select: { postId: true, opportunityId: true, projectId: true },
       });
       if (!reply) throw new NotFoundException('Sent reply not found');
 
+      const post = await tx.post.findFirst({
+        where: { id: reply.postId, organizationId, projectId: reply.projectId, deletedAt: null },
+      });
+      if (!post || post.releaseURL || post.deletedAt || !['DRAFT', 'QUEUE', 'ERROR'].includes(post.state))
+        throw new ConflictException('This reply is already published or no longer available');
+      // Older unconfirmed sends have no intent or receipt; their error is the durable evidence.
+      if (!post.sendIntentId && post.error?.startsWith('Send unconfirmed:'))
+        throw new ConflictException('This reply may already be published. Check its status before marking it failed.');
+      if (this._sendModes && (await this._sendModes.activeLegacyPostIdsIn(tx, organizationId)).includes(reply.postId))
+        throw new ConflictException('The original send is still active or awaiting confirmation. Check its status before marking it failed.');
+
+      if (post.sendIntentId) {
+        const intent = await tx.sendIntent.findFirst({ where: {
+          id: post.sendIntentId, organizationId, projectId: reply.projectId!, rootPostId: post.id, action: 'REPLY',
+        } });
+        const alreadyClosed = intent?.status === 'CANCELLED' && post.state === 'ERROR' &&
+          post.error?.startsWith(MANUAL_FAILURE_PREFIX);
+        if (!intent || post.parentPostId || post.releaseId || intent.activeExecutionId || intent.hasConfirmedSegments ||
+            (!alreadyClosed && !['QUEUED', 'FAILED_FINAL'].includes(intent.status)))
+          throw new ConflictException('This reply is still sending, unconfirmed, or already published. Check its status before marking it failed.');
+        const executions = await tx.sendExecution.findMany({ where: { organizationId, sendIntentId: intent.id } });
+        const segments = executions.length ? await tx.sendSegment.findMany({ where: {
+          organizationId, executionId: { in: executions.map(execution => execution.id) },
+        } }) : [];
+        // Expired reservations cannot submit without a permit; preserve their untouched history.
+        // Preserve all receipts and quota settlement; never cancel a live writer.
+        const occupied = executions.length && await tx.accountWriteState.findFirst({ where: {
+          organizationId, activeExecutionId: { in: executions.map(execution => execution.id) },
+        }, select: { id: true } });
+        const safelyStopped = executions.every((execution) => {
+          if (!['FAILED_FINAL', 'EXPIRED', 'CANCELLED'].includes(execution.status))
+            return false;
+          const ownSegments = segments.filter(
+            (segment) => segment.executionId === execution.id
+          );
+          return ownSegments.length > 0 && ownSegments.every((segment) =>
+            segment.postId === post.id && (
+              segment.status === 'NOT_SUBMITTED' || (
+                execution.status === 'EXPIRED' && !execution.startedAt &&
+                segment.status === 'PENDING' && !segment.authorizedAt &&
+                !segment.permitHash && !segment.submitBefore &&
+                !segment.confirmedAt && segment.result == null
+              )
+            )
+          );
+        });
+        if (occupied || !safelyStopped)
+          throw new ConflictException('The original send has not been confirmed stopped. Check its status before marking it failed.');
+        if (!alreadyClosed) {
+          const cancelled = await tx.sendIntent.updateMany({
+            where: { id: intent.id, organizationId, projectId: reply.projectId!, rootPostId: post.id,
+              status: intent.status, revision: intent.revision, activeExecutionId: null, hasConfirmedSegments: false },
+            data: { status: 'CANCELLED', revision: { increment: 1 } },
+          });
+          if (!cancelled.count) throw new ConflictException('The original send changed. Check its status before marking it failed.');
+        }
+      }
+
       const closed = await tx.post.updateMany({
-        where: { sendIntentId: null,
+        where: { sendIntentId: post.sendIntentId,
+          organizationId,
+          projectId: reply.projectId,
           id: reply.postId,
           state: { in: ['DRAFT', 'QUEUE', 'ERROR'] },
           releaseURL: null,

@@ -6,9 +6,12 @@ import { EngageRepository } from '../engage.repository';
 import { EngageService } from '../engage.service';
 import { ReportReplyFailedDto } from '../dtos/engage.dto';
 import { EngageController } from '@gitroom/backend/api/routes/engage.controller';
+import { sendBusinessSummary } from '../../extension/send-business-summary';
 
 function buildRepo(state = 'QUEUE', releaseURL: string | null = null, projectId: string | null = 'proj-1') {
   const post = {
+    id: 'p1', organizationId: 'org-1', projectId,
+    sendIntentId: null as string | null, parentPostId: null,
     state,
     releaseURL,
     error: null as string | null,
@@ -16,6 +19,12 @@ function buildRepo(state = 'QUEUE', releaseURL: string | null = null, projectId:
     releaseId: 'old-lease' as string | null,
     claimedAt: new Date('2026-10-08T00:00:00Z'),
   };
+  const intent = {
+    id: 'intent-1', organizationId: 'org-1', projectId, rootPostId: 'p1', action: 'REPLY',
+    status: 'FAILED_FINAL', activeExecutionId: null as string | null, hasConfirmedSegments: false, revision: 1,
+  };
+  const executions = [{ id: 'execution-1', status: 'FAILED_FINAL' }];
+  const segments = [{ executionId: 'execution-1', postId: 'p1', status: 'NOT_SUBMITTED' }];
   const sentFindFirst = vi.fn(async (args: any) => {
     if (args.where.organizationId !== 'org-1') return null;
     return {
@@ -35,6 +44,7 @@ function buildRepo(state = 'QUEUE', releaseURL: string | null = null, projectId:
   const postUpdateMany = vi.fn(async (args: any) => {
     const states = typeof args.where.state === 'string' ? [args.where.state] : args.where.state.in;
     if (!states.includes(post.state)) return { count: 0 };
+    if ('sendIntentId' in args.where && post.sendIntentId !== args.where.sendIntentId) return { count: 0 };
     if ('releaseURL' in args.where && post.releaseURL !== args.where.releaseURL) return { count: 0 };
     Object.assign(post, args.data);
     return { count: 1 };
@@ -42,8 +52,18 @@ function buildRepo(state = 'QUEUE', releaseURL: string | null = null, projectId:
   const oppUpdateMany = vi.fn(async (_args: any) => ({ count: 1 }));
   const tx = {
     engageSentReply: { findFirst: sentFindFirst, findMany: sentFindMany },
-    post: { updateMany: postUpdateMany },
+    post: { findFirst: vi.fn(async () => post), updateMany: postUpdateMany },
     engageOpportunityState: { updateMany: oppUpdateMany },
+    sendIntent: {
+      findFirst: vi.fn(async () => intent),
+      updateMany: vi.fn(async (args: any) => {
+        Object.assign(intent, args.data, { revision: intent.revision + 1 });
+        return { count: 1 };
+      }),
+    },
+    sendExecution: { findMany: vi.fn(async () => executions) },
+    sendSegment: { findMany: vi.fn(async () => segments) },
+    accountWriteState: { findFirst: vi.fn(async () => null) },
   };
   const transaction = vi.fn(async (fn: (client: any) => Promise<unknown>) => fn(tx));
   const repo = new EngageRepository(
@@ -51,10 +71,187 @@ function buildRepo(state = 'QUEUE', releaseURL: string | null = null, projectId:
     { model: tx } as any, {} as any, {} as any, { model: tx } as any,
     { model: { $transaction: transaction } } as any, {} as any, {} as any, {} as any
   );
-  return { repo, post, sentFindFirst, sentFindMany, postUpdateMany, oppUpdateMany, transaction };
+  return { repo, post, intent, executions, segments, tx, sentFindFirst, sentFindMany, postUpdateMany, oppUpdateMany, transaction };
 }
 
 describe('manual failure persistence', () => {
+  it.each([false, true])('preserves legacy uncertainty without captured receipts (send modes enabled: %s)', async withModes => {
+    const { repo, post, tx, postUpdateMany, oppUpdateMany } = buildRepo('ERROR');
+    post.releaseId = null;
+    post.error = 'Send unconfirmed: Confirmation timed out. — the reply may be live on the platform, so it will NOT be re-sent.';
+    const before = structuredClone(post);
+    if (withModes) (repo as any)._sendModes = {
+      lockIn: vi.fn(), activeLegacyPostIdsIn: vi.fn(async () => []),
+    };
+    await expect(repo.closeManuallyFailedReply('org-1', 'r1', 'Stop retrying.'))
+      .rejects.toBeInstanceOf(ConflictException);
+    expect(post).toEqual(before);
+    expect(postUpdateMany).not.toHaveBeenCalled();
+    expect(oppUpdateMany).not.toHaveBeenCalled();
+    expect(tx.sendIntent.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('scopes the linked controlled intent to the original organization, project, root and reply action', async () => {
+    const { repo, post, intent, tx } = buildRepo('ERROR');
+    post.sendIntentId = intent.id;
+    post.releaseId = null;
+    tx.sendIntent.findFirst.mockResolvedValueOnce(null as any);
+    await expect(repo.closeManuallyFailedReply('org-1', 'r1', 'Stop.')).rejects.toBeInstanceOf(ConflictException);
+    expect(tx.sendIntent.findFirst).toHaveBeenCalledWith({ where: {
+      id: intent.id, organizationId: 'org-1', projectId: 'proj-1', rootPostId: 'p1', action: 'REPLY',
+    } });
+    expect(tx.sendIntent.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('serializes with captured legacy work and refuses to discard its ownership', async () => {
+    const { repo, tx, postUpdateMany } = buildRepo();
+    const modes = { lockIn: vi.fn(), activeLegacyPostIdsIn: vi.fn(async () => ['p1']) };
+    (repo as any)._sendModes = modes;
+    await expect(repo.closeManuallyFailedReply('org-1', 'r1', 'Stop.')).rejects.toBeInstanceOf(ConflictException);
+    expect(modes.lockIn).toHaveBeenCalledWith(tx, 'org-1');
+    expect(postUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a writer held by a historical execution without releasing its account', async () => {
+    const { repo, post, intent, tx } = buildRepo('ERROR');
+    post.sendIntentId = intent.id;
+    post.releaseId = null;
+    tx.accountWriteState.findFirst.mockResolvedValueOnce({ id: 'writer-1' } as any);
+    await expect(repo.closeManuallyFailedReply('org-1', 'r1', 'Stop.')).rejects.toBeInstanceOf(ConflictException);
+    expect(tx.sendIntent.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects confirmed evidence in an earlier execution, not only the latest one', async () => {
+    const { repo, post, intent, executions, segments, tx } = buildRepo('ERROR');
+    post.sendIntentId = intent.id;
+    post.releaseId = null;
+    executions.push({ id: 'old-execution', status: 'FAILED_FINAL' });
+    segments.push({ executionId: 'old-execution', postId: 'p1', status: 'CONFIRMED' });
+    await expect(repo.closeManuallyFailedReply('org-1', 'r1', 'Stop.')).rejects.toBeInstanceOf(ConflictException);
+    expect(tx.sendIntent.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('refuses a concurrent intent change instead of acknowledging a manual closure', async () => {
+    const { repo, post, intent, tx, postUpdateMany } = buildRepo('ERROR');
+    post.sendIntentId = intent.id;
+    post.releaseId = null;
+    tx.sendIntent.updateMany.mockResolvedValueOnce({ count: 0 });
+    await expect(repo.closeManuallyFailedReply('org-1', 'r1', 'Stop.')).rejects.toBeInstanceOf(ConflictException);
+    expect(postUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it('closes a controlled definitely unsubmitted reply and prevents coordinator retry', async () => {
+    const { repo, post, intent, transaction, tx } = buildRepo('ERROR');
+    post.sendIntentId = intent.id;
+    post.releaseId = null;
+    await repo.closeManuallyFailedReply('org-1', 'r1', 'Only group members can comment.');
+    expect(post).toMatchObject({ state: 'ERROR', error: 'Manually marked failed: Only group members can comment.' });
+    expect(intent.status).toBe('CANCELLED');
+    expect(sendBusinessSummary(post, intent, [], [], null, true).allowedActions.retry.allowed).toBe(false);
+    expect(transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: 'Serializable' });
+    expect(tx.sendExecution.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { organizationId: 'org-1', sendIntentId: intent.id } }));
+    expect(tx.sendIntent.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: intent.id, organizationId: 'org-1', revision: 1 }),
+      data: { status: 'CANCELLED', revision: { increment: 1 } },
+    }));
+    await repo.closeManuallyFailedReply('org-1', 'r1', 'Only group members can comment.');
+    expect(intent.status).toBe('CANCELLED');
+  });
+
+  it('cancels an unclaimed controlled queue without creating or releasing an execution', async () => {
+    const { repo, post, intent, executions, segments } = buildRepo('QUEUE');
+    post.sendIntentId = intent.id;
+    post.releaseId = null;
+    intent.status = 'QUEUED';
+    executions.length = 0;
+    segments.length = 0;
+    await repo.closeManuallyFailedReply('org-1', 'r1', 'Do not send this reply.');
+    expect(post.state).toBe('ERROR');
+    expect(intent.status).toBe('CANCELLED');
+  });
+
+  it('closes a failed reply with an expired never-authorized historical reservation', async () => {
+    const { repo, post, intent, executions, segments } = buildRepo('ERROR');
+    post.sendIntentId = intent.id;
+    post.releaseId = null;
+    executions.push({ id: 'expired-reservation', status: 'EXPIRED' });
+    segments.push({ executionId: 'expired-reservation', postId: 'p1', status: 'PENDING' });
+    const history = structuredClone({ executions, segments });
+
+    await repo.closeManuallyFailedReply('org-1', 'r1', 'Stop this reply.');
+
+    expect(intent.status).toBe('CANCELLED');
+    expect(post.error).toBe('Manually marked failed: Stop this reply.');
+    expect({ executions, segments }).toEqual(history);
+    await repo.closeManuallyFailedReply('org-1', 'r1', 'Stop this reply.');
+    expect(intent.status).toBe('CANCELLED');
+  });
+
+  it.each(['AUTHORIZED', 'UNKNOWN', 'CONFIRMED'])(
+    'does not discard %s evidence from an expired historical execution', async status => {
+      const { repo, post, intent, executions, segments, tx } = buildRepo('ERROR');
+      post.sendIntentId = intent.id;
+      post.releaseId = null;
+      executions.push({ id: 'expired-reservation', status: 'EXPIRED' });
+      segments.push({ executionId: 'expired-reservation', postId: 'p1', status });
+
+      await expect(repo.closeManuallyFailedReply('org-1', 'r1', 'Stop.')).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.sendIntent.updateMany).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    { startedAt: new Date('2026-10-08T00:00:00Z') },
+    { authorizedAt: new Date('2026-10-08T00:00:00Z') },
+    { permitHash: 'permit' },
+    { submitBefore: new Date('2026-10-08T00:01:00Z') },
+    { confirmedAt: new Date('2026-10-08T00:00:00Z') },
+    { result: { platformId: 'published' } },
+  ])('rejects expired pending history with submission evidence: %j', async evidence => {
+    const { repo, post, intent, executions, segments, tx } = buildRepo('ERROR');
+    post.sendIntentId = intent.id;
+    post.releaseId = null;
+    executions.push({ id: 'expired-reservation', status: 'EXPIRED', ...('startedAt' in evidence ? evidence : {}) } as any);
+    segments.push({ executionId: 'expired-reservation', postId: 'p1', status: 'PENDING', ...evidence } as any);
+
+    await expect(repo.closeManuallyFailedReply('org-1', 'r1', 'Stop.')).rejects.toBeInstanceOf(ConflictException);
+    expect(tx.sendIntent.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each(['RESERVED', 'SENDING', 'RECONCILING', 'SUCCEEDED'])(
+    'refuses a controlled %s task without changing its post or receipts', async status => {
+      const { repo, post, intent, tx, oppUpdateMany } = buildRepo('QUEUE');
+      post.sendIntentId = intent.id;
+      post.releaseId = null;
+      intent.status = status;
+      await expect(repo.closeManuallyFailedReply('org-1', 'r1', 'Stop.')).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.sendIntent.updateMany).not.toHaveBeenCalled();
+      expect(post.error).toBeNull();
+      expect(oppUpdateMany).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(['AUTHORIZED', 'UNKNOWN', 'CONFIRMED', 'PENDING'])(
+    'retains a failed controlled intent with an unsafe %s segment', async status => {
+      const { repo, post, intent, segments, tx } = buildRepo('ERROR');
+      post.sendIntentId = intent.id;
+      post.releaseId = null;
+      segments[0].status = status;
+      await expect(repo.closeManuallyFailedReply('org-1', 'r1', 'Stop.')).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.sendIntent.updateMany).not.toHaveBeenCalled();
+      expect(post.error).toBeNull();
+    }
+  );
+
+  it('refuses an active writer even when its intent says FAILED_FINAL', async () => {
+    const { repo, post, intent, tx } = buildRepo('ERROR');
+    post.sendIntentId = intent.id;
+    post.releaseId = null;
+    intent.activeExecutionId = 'execution-1';
+    await expect(repo.closeManuallyFailedReply('org-1', 'r1', 'Stop.')).rejects.toBeInstanceOf(ConflictException);
+    expect(tx.sendIntent.updateMany).not.toHaveBeenCalled();
+  });
+
   it.each(['DRAFT', 'QUEUE', 'ERROR'])('closes a %s reply, saves its reason and dismisses only its project opportunity', async (state) => {
     const { repo, post, oppUpdateMany, transaction } = buildRepo(state);
     await repo.closeManuallyFailedReply('org-1', 'r1', 'The article is unavailable.');

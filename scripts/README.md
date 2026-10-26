@@ -1,5 +1,34 @@
 # Scripts
 
+## reconcile-legacy-identities.ts
+
+Safely reconciles historical `Integration.identityNamespace = legacy` rows for
+one or more affected users. Preview is the default and performs database reads
+only. `--apply` never writes Integration directly; it calls the protected
+`POST /integrations/:id/identity/verify` endpoint so the normal OAuth actor
+probe, conflict checks, organization permissions, and identity audit remain in
+force.
+
+```bash
+# Preview
+pnpm exec ts-node --project scripts/tsconfig.json \
+  scripts/reconcile-legacy-identities.ts --users <user-id-1>,<user-id-2>
+
+# Apply with an administrator or super-administrator token
+export AISEE_AUTH_TOKEN='<token>'
+pnpm exec ts-node --project scripts/tsconfig.json \
+  scripts/reconcile-legacy-identities.ts --users <user-id-1>,<user-id-2> \
+  --base-url https://api-post-dev.aisee.live --apply
+```
+
+The script refuses to run unless `DATABASE_URL` resolves to
+`aisee_postiz_dev` by default. Use `--expected-database` only when intentionally
+running the same guarded workflow in another deployment. OAuth-verifiable X,
+Reddit, and LinkedIn Page rows are handled by the API. Session-only rows are
+reported as `WAIT_FOR_SESSION` and are upgraded automatically when an
+organization administrator's registered node submits fresh live identity
+evidence in Controlled mode. Deleted accounts are never restored automatically.
+
 ## test-agent-simple.ts
 
 A simplified E2E test script for the Chat Agent. It bypasses the login process by signing a JWT directly using `JWT_SECRET` from `.env`. This allows for rapid testing of the Agent's content generation and X.com (Twitter) scheduling.

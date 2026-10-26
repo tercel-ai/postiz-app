@@ -12,13 +12,14 @@ import { CONTROLLED_SEND_PLATFORMS } from '../controlled-platforms';
 import { validateSync } from 'class-validator';
 import { ClaimSendDto, EnqueueSendDto, QueueStoredReplyDto } from '../send-execution.dto';
 import { SendIntentsController } from '../../../../../apps/backend/src/api/routes/send-executions.controller';
+import { SendExecutionService } from '../send-execution.service';
 
 beforeEach(() => vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true'));
 afterEach(() => vi.unstubAllEnvs());
 
-async function draft() {
+async function draft(method: 'API' | 'EXTENSION' = 'API') {
   const fixture = setupSend();
-  await fixture.create();
+  await fixture.create('root', method);
   fixture.bindings.resolveForEnqueueInTransaction.mockClear();
   // Restore an unqueued, saved reply without replacing its content identity.
   fixture.db.rows('sendIntent').length = 0;
@@ -624,6 +625,52 @@ describe('business status wiring and retry admission', () => {
     await expect(service.retry('org', 'root', 'user')).rejects.toThrow('SEND_RETRY_UNSAFE');
     expect(db.rows('sendIntent')).toHaveLength(1);
     expect(db.rows('sendIntent')[0].status).toBe('FAILED_FINAL');
+  });
+  it.each([
+    ['QUEUED', 'API'], ['FAILED_FINAL', 'API'],
+    ['QUEUED', 'EXTENSION'], ['FAILED_FINAL', 'EXTENSION'],
+  ] as const)('blocks actual retry, reservation and browser claim after manually closing %s %s work', async (status, method) => {
+    const { service, db } = await draft(method);
+    await service.enqueueSavedReply('org', 'user', 'reply', selection);
+    const intent = db.rows('sendIntent')[0];
+    if (status === 'FAILED_FINAL') {
+      Object.assign(intent, { status, lastErrorCode: 'SEND_DEFINITELY_NOT_SUBMITTED' });
+      Object.assign(db.rows('post')[0], { state: 'ERROR', error: 'SEND_DEFINITELY_NOT_SUBMITTED' });
+      db.seed('sendExecution', { id: 'stopped', organizationId: 'org', sendIntentId: intent.id,
+        kind: method, status: 'FAILED_FINAL' });
+      db.seed('sendSegment', { id: 'stopped-segment', organizationId: 'org', executionId: 'stopped',
+        postId: 'root', status: 'NOT_SUBMITTED' });
+      db.seed('sendQuotaReservation', { id: 'released-quota', organizationId: 'org', executionId: 'stopped', state: 'RELEASED' });
+    }
+    const evidence = () => structuredClone({
+      executions: db.rows('sendExecution'), segments: db.rows('sendSegment'),
+      quotas: db.rows('sendQuotaReservation'), accounts: db.rows('accountWriteState'),
+    });
+    const before = evidence();
+    const repo = Object.create(EngageRepository.prototype) as any;
+    repo._tx = { model: db };
+    repo._sendModes = new SendModeService(db as any);
+    await repo.closeManuallyFailedReply('org', 'reply', 'Only group members can comment.');
+    expect(db.rows('sendIntent')[0]).toMatchObject({ id: intent.id, status: 'CANCELLED', activeExecutionId: null });
+    await expect(service.retry('org', 'root', 'user')).rejects.toThrow('SEND_RETRY_UNSAFE');
+    await expect(service.reserveApi('org', 'root', 'after-close', sendNow)).rejects.toThrow('CONTENT_NOT_SENDABLE');
+    await expect(db.$transaction((tx: any) => service.reserveIn(tx, 'org', 'root', 'EXTENSION', 'after-close-node', {}, sendNow)))
+      .rejects.toThrow('CONTENT_NOT_SENDABLE');
+    db.seed('extensionNode', { id: 'node', nodeId: 'node', organizationId: 'org', credentialVersion: 1,
+      capabilities: { x: { reply: true, strictAccountVerification: true } } });
+    db.seed('extensionNodeSession', { extensionNodeId: 'node', organizationId: 'org', platform: 'x',
+      integrationId: 'account', verificationStatus: 'VERIFIED', sessionRevision: 1,
+      verificationExpiresAt: new Date(Date.now() + 300_000), accountIdentity: { id: '123', namespace: 'x.rest_id' } });
+    const nodes = { authenticateIn: vi.fn(async () => db.rows('extensionNode')[0]) };
+    const executions = new SendExecutionService(db as any, nodes as any, service);
+    expect((await executions.claim({ org: 'org', user: 'user', nodeId: 'node', token: 'token' }, {
+      requestId: 'after-close-claim', action: 'REPLY', rootPostId: 'root',
+    })).items).toEqual([]);
+    expect(db.rows('sendIntent')).toHaveLength(1);
+    expect(db.rows('post')[0]).toMatchObject({ state: 'ERROR', sendIntentId: intent.id,
+      error: 'Manually marked failed: Only group members can comment.' });
+    expect(db.rows('engageOpportunityState')[0].status).toBe('DISMISSED');
+    expect(evidence()).toEqual(before);
   });
   it('retries the same root once under concurrent requests after definite non-submission', async () => {
     const { service, db, create } = setupSend();

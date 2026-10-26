@@ -32,6 +32,7 @@ import {
   observationProvider,
 } from './extension-node.protocol';
 import { CONTROLLED_SEND_PLATFORMS } from './controlled-platforms';
+import { organizationSendModeKey } from './send-mode.service';
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
@@ -82,6 +83,26 @@ export class ExtensionNodeService {
     if (!member || member.disabled)
       throw new ForbiddenException('ORGANIZATION_MEMBERSHIP_REQUIRED');
     return member;
+  }
+
+  private async automaticLegacyRecoveryAllowedIn(
+    tx: Pick<Prisma.TransactionClient, 'settings' | 'userOrganization'>,
+    org: string,
+    user: string
+  ) {
+    const [member, setting] = await Promise.all([
+      tx.userOrganization.findUnique({
+        where: { userId_organizationId: { userId: user, organizationId: org } },
+      }),
+      tx.settings.findUnique({ where: { key: organizationSendModeKey(org) } }),
+    ]);
+    const mode = setting?.value as { mode?: unknown } | null;
+    return (
+      mode?.mode === 'CONTROLLED' &&
+      !!member &&
+      !member.disabled &&
+      ['ADMIN', 'SUPERADMIN'].includes(member.role)
+    );
   }
 
   async register(org: string, user: string, body: RegisterExtensionNodeDto) {
@@ -236,7 +257,11 @@ export class ExtensionNodeService {
       if (owner !== user && !['ADMIN', 'SUPERADMIN'].includes(member.role))
         throw new ForbiddenException('NODE_MANAGEMENT_FORBIDDEN');
       const node = await tx.extensionNode.findFirst({
-        where: { nodeId: body.nodeId, organizationId: org, registeredByUserId: owner },
+        where: {
+          nodeId: body.nodeId,
+          organizationId: org,
+          registeredByUserId: owner,
+        },
       });
       if (!node) throw new ForbiddenException('NODE_NOT_ACCESSIBLE');
       if (
@@ -268,31 +293,79 @@ export class ExtensionNodeService {
     });
   }
 
-  async identityProbePlatforms(org: string, user: string, id: string | undefined, token: string | undefined, rootPostId?: string) {
-    if (rootPostId !== undefined && (!rootPostId || rootPostId.length > 128)) throw new BadRequestException('SEND_ROOT_INVALID');
-    return this.transact(async tx => {
+  async identityProbePlatforms(
+    org: string,
+    user: string,
+    id: string | undefined,
+    token: string | undefined,
+    rootPostId?: string
+  ) {
+    if (rootPostId !== undefined && (!rootPostId || rootPostId.length > 128))
+      throw new BadRequestException('SEND_ROOT_INVALID');
+    return this.transact(async (tx) => {
       const node = await this.authenticateIn(tx, org, user, id, token);
       const now = new Date();
-      const sessions = await tx.extensionNodeSession.findMany({ where: { organizationId: org, extensionNodeId: node.id,
-        verificationStatus: 'VERIFIED', integrationId: { not: null },
-        verificationExpiresAt: { gt: new Date(now.getTime() + 60000) } } });
+      const sessions = await tx.extensionNodeSession.findMany({
+        where: {
+          organizationId: org,
+          extensionNodeId: node.id,
+          verificationStatus: 'VERIFIED',
+          integrationId: { not: null },
+          verificationExpiresAt: { gt: new Date(now.getTime() + 60000) },
+        },
+      });
       const platforms: string[] = [];
       for (const platform of CONTROLLED_SEND_PLATFORMS) {
         const capability = (node.capabilities as any)?.[platform];
         if (!capability?.strictAccountVerification) continue;
-        const fresh = sessions.filter(session => session.platform === platform);
-        const actions = [capability.post && 'POST', capability.reply && 'REPLY'].filter(Boolean) as ('POST' | 'REPLY')[];
+        const fresh = sessions.filter(
+          (session) => session.platform === platform
+        );
+        const actions = [
+          capability.post && 'POST',
+          capability.reply && 'REPLY',
+        ].filter(Boolean) as ('POST' | 'REPLY')[];
         if (!actions.length) continue;
-        const pending = await tx.post.findFirst({ where: {
-          organizationId: org, state: 'QUEUE', parentPostId: null, deletedAt: null,
-          ...(rootPostId ? { id: rootPostId } : {}),
-          executionProtocol: 'ACCOUNT_BOUND_V1', publishMethod: 'EXTENSION', publishDate: { lte: now },
-          providerIdentifier: { in: platform === 'linkedin' ? ['linkedin', 'linkedin-page'] : [platform] },
-          sendIntent: { status: { in: ['QUEUED', 'RESERVED'] }, action: { in: actions } },
-          OR: [{ integrationId: { not: null, notIn: fresh.map(session => session.integrationId!) } },
-            ...(!fresh.some(session => !session.actorKey) ? [{ integrationId: null, accountSelectionMode: 'CURRENT_SESSION',
-              accountResolution: { not: 'PRESELECTION_REQUIRED' } }] : [])],
-        }, select: { id: true } });
+        const pending = await tx.post.findFirst({
+          where: {
+            organizationId: org,
+            state: 'QUEUE',
+            parentPostId: null,
+            deletedAt: null,
+            ...(rootPostId ? { id: rootPostId } : {}),
+            executionProtocol: 'ACCOUNT_BOUND_V1',
+            publishMethod: 'EXTENSION',
+            publishDate: { lte: now },
+            providerIdentifier: {
+              in:
+                platform === 'linkedin'
+                  ? ['linkedin', 'linkedin-page']
+                  : [platform],
+            },
+            sendIntent: {
+              status: { in: ['QUEUED', 'RESERVED'] },
+              action: { in: actions },
+            },
+            OR: [
+              {
+                integrationId: {
+                  not: null,
+                  notIn: fresh.map((session) => session.integrationId!),
+                },
+              },
+              ...(!fresh.some((session) => !session.actorKey)
+                ? [
+                    {
+                      integrationId: null,
+                      accountSelectionMode: 'CURRENT_SESSION',
+                      accountResolution: { not: 'PRESELECTION_REQUIRED' },
+                    },
+                  ]
+                : []),
+            ],
+          },
+          select: { id: true },
+        });
         if (pending) platforms.push(platform);
       }
       return { platforms };
@@ -348,7 +421,13 @@ export class ExtensionNodeService {
   ) {
     if (!Number.isSafeInteger(body.reportSequence) || body.reportSequence! < 1)
       throw new BadRequestException('REPORT_SEQUENCE_REQUIRED');
-    const platforms = body.platforms.map((e) => `${e.platform}:${sessionActorKey({ id: e.id, namespace: e.identityNamespace })}`);
+    const platforms = body.platforms.map(
+      (e) =>
+        `${e.platform}:${sessionActorKey({
+          id: e.id,
+          namespace: e.identityNamespace,
+        })}`
+    );
     if (new Set(platforms).size !== platforms.length)
       throw new BadRequestException('DUPLICATE_REPORT_PLATFORM');
     if (body.capabilities !== undefined)
@@ -356,9 +435,10 @@ export class ExtensionNodeService {
     const fingerprint = hashSecret(canonical(body));
     return this.transact(async (tx) => {
       const node = await this.authenticateIn(tx, org, user, id, token);
-      if (body.platforms.some(entry => entry.accountRecovery !== undefined)) {
+      if (body.platforms.some((entry) => entry.accountRecovery !== undefined)) {
         const member = await this.member(tx, org, user);
-        if (!['ADMIN', 'SUPERADMIN'].includes(member.role)) throw new ForbiddenException('ACCOUNT_IDENTITY_ADMIN_REQUIRED');
+        if (!['ADMIN', 'SUPERADMIN'].includes(member.role))
+          throw new ForbiddenException('ACCOUNT_IDENTITY_ADMIN_REQUIRED');
       }
       const now = new Date();
       const metadata =
@@ -385,19 +465,33 @@ export class ExtensionNodeService {
       }
       if (sequence <= node.lastReportSequence)
         throw new ConflictException('REPORT_OUT_OF_ORDER');
-      const accounts = body.platforms.length ? await tx.integration.findMany({
-        where: {
-          organizationId: org,
-          providerIdentifier: { in: [...new Set(body.platforms.map(observationProvider))] },
-          deletedAt: null,
-        },
-      }) : [];
+      const accounts = body.platforms.length
+        ? await tx.integration.findMany({
+            where: {
+              organizationId: org,
+              providerIdentifier: {
+                in: [...new Set(body.platforms.map(observationProvider))],
+              },
+              deletedAt: null,
+            },
+          })
+        : [];
       const results = [];
       for (const entry of body.platforms) {
-        const actorKey = sessionActorKey({ id: entry.id, namespace: entry.identityNamespace });
-        if (entry.identityNamespace === 'linkedin.organization_id' &&
-            (entry.platform !== 'linkedin' || !actorKey ||
-             (entry.loggedIn && (!/^[A-Za-z0-9_-]+$/.test(entry.controllerId ?? '') || !['COMPANY_ADMIN', 'COMPOSER'].includes(entry.actorContext ?? '')))))
+        const actorKey = sessionActorKey({
+          id: entry.id,
+          namespace: entry.identityNamespace,
+        });
+        if (
+          entry.identityNamespace === 'linkedin.organization_id' &&
+          (entry.platform !== 'linkedin' ||
+            !actorKey ||
+            (entry.loggedIn &&
+              (!/^[A-Za-z0-9_-]+$/.test(entry.controllerId ?? '') ||
+                !['COMPANY_ADMIN', 'COMPOSER'].includes(
+                  entry.actorContext ?? ''
+                ))))
+        )
           throw new BadRequestException('COMPANY_ACTOR_EVIDENCE_REQUIRED');
         const prior = await tx.extensionNodeSession.findUnique({
           where: {
@@ -408,23 +502,54 @@ export class ExtensionNodeService {
             },
           },
         });
-        if (entry.platform === 'linkedin' && !actorKey &&
-            (!entry.loggedIn || (prior?.accountIdentity as any)?.id !== entry.id)) {
+        if (
+          entry.platform === 'linkedin' &&
+          !actorKey &&
+          (!entry.loggedIn || (prior?.accountIdentity as any)?.id !== entry.id)
+        ) {
           await tx.extensionNodeSession.updateMany({
-            where: { extensionNodeId: node.id, platform: 'linkedin', actorKey: { not: '' } },
-            data: { verificationStatus: 'UNKNOWN', verificationExpiresAt: null, sessionRevision: { increment: 1 } },
+            where: {
+              extensionNodeId: node.id,
+              platform: 'linkedin',
+              actorKey: { not: '' },
+            },
+            data: {
+              verificationStatus: 'UNKNOWN',
+              verificationExpiresAt: null,
+              sessionRevision: { increment: 1 },
+            },
           });
         }
         let matched = resolveObservedAccount(entry, accounts);
-        let registration: { registrationStatus?: string; blockCode?: string; recovery?: { integrationId: string; action: 'RESTORE' | 'VERIFY_LEGACY'; name: string } } =
-          {};
+        let registration: {
+          registrationStatus?: string;
+          blockCode?: string;
+          recovery?: {
+            integrationId: string;
+            action: 'RESTORE' | 'VERIFY_LEGACY';
+            name: string;
+          };
+        } = {};
         const probe = sessionDecision(entry, prior, now, 'identity-candidate');
-        if (entry.accountRecovery !== undefined &&
-            (!entry.accountRecovery || typeof entry.accountRecovery !== 'object' || entry.accountRecovery.confirmed !== true || typeof entry.accountRecovery.integrationId !== 'string' ||
-             !entry.accountRecovery.integrationId || entry.accountRecovery.integrationId.length > 128 ||
-             probe.verificationStatus !== 'VERIFIED' || entry.probeId === prior?.probeId ||
-             !['LIVE_COOKIE_ID', 'LIVE_PAGE_ACTOR'].includes(entry.evidenceKind ?? '') ||
-             !stableSocialIdentity(observationProvider(entry), entry.identityNamespace ?? '', entry.id ?? '')))
+        if (
+          entry.accountRecovery !== undefined &&
+          (!entry.accountRecovery ||
+            typeof entry.accountRecovery !== 'object' ||
+            entry.accountRecovery.confirmed !== true ||
+            typeof entry.accountRecovery.integrationId !== 'string' ||
+            !entry.accountRecovery.integrationId ||
+            entry.accountRecovery.integrationId.length > 128 ||
+            probe.verificationStatus !== 'VERIFIED' ||
+            entry.probeId === prior?.probeId ||
+            !['LIVE_COOKIE_ID', 'LIVE_PAGE_ACTOR'].includes(
+              entry.evidenceKind ?? ''
+            ) ||
+            !stableSocialIdentity(
+              observationProvider(entry),
+              entry.identityNamespace ?? '',
+              entry.id ?? ''
+            ))
+        )
           throw new BadRequestException('ACCOUNT_RECOVERY_EVIDENCE_REQUIRED');
         if (
           probe.verificationStatus === 'VERIFIED' &&
@@ -438,34 +563,78 @@ export class ExtensionNodeService {
             entry.id ?? ''
           )
         ) {
-          const resolved = await new SocialAccountIdentityService(
-            this.db
-          ).resolveIn(
+          const identityService = new SocialAccountIdentityService(this.db);
+          const options = {
+            source: 'EXTENSION' as const,
+            canCreate: creation.canCreateChannels === true,
+            maxChannels: creation.maxChannels,
+            handle: entry.handle,
+            name: entry.name,
+            ...(entry.accountRecovery
+              ? {
+                  extensionRecovery: {
+                    integrationId: entry.accountRecovery.integrationId,
+                    verifiedByUserId: user,
+                    probeId: entry.probeId!,
+                  },
+                }
+              : {}),
+          };
+          let resolved = await identityService.resolveIn(
             tx,
             org,
             observationProvider(entry),
             entry.identityNamespace!,
             entry.id!,
-            {
-              source: 'EXTENSION',
-              canCreate: creation.canCreateChannels === true,
-              maxChannels: creation.maxChannels,
-              handle: entry.handle,
-              name: entry.name,
-              ...(entry.accountRecovery ? { extensionRecovery: {
-                integrationId: entry.accountRecovery.integrationId, verifiedByUserId: user, probeId: entry.probeId!,
-              } } : {}),
-            }
+            options
           );
+          // Entering controlled mode is an administrator-authorized migration.
+          // A registered node's fresh live actor proof can therefore complete
+          // VERIFY_LEGACY without making the administrator click each account.
+          // Deleted accounts still require an explicit RESTORE confirmation.
+          if (
+            !entry.accountRecovery &&
+            resolved.recovery?.action === 'VERIFY_LEGACY' &&
+            (await this.automaticLegacyRecoveryAllowedIn(tx, org, user))
+          ) {
+            resolved = await identityService.resolveIn(
+              tx,
+              org,
+              observationProvider(entry),
+              entry.identityNamespace!,
+              entry.id!,
+              {
+                ...options,
+                extensionRecovery: {
+                  integrationId: resolved.recovery.integrationId,
+                  verifiedByUserId: user,
+                  probeId: entry.probeId!,
+                  method: 'CONTROLLED_AUTO_RECOVERY',
+                },
+              }
+            );
+          }
           registration = resolved;
           matched = resolved.account?.id ?? null;
         }
         const decision = sessionDecision(entry, prior, now, matched);
-        const previousIdentity = (prior?.lastVerifiedIdentity ?? prior?.accountIdentity) as { id?: string; namespace?: string; controllerId?: string; sessionBinding?: string } | null;
-        const sameIdentity = previousIdentity?.id === entry.id && previousIdentity?.namespace === entry.identityNamespace &&
-          (entry.identityNamespace !== 'linkedin.organization_id' || previousIdentity?.controllerId === entry.controllerId);
-        const sessionBinding = entry.sessionBinding ??
-          (decision.verificationStatus === 'VERIFIED' && sameIdentity ? previousIdentity?.sessionBinding : undefined);
+        const previousIdentity = (prior?.lastVerifiedIdentity ??
+          prior?.accountIdentity) as {
+          id?: string;
+          namespace?: string;
+          controllerId?: string;
+          sessionBinding?: string;
+        } | null;
+        const sameIdentity =
+          previousIdentity?.id === entry.id &&
+          previousIdentity?.namespace === entry.identityNamespace &&
+          (entry.identityNamespace !== 'linkedin.organization_id' ||
+            previousIdentity?.controllerId === entry.controllerId);
+        const sessionBinding =
+          entry.sessionBinding ??
+          (decision.verificationStatus === 'VERIFIED' && sameIdentity
+            ? previousIdentity?.sessionBinding
+            : undefined);
         const data = {
           ...decision,
           actorKey,
@@ -494,8 +663,12 @@ export class ExtensionNodeService {
                   handle: entry.handle ?? null,
                   namespace: entry.identityNamespace ?? null,
                   ...(sessionBinding ? { sessionBinding } : {}),
-                  ...(entry.actorContext ? { actorContext: entry.actorContext } : {}),
-                  ...(entry.controllerId ? { controllerId: entry.controllerId } : {}),
+                  ...(entry.actorContext
+                    ? { actorContext: entry.actorContext }
+                    : {}),
+                  ...(entry.controllerId
+                    ? { controllerId: entry.controllerId }
+                    : {}),
                 },
               }
             : {}),

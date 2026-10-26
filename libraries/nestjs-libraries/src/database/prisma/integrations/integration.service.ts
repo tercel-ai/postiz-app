@@ -56,6 +56,7 @@ dayjs.extend(utc);
 /** Generous for a profile picture; small enough that a hostile url cannot dump. */
 const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
 const AVATAR_FETCH_TIMEOUT_MS = 10_000;
+const IDENTITY_PROBE_TIMEOUT_MS = 30_000;
 
 /**
  * Channels created from a browser session are stored with NO `tokenExpiration`,
@@ -234,13 +235,40 @@ export class IntegrationService {
   }
 
   verifyStableIdentity(org: string, user: string, integrationId: string) {
-    return this._integrationRepository.verifyStableIdentity(org,user,integrationId,async account=>{
-      const provider = this._integrationManager.getSocialIntegration(account.providerIdentifier) as SocialProvider & {
-        getSendActor?: (integration: Integration) => Promise<{id:string;idNamespace:string}>;
-      };
-      if (!provider.getSendActor) throw new Error('ACCOUNT_IDENTITY_VERIFICATION_UNAVAILABLE');
-      return provider.getSendActor(account);
-    });
+    return this._integrationRepository.verifyStableIdentity(
+      org,
+      user,
+      integrationId,
+      async (account) => {
+        const provider = this._integrationManager.getSocialIntegration(
+          account.providerIdentifier
+        ) as SocialProvider & {
+          getSendActor?: (
+            integration: Integration,
+            signal?: AbortSignal
+          ) => Promise<{ id: string; idNamespace: string }>;
+        };
+        if (!provider.getSendActor)
+          throw new Error('ACCOUNT_IDENTITY_VERIFICATION_UNAVAILABLE');
+        const controller = new AbortController();
+        let deadline!: ReturnType<typeof setTimeout>;
+        const timeout = new Promise<never>((_resolve, reject) => {
+          deadline = setTimeout(() => {
+            const error = new Error('ACCOUNT_IDENTITY_PROBE_TIMEOUT');
+            reject(error);
+            controller.abort(error);
+          }, IDENTITY_PROBE_TIMEOUT_MS);
+        });
+        try {
+          return await Promise.race([
+            provider.getSendActor(account, controller.signal),
+            timeout,
+          ]);
+        } finally {
+          clearTimeout(deadline);
+        }
+      }
+    );
   }
 
   async createOrUpdateIntegration(

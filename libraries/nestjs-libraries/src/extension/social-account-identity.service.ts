@@ -23,7 +23,11 @@ export function stableSocialIdentity(
     if (/^[a-z0-9]+$/.test(normalized))
       return { platform, namespace, id: normalized };
   }
-  if (platform === 'linkedin-page' && namespace === 'linkedin.organization_id' && /^[1-9][0-9]*$/.test(id))
+  if (
+    platform === 'linkedin-page' &&
+    namespace === 'linkedin.organization_id' &&
+    /^[1-9][0-9]*$/.test(id)
+  )
     return { platform, namespace, id };
   const rules: Record<string, [string, RegExp]> = {
     linkedin: ['linkedin.fs_miniProfile', /^[A-Za-z0-9_-]+$/],
@@ -67,13 +71,22 @@ export interface IdentityOptions {
     credentialHash: string;
     verifiedByUserId?: string;
   };
-  extensionRecovery?: { integrationId: string; verifiedByUserId: string; probeId: string };
+  extensionRecovery?: {
+    integrationId: string;
+    verifiedByUserId: string;
+    probeId: string;
+    method?: 'EXPLICIT_EXTENSION_RECOVERY' | 'CONTROLLED_AUTO_RECOVERY';
+  };
 }
 export interface IdentityResolution {
   account?: Integration;
   registrationStatus?: 'EXISTING' | 'CREATED';
   blockCode?: string;
-  recovery?: { integrationId: string; action: 'RESTORE' | 'VERIFY_LEGACY'; name: string };
+  recovery?: {
+    integrationId: string;
+    action: 'RESTORE' | 'VERIFY_LEGACY';
+    name: string;
+  };
 }
 @Injectable()
 export class SocialAccountIdentityService {
@@ -123,19 +136,41 @@ export class SocialAccountIdentityService {
     )
       return { blockCode: 'ACCOUNT_IDENTITY_UNRESOLVED' };
     const account = matches[0];
-    const recovery = account && (account.deletedAt || account.identityNamespace === 'legacy')
-      ? { integrationId: account.id, action: account.deletedAt ? 'RESTORE' as const : 'VERIFY_LEGACY' as const, name: account.name } : undefined;
-    const confirmed = options.source === 'EXTENSION' && options.extensionRecovery?.integrationId === account?.id &&
-      !!options.extensionRecovery?.verifiedByUserId && !!options.extensionRecovery?.probeId;
-    if (options.extensionRecovery && (!account || options.extensionRecovery.integrationId !== account.id))
+    const recovery =
+      account && (account.deletedAt || account.identityNamespace === 'legacy')
+        ? {
+            integrationId: account.id,
+            action: account.deletedAt
+              ? ('RESTORE' as const)
+              : ('VERIFY_LEGACY' as const),
+            name: account.name,
+          }
+        : undefined;
+    const confirmed =
+      options.source === 'EXTENSION' &&
+      options.extensionRecovery?.integrationId === account?.id &&
+      !!options.extensionRecovery?.verifiedByUserId &&
+      !!options.extensionRecovery?.probeId;
+    if (
+      options.extensionRecovery &&
+      (!account || options.extensionRecovery.integrationId !== account.id)
+    )
       return { blockCode: 'ACCOUNT_RECOVERY_CHANGED' };
-    if (account?.deletedAt && !confirmed) return { blockCode: 'ACCOUNT_DELETED', recovery };
+    if (account?.deletedAt && !confirmed)
+      return { blockCode: 'ACCOUNT_DELETED', recovery };
     if (account?.deletedAt && confirmed) {
-      if (!options.canCreate || options.maxChannels === undefined) return { blockCode: 'ACCOUNT_CREATION_NOT_ALLOWED', recovery };
-      if (options.maxChannels !== null && (!Number.isInteger(options.maxChannels) || options.maxChannels < 0))
+      if (!options.canCreate || options.maxChannels === undefined)
+        return { blockCode: 'ACCOUNT_CREATION_NOT_ALLOWED', recovery };
+      if (
+        options.maxChannels !== null &&
+        (!Number.isInteger(options.maxChannels) || options.maxChannels < 0)
+      )
         return { blockCode: 'ACCOUNT_CHANNEL_LIMIT_INVALID' };
-      const count = await tx.integration.count({ where: { organizationId: org, deletedAt: null } });
-      if (options.maxChannels !== null && count >= options.maxChannels) return { blockCode: 'ACCOUNT_CHANNEL_LIMIT', recovery };
+      const count = await tx.integration.count({
+        where: { organizationId: org, deletedAt: null },
+      });
+      if (options.maxChannels !== null && count >= options.maxChannels)
+        return { blockCode: 'ACCOUNT_CHANNEL_LIMIT', recovery };
     }
     if (account) {
       if (
@@ -192,12 +227,24 @@ export class SocialAccountIdentityService {
           ...(options.handle?.trim() ? { profile: options.handle.trim() } : {}),
           metadata: {
             ...metadata,
-            ...(confirmed ? { identityAudit: {
-              version: 1, method: 'EXPLICIT_EXTENSION_RECOVERY', verifiedAt: new Date().toISOString(),
-              verifiedByUserId: options.extensionRecovery!.verifiedByUserId,
-              probeId: options.extensionRecovery!.probeId, namespace, id: identity.id,
-              previousNamespace: account.identityNamespace, restored: !!account.deletedAt,
-            } } : {}),
+            ...(confirmed
+              ? {
+                  identityAudit: {
+                    version: 1,
+                    method:
+                      options.extensionRecovery!.method ??
+                      'EXPLICIT_EXTENSION_RECOVERY',
+                    verifiedAt: new Date().toISOString(),
+                    verifiedByUserId:
+                      options.extensionRecovery!.verifiedByUserId,
+                    probeId: options.extensionRecovery!.probeId,
+                    namespace,
+                    id: identity.id,
+                    previousNamespace: account.identityNamespace,
+                    restored: !!account.deletedAt,
+                  },
+                }
+              : {}),
             ...(options.legacyProof
               ? {
                   identityAudit: {

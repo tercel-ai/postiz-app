@@ -4,7 +4,11 @@ import { SendExecutionService } from '../../extension/send-execution.service';
 import { SendCoordinatorService } from '../../extension/send-coordinator.service';
 import { SendQuotaService } from '../../extension/send-quota.service';
 import { Global, Module } from '@nestjs/common';
-import { PrismaRepository, PrismaService, PrismaTransaction } from './prisma.service';
+import {
+  PrismaRepository,
+  PrismaService,
+  PrismaTransaction,
+} from './prisma.service';
 import { OrganizationRepository } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.repository';
 import { OrganizationService } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.service';
 import { UsersService } from '@gitroom/nestjs-libraries/database/prisma/users/users.service';
@@ -86,6 +90,7 @@ import { ExtensionExecutionReadyGuard } from '@gitroom/nestjs-libraries/extensio
 import { PlanExecutionService } from '@gitroom/nestjs-libraries/extension/plan-execution.service';
 import { SendBindingService } from '@gitroom/nestjs-libraries/extension/send-binding.service';
 import { SendPolicyService } from '@gitroom/nestjs-libraries/extension/send-policy.service';
+import { LegacyIdentityReconciliationService } from '@gitroom/nestjs-libraries/extension/legacy-identity-reconciliation.service';
 
 @Global()
 @Module({
@@ -175,6 +180,7 @@ import { SendPolicyService } from '@gitroom/nestjs-libraries/extension/send-poli
     ExtensionExecutionReadyGuard,
     SendBindingService,
     SendPolicyService,
+    LegacyIdentityReconciliationService,
     SendModeService,
     SendCoordinatorService,
     AutomaticSendProducerService,

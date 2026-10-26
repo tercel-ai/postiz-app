@@ -1,6 +1,6 @@
 import { controlledSubmit, currentSendContext } from '../../extension/controlled-api-submit';
 import { PrismaClient } from '@prisma/client';
-import { TweetV2, TwitterApi } from 'twitter-api-v2';
+import { TweetV2, TwitterApi, type IClientSettings } from 'twitter-api-v2';
 import { weightedLength } from '@gitroom/helpers/utils/count.length';
 import {
   AccountMetrics,
@@ -51,7 +51,7 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 // cached; returns {} when no proxy is configured so direct connections are
 // unaffected on hosts that can reach X directly.
 let _xProxyAgent: HttpsProxyAgent<string> | null | undefined;
-function xClientSettings(): { httpAgent?: HttpsProxyAgent<string> } {
+function xClientSettings(signal?: AbortSignal): Partial<IClientSettings> {
   if (_xProxyAgent === undefined) {
     const proxyUrl =
       process.env.X_PROXY_URL ||
@@ -61,7 +61,20 @@ function xClientSettings(): { httpAgent?: HttpsProxyAgent<string> } {
       process.env.http_proxy;
     _xProxyAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : null;
   }
-  return _xProxyAgent ? { httpAgent: _xProxyAgent } : {};
+  return {
+    ...(_xProxyAgent ? { httpAgent: _xProxyAgent } : {}),
+    ...(signal
+      ? {
+          plugins: [
+            {
+              onBeforeRequest: ({ requestOptions }) => {
+                requestOptions.signal = signal;
+              },
+            },
+          ],
+        }
+      : {}),
+  };
 }
 
 @Rules(
@@ -120,7 +133,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
    * - OAuth 1.0a ("token:secret"): uses the server-level app key/secret pair.
    * - OAuth 2.0 (bearer token): passes the token directly as a user-context bearer.
    */
-  private buildClient(accessToken: string): TwitterApi {
+  private buildClient(accessToken: string, signal?: AbortSignal): TwitterApi {
     if (XProvider.isOAuth1Token(accessToken)) {
       const colonIdx = accessToken.indexOf(':');
       const tokenPart  = accessToken.substring(0, colonIdx);
@@ -130,9 +143,9 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         appSecret: process.env.X_API_SECRET!,
         accessToken: tokenPart,
         accessSecret: secretPart,
-      }, xClientSettings());
+      }, xClientSettings(signal));
     }
-    return new TwitterApi(accessToken, xClientSettings());
+    return new TwitterApi(accessToken, xClientSettings(signal));
   }
 
   maxLength(isTwitterPremium: boolean) {
@@ -585,8 +598,8 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   }
 
   // v2.me() can be unstable; fallback to v1.1 verifyCredentials
-  async getSendActor(integration: Integration) {
-    const client = await this.getClient(integration.token);
+  async getSendActor(integration: Integration, signal?: AbortSignal) {
+    const client = this.buildClient(integration.token, signal);
     const actor = await this._getUserInfo(client);
     return { id: actor.id, idNamespace: 'x.rest_id' };
   }
