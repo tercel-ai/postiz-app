@@ -2257,9 +2257,8 @@ export class SendModeService {
     const matchesClaim = (result: AutonomousEffectResult) => !!result.legacyClaim &&
       (!post.releaseId || result.legacyClaim.releaseId === post.releaseId) &&
       Date.parse(result.legacyClaim.claimedAt) === post.claimedAt?.getTime();
-    if (!(post.claimedAt instanceof Date) || !Number.isFinite(post.claimedAt.getTime()) ||
-        receipts.some(({ row, result }) => result.legacyClaim ? !matchesClaim(result) :
-          !(row.createdAt instanceof Date) || !Number.isFinite(row.createdAt.getTime()) || row.createdAt < post.claimedAt!))
+    // Missing historical binding requires owner review; a contradictory binding still blocks it.
+    if (receipts.some(({ result }) => result.legacyClaim && !matchesClaim(result)))
       reasons.push('CURRENT_CLAIM_PROOF_REQUIRED');
     const canReview = reasons.length === 0;
     if (!receipts.some(({ result }) => matchesClaim(result))) reasons.push('EXPLICIT_OWNER_REVIEW_REQUIRED');

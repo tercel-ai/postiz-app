@@ -124,7 +124,8 @@ describe('saved reply enqueue contract', () => {
 });
 
 describe('simple saved reply business idempotency', () => {
-  it.each(['administrator', 'original-user'])('recovers an unbound claim as %s, then enqueues the same saved reply exactly once', async role => {
+  it.each(['administrator', 'original-user', 'original-user-older-receipt', 'original-user-missing-claim-time'])(
+    'recovers an unbound claim as %s, then enqueues the same saved reply exactly once', async role => {
     const { service, db } = await draft();
     db.rows('userOrganization')[0].role = role === 'administrator' ? 'ADMIN' : 'USER';
     const post = db.rows('post')[0];
@@ -138,11 +139,12 @@ describe('simple saved reply business idempotency', () => {
     await expect(service.enqueueSavedReply('org', 'user', 'reply', { sentReplyId: 'reply' }))
       .rejects.toThrow('LEGACY_CONTENT_DRAIN_REQUIRED');
     const modes = new SendModeService(db);
-    if (role === 'original-user') {
+    if (role !== 'administrator') {
       const proof = db.rows('sendMutationReceipt').find(row => row.id === 'proof');
       proof.userId = proof.result.browserUserId = 'user';
       proof.result.integrationId = 'browser:user:x';
-      proof.createdAt = new Date(sendNow.getTime() + 1000);
+      proof.createdAt = new Date(sendNow.getTime() + (role === 'original-user-older-receipt' ? -1000 : 1000));
+      if (role === 'original-user-missing-claim-time') post.claimedAt = null;
       const diagnosis = await modes.getBrowserReplyRecovery('org', 'user', 'reply');
       expect(diagnosis).toMatchObject({ canResolve: false, canReview: true });
       await modes.resolveBrowserReplyRecovery('org', 'user', 'reply', {

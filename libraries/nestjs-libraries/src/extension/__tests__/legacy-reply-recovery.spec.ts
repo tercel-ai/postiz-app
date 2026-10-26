@@ -58,7 +58,7 @@ describe('administrator reconciliation of historical legacy reply ownership', ()
     expect(db.rows('sendExecution')).toEqual([]);
   });
 
-  it.each(['other-user', 'older-claim', 'changed-binding', 'UNKNOWN', 'CONFIRMED', 'AUTHORIZED'])(
+  it.each(['other-user', 'changed-binding', 'changed-claim-time', 'bound-without-claim-time', 'UNKNOWN', 'CONFIRMED', 'AUTHORIZED'])(
     'keeps self-service recovery closed for %s', async kind => {
       const { db, service } = setup();
       const receipt = db.rows('sendMutationReceipt')[0];
@@ -66,11 +66,15 @@ describe('administrator reconciliation of historical legacy reply ownership', ()
       receipt.result.integrationId = 'browser:member:linkedin';
       receipt.createdAt = new Date(claimedAt.getTime() + 1000);
       if (kind === 'other-user') { receipt.userId = receipt.result.browserUserId = 'admin'; receipt.result.integrationId = 'browser:admin:linkedin'; }
-      if (kind === 'older-claim') receipt.createdAt = new Date(claimedAt.getTime() - 1000);
       if (kind === 'changed-binding') receipt.result.legacyClaim = { releaseId: 'different', claimedAt: claimedAt.toISOString() };
+      if (kind === 'changed-claim-time' || kind === 'bound-without-claim-time') {
+        receipt.result.legacyClaim = { releaseId: 'private-lease', claimedAt: claimedAt.toISOString() };
+        db.rows('post')[0].claimedAt = kind === 'changed-claim-time' ? new Date(claimedAt.getTime() + 1000) : null;
+      }
       if (['UNKNOWN', 'CONFIRMED', 'AUTHORIZED'].includes(kind)) receipt.result.status = kind;
       const view = await service.getBrowserReplyRecovery('org', 'member', 'reply');
       expect(view.canResolve).toBe(false);
+      expect(view.canReview).toBe(false);
       await expect(service.resolveBrowserReplyRecovery('org', 'member', 'reply', {
         expectedOrganizationId: 'org', expectedUserId: 'member', requestId: 'self-recover',
         expectedRecoveryRevision: view.recoveryRevision, reviewConfirmed: true,
@@ -92,6 +96,74 @@ describe('administrator reconciliation of historical legacy reply ownership', ()
     await service.resolveBrowserReplyRecovery('org', 'member', 'reply', { ...body, reviewConfirmed: true });
     expect(db.rows('post')[0].releaseId).toBe(null);
     expect(db.rows('sendMutationReceipt').find(row => row.operation === 'browser-reply-recovery').result.proofKind).toBe('OWNER_REVIEWED_HISTORICAL_RECEIPTS');
+  });
+
+  it.each(['missing-claim-time', 'older-receipt', 'multiple-attempts'])(
+    'offers explicit owner review when historical proof lacks claim timing: %s', async kind => {
+      const { db, service } = setup();
+      const receipt = db.rows('sendMutationReceipt')[0];
+      receipt.userId = receipt.result.browserUserId = 'member';
+      receipt.result.integrationId = 'browser:member:linkedin';
+      receipt.createdAt = new Date(claimedAt.getTime() - 1000);
+      if (kind === 'missing-claim-time') db.rows('post')[0].claimedAt = null;
+      if (kind === 'multiple-attempts') db.seed('sendMutationReceipt', {
+        ...receipt, id: 'later-proof', requestId: 'later-request',
+        createdAt: new Date(claimedAt.getTime() + 1000),
+      });
+      const previousReceipt = structuredClone(receipt);
+      const view = await service.getBrowserReplyRecovery('org', 'member', 'reply');
+      expect(view).toMatchObject({ canResolve: false, canReview: true,
+        reasons: ['EXPLICIT_OWNER_REVIEW_REQUIRED'] });
+      const body = { expectedOrganizationId: 'org', expectedUserId: 'member', requestId: 'review-historical',
+        expectedRecoveryRevision: view.recoveryRevision };
+      await expect(service.resolveBrowserReplyRecovery('org', 'member', 'reply', body))
+        .rejects.toThrow('LEGACY_REPLY_RECOVERY_UNSAFE');
+      expect(db.rows('post')[0].releaseId).toBe('private-lease');
+      await service.resolveBrowserReplyRecovery('org', 'member', 'reply', { ...body, reviewConfirmed: true });
+      expect(db.rows('post')[0]).toMatchObject({ releaseId: null, state: 'QUEUE', content: 'saved reply' });
+      expect(db.rows('sendMutationReceipt').find(row => row.id === previousReceipt.id)).toEqual(previousReceipt);
+      expect(db.rows('settings')[0].value.legacyDrain.eligiblePostIds).toEqual(['unrelated']);
+      expect(db.rows('sendMutationReceipt').find(row => row.operation === 'browser-reply-recovery').result.proofKind)
+        .toBe('OWNER_REVIEWED_HISTORICAL_RECEIPTS');
+      expect(db.rows('sendExecution')).toEqual([]);
+      expect(db.rows('sendIntent')).toEqual([]);
+    });
+
+  it('accepts exact current-claim proof alongside an older terminal unbound attempt', async () => {
+    const { db, service } = setup();
+    const receipt = db.rows('sendMutationReceipt')[0];
+    receipt.userId = receipt.result.browserUserId = 'member';
+    receipt.result.integrationId = 'browser:member:linkedin';
+    receipt.createdAt = new Date(claimedAt.getTime() - 1000);
+    db.seed('sendMutationReceipt', { ...receipt, id: 'current-proof', requestId: 'current-request',
+      createdAt: new Date(claimedAt.getTime() + 1000), result: { ...receipt.result,
+        legacyClaim: { releaseId: 'private-lease', claimedAt: claimedAt.toISOString() } } });
+    const view = await service.getBrowserReplyRecovery('org', 'member', 'reply');
+    expect(view.canResolve).toBe(true);
+    await service.resolveBrowserReplyRecovery('org', 'member', 'reply', {
+      expectedOrganizationId: 'org', expectedUserId: 'member', requestId: 'recover-current',
+      expectedRecoveryRevision: view.recoveryRevision,
+    });
+    expect(db.rows('post')[0].releaseId).toBe(null);
+    expect(db.rows('sendExecution')).toEqual([]);
+  });
+
+  it('rejects owner review when the historical claim changed after the review snapshot', async () => {
+    const { db, service } = setup();
+    const receipt = db.rows('sendMutationReceipt')[0];
+    receipt.userId = receipt.result.browserUserId = 'member';
+    receipt.result.integrationId = 'browser:member:linkedin';
+    db.rows('post')[0].claimedAt = null;
+    const view = await service.getBrowserReplyRecovery('org', 'member', 'reply');
+    expect(view.canReview).toBe(true);
+    db.rows('post')[0].releaseId = 'new-lease';
+    await expect(service.resolveBrowserReplyRecovery('org', 'member', 'reply', {
+      expectedOrganizationId: 'org', expectedUserId: 'member', requestId: 'review-stale',
+      expectedRecoveryRevision: view.recoveryRevision, reviewConfirmed: true,
+    })).rejects.toThrow('LEGACY_REPLY_RECOVERY_CHANGED');
+    expect(db.rows('post')[0].releaseId).toBe('new-lease');
+    expect(db.rows('settings')[0].value.legacyDrain.eligiblePostIds).toContain('post');
+    expect(db.rows('sendMutationReceipt').filter(row => row.operation === 'browser-reply-recovery')).toEqual([]);
   });
 
   it('does not let extra body fields override the route identity in its idempotency key', async () => {
