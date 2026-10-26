@@ -3,7 +3,8 @@ import { SendModeService } from './send-mode.service';
 import { CONTROLLED_SEND_PLATFORMS, canonicalControlledPlatform, controlledReplySettings, hasControlledReplyTarget } from './controlled-platforms';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { hashSecret } from './extension-node.protocol';
-import { sendBusinessSummary } from './send-business-summary';
+import { sendBusinessSummary, type SendActionDecision } from './send-business-summary';
+import { isLegacyExecution } from './legacy-execution';
 import {
   BadRequestException,
   ConflictException,
@@ -141,7 +142,40 @@ export class SendCoordinatorService {
       const modeState = await this.modes.stateIn(tx, org);
       const continuing = modeState.systemEnabled && Boolean(modeState.controlledDrain?.remainingCount) &&
         executions.some(execution => active.includes(execution.status));
-      return sendBusinessSummary(root, intent, executions, segments, blockCode, modeState.mode === 'CONTROLLED', continuing);
+      let queuedReplyEnqueue: SendActionDecision | undefined;
+      if (!intent && !root.sendIntentId && root.projectId && root.source === 'engage' && root.state === 'QUEUE' &&
+          isLegacyExecution(root.executionProtocol)) {
+        const reply = await tx.engageSentReply.findFirst({ where: {
+          organizationId: org, projectId: root.projectId, postId: root.id, removedAt: null,
+        } });
+        const opportunity = reply ? await tx.engageOpportunity.findUnique({ where: { id: reply.opportunityId } }) : null;
+        const state = reply ? await tx.engageOpportunityState.findFirst({ where: {
+          organizationId: org, projectId: root.projectId, opportunityId: reply.opportunityId,
+        } }) : null;
+        let reason = root.releaseId || root.releaseURL ? 'CONTENT_ALREADY_SUBMITTED'
+          : root.parentPostId || (await this.chain(tx, org, root.id)).length !== 1 ? 'CONTENT_NOT_ENQUEUEABLE'
+          : root.intervalInDays ? 'CONTROLLED_RECURRING_OCCURRENCE_REQUIRED'
+          : !reply ? 'SAVED_REPLY_NOT_FOUND'
+          : !opportunity || opportunity.deletedAt || opportunity.repliesDisabledAt ||
+            !state || !['NEW', 'AUTO_QUEUED'].includes(state.status) ? 'REPLY_OPPORTUNITY_NOT_ACTIONABLE'
+          : !opportunity.externalPostId ? 'REPLY_TARGET_REQUIRED'
+          : !root.providerIdentifier || !(CONTROLLED_SEND_PLATFORMS as readonly string[]).includes(canonicalControlledPlatform(root.providerIdentifier)) ? 'CONTROLLED_PLATFORM_UNSUPPORTED'
+          : root.integrationId && root.accountSelectionMode == null ? 'SEND_BINDING_RECONFIRMATION_REQUIRED' : null;
+        if (!reason) {
+          try {
+            const settings = JSON.parse(root.settings || '{}');
+            if (!settings || typeof settings !== 'object' || Array.isArray(settings)) reason = 'CONTENT_NOT_ENQUEUEABLE';
+            else if (!hasControlledReplyTarget(root.providerIdentifier!, {
+              ...settings,
+              ...controlledReplySettings(root.providerIdentifier!, opportunity!.externalPostId!, opportunity!.externalPostUrl),
+            })) reason = 'REPLY_TARGET_REQUIRED';
+          } catch {
+            reason = 'CONTENT_NOT_ENQUEUEABLE';
+          }
+        }
+        queuedReplyEnqueue = { allowed: reason === null, reason };
+      }
+      return sendBusinessSummary(root, intent, executions, segments, blockCode, modeState.mode === 'CONTROLLED', continuing, queuedReplyEnqueue);
     });
   }
 

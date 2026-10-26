@@ -7,6 +7,7 @@ import { EngageService } from '../../engage/engage.service';
 import { EngageController } from '../../../../../apps/backend/src/api/routes/engage.controller';
 import { IntegrationsController } from '../../../../../apps/backend/src/api/routes/integrations.controller';
 import { PostsController } from '../../../../../apps/backend/src/api/routes/posts.controller';
+import { PostsService } from '../../database/prisma/posts/posts.service';
 import { CONTROLLED_SEND_PLATFORMS } from '../controlled-platforms';
 import { validateSync } from 'class-validator';
 import { ClaimSendDto, EnqueueSendDto, QueueStoredReplyDto } from '../send-execution.dto';
@@ -131,7 +132,7 @@ describe('simple saved reply business idempotency', () => {
     const post = db.rows('post')[0];
     Object.assign(post, { executionProtocol: 'LEGACY', state: 'QUEUE', publishMethod: 'EXTENSION',
       releaseId: 'historical-claim', claimedAt: sendNow });
-    db.seed('engageOpportunity', { id: 'opp', platform: 'x', externalPostUrl: 'https://x.com/u/status/target' });
+    db.seed('engageOpportunity', { id: 'opp', platform: 'x', externalPostId: 'target', externalPostUrl: 'https://x.com/u/status/target' });
     db.seed('sendMutationReceipt', { id: 'proof', organizationId: 'org', userId: 'old-browser',
       operation: 'autonomous-side-effect', requestId: 'proof-request', requestHash: 'old-hash',
       result: { source: 'BROWSER', platform: 'x', browserUserId: 'old-browser', integrationId: 'browser:old-browser:x',
@@ -139,6 +140,18 @@ describe('simple saved reply business idempotency', () => {
     await expect(service.enqueueSavedReply('org', 'user', 'reply', { sentReplyId: 'reply' }))
       .rejects.toThrow('LEGACY_CONTENT_DRAIN_REQUIRED');
     const modes = new SendModeService(db);
+    const repository = Object.assign(Object.create(EngageRepository.prototype), {
+      _sentReply: { model: { engageSentReply: { findFirst: async () => ({
+        ...db.rows('engageSentReply')[0], post: db.rows('post')[0], opportunity: db.rows('engageOpportunity')[0],
+      }) } } },
+    });
+    const posts = Object.assign(Object.create(PostsService.prototype), { _sendCoordinator: service });
+    const engage = Object.assign(Object.create(EngageService.prototype), {
+      _engageRepository: repository, _postsService: posts, _sendModes: modes,
+    });
+    const readStatus = () => engage.getSentReplyStatus({ id: 'org' }, 'reply', 'user');
+    expect((await readStatus()).sending.allowedActions.enqueue)
+      .toEqual({ allowed: false, reason: 'LEGACY_CONTENT_DRAIN_REQUIRED' });
     if (role !== 'administrator') {
       const proof = db.rows('sendMutationReceipt').find(row => row.id === 'proof');
       proof.userId = proof.result.browserUserId = 'user';
@@ -161,8 +174,15 @@ describe('simple saved reply business idempotency', () => {
       evidence: 'All old workers stopped; platform target checked and reply absent.',
     });
     }
+    const recovered = await readStatus();
+    expect(recovered).toMatchObject({ state: 'QUEUE', sendIntentId: null, sending: {
+      allowedActions: { enqueue: { allowed: true }, selectAccount: { allowed: false } },
+    } });
+    expect(db.rows('sendIntent')).toEqual([]);
+    expect(db.rows('sendExecution')).toEqual([]);
     await service.enqueueSavedReply('org', 'user', 'reply', { sentReplyId: 'reply' });
     await service.enqueueSavedReply('org', 'user', 'reply', { sentReplyId: 'reply' });
+    expect((await readStatus()).sending.allowedActions.enqueue.allowed).toBe(false);
     expect(db.rows('sendIntent')).toHaveLength(1);
     expect(db.rows('post')).toHaveLength(1);
     expect(db.rows('engageSentReply')).toHaveLength(1);
@@ -312,6 +332,82 @@ describe('simple saved reply business idempotency', () => {
 });
 
 describe('ordinary user sending summary', () => {
+  it.each(['{', 'null', '[]', '"not-settings"'])('does not enable enqueue for malformed queued reply settings: %s', async settings => {
+    const { db, service } = await draft();
+    Object.assign(db.rows('post')[0], { state: 'QUEUE', executionProtocol: 'LEGACY', settings });
+    db.seed('engageOpportunity', { id: 'opp', platform: 'x', externalPostId: 'target' });
+    const summary = await service.businessSummary('org', 'user', 'root');
+    expect(summary.allowedActions.enqueue).toEqual({ allowed: false, reason: 'CONTENT_NOT_ENQUEUEABLE' });
+    expect(summary.allowedActions.selectAccount.allowed).toBe(false);
+    expect(db.rows('sendIntent')).toEqual([]);
+    expect(db.rows('sendExecution')).toEqual([]);
+  });
+  it.each([
+    ...['linkedin', 'medium', 'quora', 'hackernews', 'devto'].flatMap(platform => [
+      { platform, url: undefined, settings: {}, allowed: false },
+      { platform, url: 'https://example.com/not-a-platform-target', settings: {}, allowed: false },
+    ]),
+    { platform: 'linkedin', url: 'https://www.linkedin.com/feed/update/urn:li:activity:123/', settings: {}, allowed: true },
+    { platform: 'linkedin', url: undefined, settings: { replyUrl: 'https://www.linkedin.com/feed/update/urn:li:activity:123/' }, allowed: true },
+    { platform: 'linkedin', url: 'https://example.com/not-linkedin', settings: { replyUrl: 'https://www.linkedin.com/feed/update/urn:li:activity:123/' }, allowed: false },
+    { platform: 'x', url: undefined, settings: {}, allowed: true },
+    { platform: 'reddit', url: undefined, settings: {}, allowed: true },
+  ])('projects the actual queued target contract for $platform ($url, $settings)', async ({ platform, url, settings, allowed }) => {
+    const { db, service } = await draft();
+    Object.assign(db.rows('post')[0], { state: 'QUEUE', executionProtocol: 'LEGACY', publishMethod: 'EXTENSION',
+      providerIdentifier: platform, settings: JSON.stringify(settings) });
+    const opportunity = { id: 'opp', platform, externalPostId: 'target', externalPostUrl: url };
+    db.seed('engageOpportunity', opportunity);
+    db.rows('engageSentReply')[0].opportunity = opportunity;
+    const summary = await service.businessSummary('org', 'user', 'root');
+    expect(summary.allowedActions.enqueue).toEqual({ allowed, reason: allowed ? null : 'REPLY_TARGET_REQUIRED' });
+    expect(summary.allowedActions.selectAccount.allowed).toBe(false);
+    expect(db.rows('sendIntent')).toEqual([]);
+    const enqueue = service.enqueueSavedReply('org', 'user', 'reply', { sentReplyId: 'reply' });
+    if (allowed) {
+      await expect(enqueue).resolves.toMatchObject({ id: 'root' });
+      expect(db.rows('sendIntent')).toHaveLength(1);
+    } else {
+      await expect(enqueue).rejects.toThrow('REPLY_TARGET_REQUIRED');
+      expect(db.rows('sendIntent')).toEqual([]);
+    }
+    expect(db.rows('sendExecution')).toEqual([]);
+  });
+  it.each([
+    ['ordinary-post', 'CONTENT_NOT_ENQUEUEABLE'],
+    ['no-saved-reply', 'SAVED_REPLY_NOT_FOUND'],
+    ['claimed', 'LEGACY_CONTENT_DRAIN_REQUIRED'],
+    ['published-url', 'LEGACY_CONTENT_DRAIN_REQUIRED'],
+    ['recurring', 'CONTROLLED_RECURRING_OCCURRENCE_REQUIRED'],
+    ['replied', 'REPLY_OPPORTUNITY_NOT_ACTIONABLE'],
+    ['scheduled', 'REPLY_OPPORTUNITY_NOT_ACTIONABLE'],
+    ['no-target', 'REPLY_TARGET_REQUIRED'],
+    ['unsupported-platform', 'CONTROLLED_PLATFORM_UNSUPPORTED'],
+    ['account-unconfirmed', 'SEND_BINDING_RECONFIRMATION_REQUIRED'],
+    ['inactive-project', 'PROJECT_INACTIVE'],
+  ])('does not unfreeze a legacy queued reply or post for %s', async (kind, reason) => {
+    const { db, service, projects } = await draft();
+    const post = db.rows('post')[0];
+    Object.assign(post, { state: 'QUEUE', executionProtocol: 'LEGACY', publishMethod: 'EXTENSION' });
+    db.seed('engageOpportunity', { id: 'opp', platform: 'x', externalPostId: 'target' });
+    if (kind === 'ordinary-post') post.source = 'calendar';
+    if (kind === 'no-saved-reply') db.rows('engageSentReply').length = 0;
+    if (kind === 'claimed') { post.releaseId = 'claim'; post.claimedAt = sendNow; }
+    if (kind === 'published-url') post.releaseURL = 'https://x.com/u/status/already-sent';
+    if (kind === 'recurring') post.intervalInDays = 1;
+    if (kind === 'replied') db.rows('engageOpportunityState')[0].status = 'REPLIED';
+    if (kind === 'scheduled') db.rows('engageOpportunityState')[0].status = 'SCHEDULED';
+    if (kind === 'no-target') db.rows('engageOpportunity')[0].externalPostId = null;
+    if (kind === 'unsupported-platform') post.providerIdentifier = 'unsupported';
+    if (kind === 'account-unconfirmed') post.integrationId = 'account';
+    if (kind === 'inactive-project') projects.getActivationVerdict.mockResolvedValue('inactive');
+    const summary = await service.businessSummary('org', 'user', 'root');
+    expect(summary.allowedActions.enqueue).toEqual({ allowed: false, reason });
+    expect(summary.allowedActions.selectAccount.allowed).toBe(false);
+    expect(summary.allowedActions.retry.allowed).toBe(false);
+    expect(db.rows('sendIntent')).toEqual([]);
+    expect(db.rows('sendExecution')).toEqual([]);
+  });
   it('reports the same legacy ownership restriction as enqueue for a claimed saved reply', async () => {
     const { db, service } = await draft();
     Object.assign(db.rows('post')[0], { executionProtocol: 'LEGACY', releaseId: 'old-lease', claimedAt: sendNow });
