@@ -26,7 +26,9 @@ const DEFAULT_EXPECTED_DATABASE = 'aisee_postiz_dev';
 
 export interface CliOptions {
   apply: boolean;
+  allUsers: boolean;
   userIds: string[];
+  integrationIds: string[];
   organizationId?: string;
   baseUrl?: string;
   expectedDatabase: string;
@@ -41,34 +43,216 @@ export interface PreviewCandidate {
   token: string;
 }
 
-function values(argv: string[], name: string): string[] {
-  const found: string[] = [];
-  for (let index = 0; index < argv.length; index++) {
-    if (argv[index] === `--${name}` && argv[index + 1]) {
-      found.push(argv[++index]);
-    }
-  }
-  return found;
-}
-
-function value(argv: string[], name: string): string | undefined {
-  return values(argv, name)[0];
-}
-
 export function parseOptions(argv: string[]): CliOptions {
-  const userIds = [
-    ...values(argv, 'user'),
-    ...values(argv, 'users').flatMap((entry) => entry.split(',')),
-  ]
-    .map((entry) => entry.trim())
-    .filter(Boolean);
+  const flags = new Set<string>();
+  const inputs = new Map<string, string[]>();
+  const valueOptions = new Set([
+    '--user',
+    '--users',
+    '--integration',
+    '--integrations',
+    '--org',
+    '--base-url',
+    '--expected-database',
+  ]);
+  for (let index = 0; index < argv.length; index++) {
+    const option = argv[index];
+    if (['--all', '--apply', '--help'].includes(option)) {
+      flags.add(option);
+      continue;
+    }
+    if (!valueOptions.has(option)) throw new Error(`Unknown option: ${option}`);
+    const value = argv[++index]?.trim();
+    if (!value || value.startsWith('--'))
+      throw new Error(`A value is required for ${option}`);
+    const entries = inputs.get(option) ?? [];
+    entries.push(value);
+    inputs.set(option, entries);
+  }
+  const ids = (singular: string, plural: string) => [
+    ...new Set(
+      [
+        ...(inputs.get(singular) ?? []),
+        ...(inputs.get(plural) ?? []).flatMap((entry) => entry.split(',')),
+      ]
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+    ),
+  ];
+  const userIds = ids('--user', '--users');
+  const integrationIds = ids('--integration', '--integrations');
+  const organizationId = inputs.get('--org')?.[0];
+  const allUsers = flags.has('--all');
+  if (
+    (inputs.has('--users') && !userIds.length) ||
+    (inputs.has('--integrations') && !integrationIds.length)
+  ) {
+    throw new Error('At least one nonblank ID is required for an ID list');
+  }
+  if (allUsers && (userIds.length || integrationIds.length)) {
+    throw new Error('--all cannot be combined with user or integration IDs');
+  }
+  if (
+    !flags.has('--help') &&
+    !allUsers &&
+    !userIds.length &&
+    !integrationIds.length &&
+    !organizationId
+  ) {
+    throw new Error(
+      'Specify --all, --user/--users, --integration/--integrations, or --org'
+    );
+  }
+  for (const option of ['--org', '--base-url', '--expected-database']) {
+    if ((inputs.get(option)?.length ?? 0) > 1)
+      throw new Error(`${option} may only be specified once`);
+  }
   return {
-    apply: argv.includes('--apply'),
-    userIds: [...new Set(userIds)],
-    organizationId: value(argv, 'org'),
-    baseUrl: value(argv, 'base-url') ?? process.env.NEXT_PUBLIC_BACKEND_URL,
+    apply: flags.has('--apply'),
+    allUsers,
+    userIds,
+    integrationIds,
+    organizationId,
+    baseUrl:
+      inputs.get('--base-url')?.[0] ?? process.env.NEXT_PUBLIC_BACKEND_URL,
     expectedDatabase:
-      value(argv, 'expected-database') ?? DEFAULT_EXPECTED_DATABASE,
+      inputs.get('--expected-database')?.[0] ?? DEFAULT_EXPECTED_DATABASE,
+  };
+}
+
+export async function collectCandidates(
+  prisma: Pick<
+    PrismaClient,
+    'user' | 'integration' | 'userOrganization' | 'settings'
+  >,
+  options: CliOptions
+) {
+  const users = options.userIds.length
+    ? await prisma.user.findMany({
+        where: { id: { in: options.userIds } },
+        select: { id: true },
+      })
+    : [];
+  const foundUsers = new Set(users.map((user) => user.id));
+  const integrations = await prisma.integration.findMany({
+    where: {
+      identityNamespace: 'legacy',
+      deletedAt: null,
+      ...(options.organizationId
+        ? { organizationId: options.organizationId }
+        : {}),
+      ...(options.integrationIds.length
+        ? { id: { in: options.integrationIds } }
+        : {}),
+      ...(options.userIds.length
+        ? {
+            organization: {
+              users: {
+                some: {
+                  userId: { in: options.userIds },
+                  disabled: false,
+                },
+              },
+            },
+          }
+        : {}),
+    },
+    select: {
+      id: true,
+      organizationId: true,
+      providerIdentifier: true,
+      token: true,
+    },
+    orderBy: [{ organizationId: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+  });
+  const organizationIds = [
+    ...new Set(integrations.map((row) => row.organizationId)),
+  ];
+  const [members, modeRows] = organizationIds.length
+    ? await Promise.all([
+        prisma.userOrganization.findMany({
+          where: {
+            organizationId: { in: organizationIds },
+            disabled: false,
+            role: { in: ['ADMIN', 'SUPERADMIN'] },
+            user: { activated: true },
+          },
+          select: { id: true, userId: true, organizationId: true },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        }),
+        prisma.settings.findMany({
+          where: {
+            key: {
+              in: organizationIds.map(
+                (id) => `sending.organization_mode:${id}`
+              ),
+            },
+          },
+          select: { key: true, value: true },
+        }),
+      ])
+    : [[], []];
+  const administrators = new Map<
+    string,
+    { userId: string; membershipId: string }
+  >();
+  for (const member of members) {
+    if (!administrators.has(member.organizationId))
+      administrators.set(member.organizationId, {
+        userId: member.userId,
+        membershipId: member.id,
+      });
+  }
+  const controlledOrganizations = new Set(
+    modeRows
+      .filter((row) => {
+        const mode = row.value as { mode?: unknown; revision?: unknown } | null;
+        return (
+          mode?.mode === 'CONTROLLED' &&
+          Number.isInteger(mode.revision) &&
+          (mode.revision as number) > 0
+        );
+      })
+      .map((row) => row.key.slice('sending.organization_mode:'.length))
+  );
+  const candidates: PreviewCandidate[] = [];
+  const skipped: Array<{
+    integrationId: string;
+    organizationId: string;
+    code: string;
+  }> = [];
+  for (const integration of integrations) {
+    const admin = administrators.get(integration.organizationId);
+    const code = !controlledOrganizations.has(integration.organizationId)
+      ? 'ORGANIZATION_NOT_CONTROLLED'
+      : !admin
+      ? 'ORGANIZATION_ADMIN_REQUIRED'
+      : null;
+    if (code) {
+      skipped.push({
+        integrationId: integration.id,
+        organizationId: integration.organizationId,
+        code,
+      });
+      continue;
+    }
+    candidates.push({
+      ...admin!,
+      organizationId: integration.organizationId,
+      integrationId: integration.id,
+      providerIdentifier: integration.providerIdentifier,
+      token: integration.token,
+    });
+  }
+  const foundIntegrations = new Set(integrations.map((row) => row.id));
+  return {
+    candidates,
+    skipped,
+    organizationCount: organizationIds.length,
+    missingUserIds: options.userIds.filter((id) => !foundUsers.has(id)),
+    unmatchedIntegrationIds: options.integrationIds.filter(
+      (id) => !foundIntegrations.has(id)
+    ),
   };
 }
 
@@ -92,7 +276,10 @@ function usage(): void {
 
   --user <id>                 Affected user ID; repeat for multiple users
   --users <id,id>             Comma-separated affected user IDs
-  --org <id>                  Limit to one organization
+  --integration <id>          Social-account Integration ID; repeat as needed
+  --integrations <id,id>      Comma-separated social-account Integration IDs
+  --all                      Scan legacy accounts across all users
+  --org <id>                  Limit any selection to one organization
   --apply                     Call the verification API (default: preview only)
   --base-url <url>            Backend URL (default: NEXT_PUBLIC_BACKEND_URL)
   --expected-database <name>  Required database name (default: ${DEFAULT_EXPECTED_DATABASE})
@@ -100,7 +287,11 @@ function usage(): void {
 
 Apply mode reads AISEE_AUTH_TOKEN from the environment. For users outside the
 token owner's organizations, use a super-admin token; the request impersonates
-each affected user and remains subject to the endpoint's ADMIN/SUPERADMIN check.`);
+an active administrator membership in each organization. Cross-organization
+--all --apply requires a super-admin token. User, organization, and integration
+filters intersect; --all cannot be combined with user/integration IDs.
+Only Controlled organizations are eligible; other organizations are reported
+as skipped. No sending mode is changed.`);
 }
 
 async function responseBody(response: Response): Promise<unknown> {
@@ -124,6 +315,7 @@ export async function verifyThroughApi(
     )}/identity/verify`,
     {
       method: 'POST',
+      signal: AbortSignal.timeout(60_000),
       headers: {
         authorization: `Bearer ${token}`,
         showorg: candidate.organizationId,
@@ -143,10 +335,6 @@ async function main(): Promise<void> {
   if (process.argv.includes('--help')) {
     usage();
     return;
-  }
-  if (!options.userIds.length) {
-    usage();
-    throw new Error('At least one --user or --users value is required');
   }
   const configuredDatabase = databaseName(process.env.DATABASE_URL);
   if (configuredDatabase !== options.expectedDatabase) {
@@ -168,79 +356,32 @@ async function main(): Promise<void> {
 
   const prisma = new PrismaClient();
   try {
-    const users = await prisma.user.findMany({
-      where: { id: { in: options.userIds } },
-      select: {
-        id: true,
-        organizations: {
-          where: {
-            disabled: false,
-            ...(options.organizationId
-              ? { organizationId: options.organizationId }
-              : {}),
-          },
-          select: { id: true, organizationId: true, role: true },
-        },
-      },
-    });
-    const foundUsers = new Set(users.map((user) => user.id));
-    for (const userId of options.userIds) {
-      if (!foundUsers.has(userId)) console.log(`MISSING_USER ${userId}`);
-    }
-
-    const organizations = new Map<
-      string,
-      { userId: string; membershipId: string }
-    >();
-    for (const user of users) {
-      for (const membership of user.organizations) {
-        if (!['ADMIN', 'SUPERADMIN'].includes(membership.role)) {
-          console.log(
-            `SKIP_NON_ADMIN user=${user.id} organization=${membership.organizationId}`
-          );
-          continue;
-        }
-        organizations.set(membership.organizationId, {
-          userId: user.id,
-          membershipId: membership.id,
-        });
-      }
-    }
-    const organizationIds = [...organizations.keys()];
-    const integrations = organizationIds.length
-      ? await prisma.integration.findMany({
-          where: {
-            organizationId: { in: organizationIds },
-            identityNamespace: 'legacy',
-            deletedAt: null,
-          },
-          select: {
-            id: true,
-            organizationId: true,
-            providerIdentifier: true,
-            token: true,
-          },
-          orderBy: [
-            { organizationId: 'asc' },
-            { createdAt: 'asc' },
-            { id: 'asc' },
-          ],
-        })
-      : [];
-    const candidates: PreviewCandidate[] = integrations.map((integration) => ({
-      userId: organizations.get(integration.organizationId)!.userId,
-      membershipId: organizations.get(integration.organizationId)!.membershipId,
-      organizationId: integration.organizationId,
-      integrationId: integration.id,
-      providerIdentifier: integration.providerIdentifier,
-      token: integration.token,
-    }));
+    const selection = await collectCandidates(prisma, options);
+    const { candidates, skipped } = selection;
+    for (const userId of selection.missingUserIds)
+      console.log(`MISSING_USER ${userId}`);
+    for (const integrationId of selection.unmatchedIntegrationIds)
+      console.log(
+        `SKIP_UNMATCHED_INTEGRATION integration=${integrationId} code=NOT_LEGACY_OR_OUTSIDE_SCOPE`
+      );
+    for (const entry of skipped)
+      console.log(
+        `SKIPPED organization=${entry.organizationId} integration=${entry.integrationId} code=${entry.code}`
+      );
 
     console.log(`Mode: ${options.apply ? 'APPLY' : 'PREVIEW'}`);
     console.log(`Database: ${configuredDatabase}`);
-    console.log(`Users: ${options.userIds.length}`);
-    console.log(`Organizations: ${organizationIds.length}`);
-    console.log(`Legacy integrations: ${candidates.length}`);
+    console.log(
+      `User filter: ${
+        options.allUsers
+          ? 'ALL'
+          : options.userIds.length
+          ? options.userIds.join(',')
+          : 'NONE'
+      }`
+    );
+    console.log(`Organizations: ${selection.organizationCount}`);
+    console.log(`Legacy integrations: ${candidates.length + skipped.length}`);
 
     let fixed = 0;
     let waiting = 0;
@@ -284,7 +425,9 @@ async function main(): Promise<void> {
       }
     }
     console.log(
-      `Summary: fixed=${fixed} waitingForSession=${waiting} failed=${failed}`
+      `Summary: fixed=${fixed} waitingForSession=${waiting} skipped=${
+        skipped.length + selection.unmatchedIntegrationIds.length
+      } failed=${failed}`
     );
     if (!options.apply) {
       console.log('Preview complete; no verification API calls were made.');

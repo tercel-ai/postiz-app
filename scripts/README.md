@@ -3,7 +3,7 @@
 ## reconcile-legacy-identities.ts
 
 Safely reconciles historical `Integration.identityNamespace = legacy` rows for
-one or more affected users. Preview is the default and performs database reads
+selected social accounts, one or more affected users, or all users. Preview is the default and performs database reads
 only. `--apply` never writes Integration directly; it calls the protected
 `POST /integrations/:id/identity/verify` endpoint so the normal OAuth actor
 probe, conflict checks, organization permissions, and identity audit remain in
@@ -14,12 +14,41 @@ force.
 pnpm exec ts-node --project scripts/tsconfig.json \
   scripts/reconcile-legacy-identities.ts --users <user-id-1>,<user-id-2>
 
+# Preview selected social accounts (Integration IDs, not platform account IDs)
+pnpm exec ts-node --project scripts/tsconfig.json \
+  scripts/reconcile-legacy-identities.ts --integrations <integration-id-1>,<integration-id-2>
+
+# Preview legacy accounts across all users
+pnpm exec ts-node --project scripts/tsconfig.json \
+  scripts/reconcile-legacy-identities.ts --all
+
 # Apply with an administrator or super-administrator token
 export AISEE_AUTH_TOKEN='<token>'
 pnpm exec ts-node --project scripts/tsconfig.json \
   scripts/reconcile-legacy-identities.ts --users <user-id-1>,<user-id-2> \
   --base-url https://api-post-dev.aisee.live --apply
+
+# Apply across all users with a super-admin token
+pnpm exec ts-node --project scripts/tsconfig.json \
+  scripts/reconcile-legacy-identities.ts --all \
+  --base-url https://api-post-dev.aisee.live --apply
 ```
+
+`--user` and `--integration` may be repeated; their plural forms accept comma-separated
+IDs. `--org` works alone or narrows another selection. User, organization, and
+integration filters intersect. `--all` cannot be combined with explicit user or
+integration IDs, and omitted or misspelled targeting options fail before any
+database access. Already-normalized, deleted, or out-of-scope Integration IDs are
+reported as unmatched rather than modified.
+
+Accounts are scoped through organization membership, since Integration has no
+userId. Each organization uses an active administrator membership for the existing
+protected API. Organizations without Controlled mode or an active administrator
+are explicitly reported as skipped; the script never switches sending modes.
+The API still enforces system capability, authorization, credential ownership,
+and identity conflicts. Cross-organization apply requires a super-admin token.
+Each HTTP verification has a 60-second deadline, and an account failure does not
+stop the rest of the batch.
 
 The script refuses to run unless `DATABASE_URL` resolves to
 `aisee_postiz_dev` by default. Use `--expected-database` only when intentionally
