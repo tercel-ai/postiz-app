@@ -124,9 +124,9 @@ describe('saved reply enqueue contract', () => {
 });
 
 describe('simple saved reply business idempotency', () => {
-  it('reconciles an unbound historical claim, then enqueues the same eligible saved reply exactly once through normal policy', async () => {
+  it.each(['administrator', 'original-user'])('recovers an unbound claim as %s, then enqueues the same saved reply exactly once', async role => {
     const { service, db } = await draft();
-    db.rows('userOrganization')[0].role = 'ADMIN';
+    db.rows('userOrganization')[0].role = role === 'administrator' ? 'ADMIN' : 'USER';
     const post = db.rows('post')[0];
     Object.assign(post, { executionProtocol: 'LEGACY', state: 'QUEUE', publishMethod: 'EXTENSION',
       releaseId: 'historical-claim', claimedAt: sendNow });
@@ -138,6 +138,18 @@ describe('simple saved reply business idempotency', () => {
     await expect(service.enqueueSavedReply('org', 'user', 'reply', { sentReplyId: 'reply' }))
       .rejects.toThrow('LEGACY_CONTENT_DRAIN_REQUIRED');
     const modes = new SendModeService(db);
+    if (role === 'original-user') {
+      const proof = db.rows('sendMutationReceipt').find(row => row.id === 'proof');
+      proof.userId = proof.result.browserUserId = 'user';
+      proof.result.integrationId = 'browser:user:x';
+      proof.createdAt = new Date(sendNow.getTime() + 1000);
+      const diagnosis = await modes.getBrowserReplyRecovery('org', 'user', 'reply');
+      expect(diagnosis).toMatchObject({ canResolve: false, canReview: true });
+      await modes.resolveBrowserReplyRecovery('org', 'user', 'reply', {
+        expectedOrganizationId: 'org', expectedUserId: 'user', requestId: 'recover-historical',
+        expectedRecoveryRevision: diagnosis.recoveryRevision, reviewConfirmed: true,
+      });
+    } else {
     const diagnosis = await modes.getLegacyReplyRecovery('org', 'user', 'reply');
     expect(diagnosis.canResolve).toBe(true);
     await modes.resolveLegacyReplyRecovery('org', 'user', 'reply', {
@@ -146,6 +158,7 @@ describe('simple saved reply business idempotency', () => {
       executorStopped: true, noPendingSubmit: true, replyAbsent: true,
       evidence: 'All old workers stopped; platform target checked and reply absent.',
     });
+    }
     await service.enqueueSavedReply('org', 'user', 'reply', { sentReplyId: 'reply' });
     await service.enqueueSavedReply('org', 'user', 'reply', { sentReplyId: 'reply' });
     expect(db.rows('sendIntent')).toHaveLength(1);
