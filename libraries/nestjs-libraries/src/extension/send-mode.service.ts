@@ -12,6 +12,7 @@ import { canonicalSendAccount, sendHash, sendJson, sendTransaction } from './sen
 import {
   BeginBrowserWriteDto,
   BrowserWriteOutcomeDto,
+  BrowserReplyRecoveryDto,
   CancelSendModeTransitionDto,
   ResolveAutonomousEffectDto,
   ResolveLegacyReplyRecoveryDto,
@@ -1313,7 +1314,7 @@ export class SendModeService {
     const rows = await tx.sendMutationReceipt.findMany({
       where: { organizationId, operation: AUTONOMOUS_EFFECT_OPERATION },
       orderBy: { createdAt: 'asc' },
-      select: { id: true, createdAt: true, result: true },
+      select: { id: true, userId: true, createdAt: true, result: true },
     });
     return rows.map((row) => ({ row, result: this.effectResult(row.result) }));
   }
@@ -2245,7 +2246,37 @@ export class SendModeService {
           Date.parse(result.legacyClaim.claimedAt) === post.claimedAt?.getTime() ? 'MATCH' : 'CHANGED',
       })),
     };
-    return { view, post, setting, capturedWork };
+    return { view, post, setting, capturedWork, receipts };
+  }
+
+  private browserReplyRecoveryView(recovery: Awaited<ReturnType<SendModeService['legacyReplyRecoveryIn']>>, userId: string) {
+    const { view, post, receipts } = recovery;
+    const reasons = [...view.reasons];
+    if (receipts.some(({ row, result }) => row.userId !== userId || result.browserUserId !== userId))
+      reasons.push('ORIGINAL_BROWSER_USER_REQUIRED');
+    const matchesClaim = (result: AutonomousEffectResult) => !!result.legacyClaim &&
+      (!post.releaseId || result.legacyClaim.releaseId === post.releaseId) &&
+      Date.parse(result.legacyClaim.claimedAt) === post.claimedAt?.getTime();
+    if (!(post.claimedAt instanceof Date) || !Number.isFinite(post.claimedAt.getTime()) ||
+        receipts.some(({ row, result }) => result.legacyClaim ? !matchesClaim(result) :
+          !(row.createdAt instanceof Date) || !Number.isFinite(row.createdAt.getTime()) || row.createdAt < post.claimedAt!))
+      reasons.push('CURRENT_CLAIM_PROOF_REQUIRED');
+    const canReview = reasons.length === 0;
+    if (!receipts.some(({ result }) => matchesClaim(result))) reasons.push('EXPLICIT_OWNER_REVIEW_REQUIRED');
+    return { ...view, canResolve: reasons.length === 0, canReview, reasons };
+  }
+
+  async getBrowserReplyRecovery(organizationId: string, userId: string, sentReplyId: string) {
+    return sendTransaction(this.db, async tx => {
+      await this.memberIn(tx, organizationId, userId);
+      const view = this.browserReplyRecoveryView(await this.legacyReplyRecoveryIn(tx, organizationId, sentReplyId), userId);
+      return { organizationId, userId, sentReplyId, postId: view.postId, recoveryRevision: view.recoveryRevision,
+        canResolve: view.canResolve, canReview: view.canReview, reasons: view.reasons };
+    });
+  }
+
+  resolveBrowserReplyRecovery(organizationId: string, userId: string, sentReplyId: string, body: BrowserReplyRecoveryDto) {
+    return this.resolveReplyRecovery(organizationId, userId, sentReplyId, body, true);
   }
 
   async getLegacyReplyRecovery(organizationId: string, userId: string, sentReplyId: string) {
@@ -2257,28 +2288,38 @@ export class SendModeService {
   }
 
   async resolveLegacyReplyRecovery(organizationId: string, userId: string, sentReplyId: string, body: ResolveLegacyReplyRecoveryDto) {
+    return this.resolveReplyRecovery(organizationId, userId, sentReplyId, body, false);
+  }
+
+  private async resolveReplyRecovery(organizationId: string, userId: string, sentReplyId: string,
+    body: BrowserReplyRecoveryDto | ResolveLegacyReplyRecoveryDto, browser: boolean) {
     this.browserOwner(organizationId, userId, body);
+    const attestation = body as ResolveLegacyReplyRecoveryDto;
     if (typeof body.requestId !== 'string' || !body.requestId.trim() || body.requestId.length > 128 ||
       typeof body.expectedRecoveryRevision !== 'string' || !/^[a-f0-9]{64}$/.test(body.expectedRecoveryRevision) ||
-      body.executorStopped !== true || body.noPendingSubmit !== true || body.replyAbsent !== true ||
-      typeof body.evidence !== 'string' || !body.evidence.trim() || body.evidence.length > 2000)
+      (!browser && (attestation.executorStopped !== true || attestation.noPendingSubmit !== true || attestation.replyAbsent !== true ||
+      typeof attestation.evidence !== 'string' || !attestation.evidence.trim() || attestation.evidence.length > 2000)))
       throw new BadRequestException('INVALID_LEGACY_REPLY_RECOVERY');
     return sendTransaction(this.db, async tx => {
       const member = await this.memberIn(tx, organizationId, userId);
-      if (!['ADMIN', 'SUPERADMIN'].includes(member.role)) throw new ForbiddenException('ORGANIZATION_ADMIN_REQUIRED');
+      if (!browser && !['ADMIN', 'SUPERADMIN'].includes(member.role)) throw new ForbiddenException('ORGANIZATION_ADMIN_REQUIRED');
       await this.lockIn(tx, organizationId);
-      const key = { organizationId, userId, operation: 'legacy-reply-recovery', requestId: body.requestId };
+      const key = { organizationId, userId, operation: browser ? 'browser-reply-recovery' : 'legacy-reply-recovery', requestId: body.requestId };
       const requestHash = sendHash({ sentReplyId, expectedRecoveryRevision: body.expectedRecoveryRevision,
-        executorStopped: body.executorStopped, noPendingSubmit: body.noPendingSubmit,
-        replyAbsent: body.replyAbsent, evidence: body.evidence });
+        ...(browser ? { reviewConfirmed: (body as BrowserReplyRecoveryDto).reviewConfirmed === true } : { executorStopped: attestation.executorStopped, noPendingSubmit: attestation.noPendingSubmit,
+          replyAbsent: attestation.replyAbsent, evidence: attestation.evidence }) });
       const previous = await tx.sendMutationReceipt.findUnique({ where: { organizationId_userId_operation_requestId: key } });
       if (previous) {
         if (previous.requestHash !== requestHash) throw new ConflictException('REQUEST_ID_CONFLICT');
         return previous.result;
       }
-      const { view, post, setting, capturedWork } = await this.legacyReplyRecoveryIn(tx, organizationId, sentReplyId);
+      const recovery = await this.legacyReplyRecoveryIn(tx, organizationId, sentReplyId);
+      const { post, setting, capturedWork } = recovery;
+      const view = browser ? this.browserReplyRecoveryView(recovery, userId) : recovery.view;
       if (view.recoveryRevision !== body.expectedRecoveryRevision) throw new ConflictException('LEGACY_REPLY_RECOVERY_CHANGED');
-      if (!view.canResolve) throw new ConflictException({ message: 'LEGACY_REPLY_RECOVERY_UNSAFE', reasons: view.reasons });
+      const ownerReviewed = browser && (body as BrowserReplyRecoveryDto).reviewConfirmed === true &&
+        (view as ReturnType<SendModeService['browserReplyRecoveryView']>).canReview;
+      if (!view.canResolve && !ownerReviewed) throw new ConflictException({ message: 'LEGACY_REPLY_RECOVERY_UNSAFE', reasons: view.reasons });
       const saved = await tx.post.updateMany({
         where: { id: post.id, organizationId, deletedAt: null, sendIntentId: null,
           executionProtocol: post.executionProtocol ?? null, state: post.state,
@@ -2303,7 +2344,10 @@ export class SendModeService {
         recoveryRevision: view.recoveryRevision, receiptIds: view.receipts.map(receipt => receipt.id),
         claimFingerprint: sendHash({ releaseId: post.releaseId, claimedAt: post.claimedAt }),
         claimedAt: view.claimedAt, capturedOwnershipReleased: view.captured,
-        executorStopped: true, noPendingSubmit: true, replyAbsent: true, evidence: body.evidence,
+        ...(browser ? { proofKind: ownerReviewed ? 'OWNER_REVIEWED_HISTORICAL_RECEIPTS' : 'EXACT_CLAIM',
+          evidence: ownerReviewed ? 'Original user confirmed all old executors stopped, no pending submission, and reply absent.' :
+            'Original user non-submission receipts verified against the current claim.' } : {
+          executorStopped: true, noPendingSubmit: true, replyAbsent: true, evidence: attestation.evidence }),
         nextAction: 'CHECK_REPLY_STATUS' };
       await tx.sendMutationReceipt.create({ data: { ...key, requestHash, result: sendJson(result) } });
       return result;

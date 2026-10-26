@@ -130,7 +130,7 @@ export class BrowserWriteOutcomeDto extends BrowserWriteOwnerDto {
   url?: string;
 }
 
-export class ResolveLegacyReplyRecoveryDto extends BrowserWriteOwnerDto {
+export class BrowserReplyRecoveryDto extends BrowserWriteOwnerDto {
   @IsString()
   @Matches(/\S/)
   @MaxLength(128)
@@ -140,6 +140,12 @@ export class ResolveLegacyReplyRecoveryDto extends BrowserWriteOwnerDto {
   @Matches(/^[a-f0-9]{64}$/)
   expectedRecoveryRevision!: string;
 
+  @IsOptional()
+  @IsIn([true])
+  reviewConfirmed?: true;
+}
+
+export class ResolveLegacyReplyRecoveryDto extends BrowserReplyRecoveryDto {
   @IsIn([true])
   executorStopped!: true;
 

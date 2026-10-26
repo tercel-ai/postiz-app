@@ -8,6 +8,7 @@ import { SettingsService } from '../../database/prisma/settings/settings.service
 import {
   BeginBrowserWriteDto,
   BrowserWriteOutcomeDto,
+  BrowserReplyRecoveryDto,
   ResolveAutonomousEffectDto,
   ResolveLegacyReplyRecoveryDto,
   SaveSendModeDto,
@@ -19,6 +20,18 @@ import {
 } from '../send-mode.service';
 
 describe('sending mode API and Settings isolation', () => {
+  it('routes receipt-proven owner recovery separately from administrator overrides', async () => {
+    const modes = { getBrowserReplyRecovery: vi.fn(), resolveBrowserReplyRecovery: vi.fn() };
+    const controller = new SendModeController(modes as any);
+    const body = { expectedOrganizationId: 'org', expectedUserId: 'member', requestId: 'recover', expectedRecoveryRevision: 'a'.repeat(64) };
+    expect(await validate(plainToInstance(BrowserReplyRecoveryDto, body))).toEqual([]);
+    controller.getBrowserReplyRecovery({ id: 'org' } as any, { id: 'member' } as any, 'reply');
+    controller.resolveBrowserReplyRecovery({ id: 'org' } as any, { id: 'member' } as any, 'reply', body);
+    expect(modes.getBrowserReplyRecovery).toHaveBeenCalledWith('org', 'member', 'reply');
+    expect(modes.resolveBrowserReplyRecovery).toHaveBeenCalledWith('org', 'member', 'reply', body);
+    expect(Reflect.getMetadata('path', controller.getBrowserReplyRecovery)).toBe('/replies/:id/browser-recovery');
+    expect(Reflect.getMetadata('path', controller.resolveBrowserReplyRecovery)).toBe('/replies/:id/browser-recovery');
+  });
   it('requires explicit administrator evidence and a complete recovery snapshot for historical claim repair', async () => {
     const body = { expectedOrganizationId: 'org', expectedUserId: 'admin', requestId: 'repair',
       expectedRecoveryRevision: 'a'.repeat(64), executorStopped: true, noPendingSubmit: true,

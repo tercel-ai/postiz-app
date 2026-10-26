@@ -7,6 +7,7 @@ import { SendModeService } from '@gitroom/nestjs-libraries/extension/send-mode.s
 import {
   BeginBrowserWriteDto,
   BrowserWriteOutcomeDto,
+  BrowserReplyRecoveryDto,
   CancelSendModeTransitionDto,
   ResolveAutonomousEffectDto,
   ResolveLegacyReplyRecoveryDto,
@@ -71,6 +72,19 @@ export class SendModeController {
     @Body() body: BrowserWriteOutcomeDto
   ) {
     return this.modes.settleBrowserWrite(org.id, user.id, id, body);
+  }
+
+  @Get('/replies/:id/browser-recovery')
+  @ApiOperation({ summary: 'Inspect original-user non-submission proof for a historical reply' })
+  getBrowserReplyRecovery(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User, @Param('id') id: string) {
+    return this.modes.getBrowserReplyRecovery(org.id, user.id, id);
+  }
+
+  @Post('/replies/:id/browser-recovery')
+  @ApiOperation({ summary: 'Recover original-user reply ownership only from durable non-submission proof' })
+  resolveBrowserReplyRecovery(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User,
+    @Param('id') id: string, @Body() body: BrowserReplyRecoveryDto) {
+    return this.modes.resolveBrowserReplyRecovery(org.id, user.id, id, body);
   }
 
   @Get('/replies/:id/legacy-recovery')
