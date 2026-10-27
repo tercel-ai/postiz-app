@@ -1945,3 +1945,43 @@ it('drains queued replies while skipping paid generation during a pending sendin
   expect(engage.getReplyBudget).not.toHaveBeenCalled();
   expect(draft.generateDraft).not.toHaveBeenCalled();
 });
+
+
+describe('controlled automatic reply owner visibility', () => {
+  it.each(['AUTOMATION_POLICY_OWNER_REQUIRED', 'SEND_POLICY_OWNER_UNAVAILABLE'])(
+    'reports %s as an execution hold while keeping accurate opportunity counts', async code => {
+      const { svc, repo, engage } = makeService({ configs: [enabledConfig], eligibleCount: 12 });
+      const owner = vi.fn().mockRejectedValue(new Error(code));
+      Object.assign(svc, { _sendModes: { isControlled: vi.fn().mockResolvedValue(true) }, _automaticSends: { owner } });
+      const rows = await svc.getReplyQueueStatus(org, DURING_ACTIVE_HOURS);
+      expect(rows).toHaveLength(2);
+      expect(rows.every(row => row.blockedReason === code && row.eligibleCount === 12)).toBe(true);
+      expect(owner).toHaveBeenCalledTimes(1);
+      expect(repo.claimDueEngageReplies).not.toHaveBeenCalled();
+      expect(engage.queueAutoReply).not.toHaveBeenCalled();
+    }
+  );
+
+  it('logs one actionable owner failure per project instead of silently skipping each platform', async () => {
+    const { svc, engage } = makeService({ configs: [enabledConfig] });
+    Object.assign(svc, { _sendModes: { isControlled: vi.fn().mockResolvedValue(true) },
+      _automaticSends: { owner: vi.fn().mockRejectedValue(new Error('AUTOMATION_POLICY_OWNER_REQUIRED')) } });
+    const warn = vi.spyOn((svc as any).logger, 'warn');
+    expect(await svc.getDueReplies(org, DURING_ACTIVE_HOURS, { coordinated: true })).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('AUTOMATION_POLICY_OWNER_REQUIRED'));
+    expect(engage.queueAutoReply).not.toHaveBeenCalled();
+  });
+
+  it('does not expose internal errors or invent blockers for autonomous configuration', async () => {
+    const { svc } = makeService({ configs: [enabledConfig] });
+    const modes = { isControlled: vi.fn().mockResolvedValue(true) };
+    const owner = vi.fn().mockRejectedValue(new Error('private database details'));
+    Object.assign(svc, { _sendModes: modes, _automaticSends: { owner } });
+    expect((await svc.getReplyQueueStatus(org, DURING_ACTIVE_HOURS))[0].blockedReason).toBe('AUTOMATION_OWNER_CHECK_FAILED');
+    modes.isControlled.mockResolvedValue(false);
+    owner.mockClear();
+    expect((await svc.getReplyQueueStatus(org, DURING_ACTIVE_HOURS))[0].blockedReason).toBeUndefined();
+    expect(owner).not.toHaveBeenCalled();
+  });
+});

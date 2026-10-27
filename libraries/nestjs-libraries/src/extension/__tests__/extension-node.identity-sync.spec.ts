@@ -178,6 +178,8 @@ describe('terminal identity synchronization', () => {
       platform: 'reddit',
       actorKey: '',
       integrationId: 'account-reddit',
+      accountIdentity: { id: 'abc', namespace: 'reddit.user_id' },
+      integration: { id: 'account-reddit', providerIdentifier: 'reddit', internalId: 'abc', identityNamespace: 'reddit.user_id' },
       verificationStatus: 'VERIFIED',
       verificationExpiresAt: new Date(now.getTime() + 120000),
     });
@@ -193,6 +195,26 @@ describe('terminal identity synchronization', () => {
         'reddit'
       )
     ).toEqual({ platforms: [] });
+    expect(f.db.rows('sendExecution')).toHaveLength(0);
+  });
+  it.each([
+    ['different actor', { id: '456', namespace: 'x.rest_id' }, 'x.rest_id'],
+    ['different namespace', { id: '123', namespace: 'x.handle' }, 'x.rest_id'],
+    ['missing identity', {}, 'x.rest_id'],
+    ['unverified legacy account', { id: '123', namespace: 'legacy' }, 'legacy'],
+  ])('requests a new probe when a future-dated session belongs to a %s', async (_label, accountIdentity, identityNamespace) => {
+    const f = fixture();
+    f.db.rows('extensionNode')[0].capabilities = { x: { post: true, strictAccountVerification: true } };
+    f.db.seed('sendIntent', { id: 'intent', organizationId: 'org', status: 'QUEUED', action: 'POST' });
+    f.db.seed('post', { id: 'due', organizationId: 'org', state: 'QUEUE', parentPostId: null,
+      executionProtocol: 'ACCOUNT_BOUND_V1', publishMethod: 'EXTENSION', providerIdentifier: 'x',
+      integrationId: 'account-x', publishDate: now, sendIntentId: 'intent' });
+    f.db.seed('extensionNodeSession', { extensionNodeId: 'node-a', organizationId: 'org', platform: 'x',
+      integrationId: 'account-x', accountIdentity,
+      integration: { id: 'account-x', providerIdentifier: 'x', internalId: '123', identityNamespace },
+      verificationStatus: 'VERIFIED', verificationExpiresAt: new Date(now.getTime() + 120000) });
+    expect(await f.service.identityProbePlatforms('org', 'user', 'node-a', 'token'))
+      .toEqual({ platforms: ['x'] });
     expect(f.db.rows('sendExecution')).toHaveLength(0);
   });
   it('creates one actor and associates independent verified sessions from two terminals', async () => {

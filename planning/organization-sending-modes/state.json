@@ -1,7 +1,7 @@
 {
   "feature": "organization-sending-modes",
   "created": "2026-10-20T02:39:20Z",
-  "updated": "2026-10-23T08:09:21Z",
+  "updated": "2026-10-27T09:34:15.344749Z",
   "status": "completed",
   "execution_order": [
     "mode-configuration",
@@ -90,8 +90,88 @@
         "planning/organization-sending-modes/tasks/backend-routing.md",
         "planning/organization-sending-modes/verification.md"
       ],
-      "tests": { "passed": 4692, "failed": 0, "skipped": 97 },
+      "tests": {
+        "passed": 4692,
+        "failed": 0,
+        "skipped": 97
+      },
       "fixed_at": "2026-10-23T08:09:21Z"
+    },
+    {
+      "bug": "Controlled mode cutover silently stops configured automation and hides structured legacy reallocation errors",
+      "root_cause_level": 1,
+      "root_cause": "Mode cutover did not initialize existing automation owners; the reply driver suppressed owner failures, and reallocation ignored structured HttpException codes.",
+      "fixed_files": [
+        "libraries/nestjs-libraries/src/extension/send-mode.service.ts",
+        "apps/backend/src/services/send-mode-transition-reconciliation.service.ts",
+        "libraries/nestjs-libraries/src/extension/send-coordinator.service.ts",
+        "libraries/nestjs-libraries/src/engage/engage-auto-reply.service.ts",
+        "libraries/nestjs-libraries/src/extension/__tests__/automatic-owner-continuity.spec.ts",
+        "libraries/nestjs-libraries/src/extension/__tests__/send-mode-reallocation.spec.ts",
+        "apps/backend/src/services/__tests__/send-mode-transition-reconciliation.service.spec.ts",
+        "libraries/nestjs-libraries/src/engage/__tests__/engage-auto-reply.service.spec.ts",
+        "apps/backend/src/api/routes/posts.controller.ts",
+        "apps/backend/src/api/routes/__tests__/posts.controller.createPost.spec.ts",
+        "libraries/nestjs-libraries/src/database/prisma/posts/posts.service.ts",
+        "libraries/nestjs-libraries/src/database/prisma/posts/__tests__/posts.repository.draft-withdrawal.spec.ts"
+      ],
+      "commits": [],
+      "doc_updates": [
+        "docs/organization-sending-modes.md",
+        "planning/organization-sending-modes/tasks/backend-routing.md",
+        "planning/organization-sending-modes/verification.md"
+      ],
+      "tests": {
+        "passed": 4950,
+        "failed": 0,
+        "skipped": 15
+      },
+      "extension_tests": {
+        "passed": 3151,
+        "failed": 0,
+        "skipped": 0
+      },
+      "fixed_at": "2026-10-27T09:03:00Z",
+      "frontend_tests": {
+        "node_passed": 313,
+        "shell_passed": 4,
+        "python_passed": 20,
+        "failed": 0,
+        "python_skipped": 5
+      },
+      "deployment_status": "local_only_pending_backend_release_entry",
+      "live_cleanup_status": "requested_legacy_schedule_still_queue_content_preserved"
+    },
+    {
+      "bug": "review fixes — 1 issue: preserve historical owner provenance before legacy drain cleanup",
+      "root_cause_level": 1,
+      "root_cause": "Completed legacy-drain cleanup removed the sole administrator requester before periodic automation-owner recovery; old asynchronous cutovers have no receipt at the new mode revision.",
+      "fixed_files": [
+        "libraries/nestjs-libraries/src/extension/send-mode.service.ts",
+        "libraries/nestjs-libraries/src/extension/__tests__/automatic-owner-continuity.spec.ts"
+      ],
+      "commits": [],
+      "doc_updates": [],
+      "regression_tests_added": 6,
+      "tests": {
+        "passed": 4875,
+        "failed": 0,
+        "skipped": 96
+      },
+      "extension_tests": {
+        "passed": 3151,
+        "failed": 0,
+        "skipped": 0
+      },
+      "verification": {
+        "red": "5 failed, 12 passed before the fix",
+        "focused": "64 passed, 0 failed",
+        "typescript": "backend and standalone extension passed",
+        "evidence": "/private/tmp/aisee-review-fix-backend.json",
+        "database": "isolated; no live mutations",
+        "deployment": "local only"
+      },
+      "fixed_at": "2026-10-27T09:34:15.344749Z"
     }
   ],
   "metadata": {

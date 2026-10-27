@@ -99,7 +99,8 @@ describe('PostsService projectId threading', () => {
       'proj-1',
       undefined,
       undefined,
-      'AUTONOMOUS'
+      'AUTONOMOUS',
+      { userId: 'user-1', existingOnly: false, requestId: undefined }
     );
   });
 
@@ -117,7 +118,8 @@ describe('PostsService projectId threading', () => {
       undefined,
       undefined,
       undefined,
-      'AUTONOMOUS'
+      'AUTONOMOUS',
+      { userId: 'user-1', existingOnly: false, requestId: undefined }
     );
   });
 

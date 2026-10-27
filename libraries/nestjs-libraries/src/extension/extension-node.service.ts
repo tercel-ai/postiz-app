@@ -21,9 +21,7 @@ import {
 } from './extension-node.dto';
 import {
   ACCOUNT_BOUND_PROTOCOL,
-  channelAvailability,
   hashSecret,
-  NODE_ONLINE_MS,
   NODE_ID_PATTERN,
   nodeSecret,
   resolveObservedAccount,
@@ -33,6 +31,11 @@ import {
 } from './extension-node.protocol';
 import { CONTROLLED_SEND_PLATFORMS } from './controlled-platforms';
 import { organizationSendModeKey } from './send-mode.service';
+import { matchesAccountSession, nodeConnectionStatus, projectAccountTerminal, terminalAvailability } from './extension-node.projection';
+
+const accountIdentitySelect = {
+  id: true, providerIdentifier: true, internalId: true, identityNamespace: true,
+} satisfies Prisma.IntegrationSelect;
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
@@ -313,13 +316,14 @@ export class ExtensionNodeService {
           integrationId: { not: null },
           verificationExpiresAt: { gt: new Date(now.getTime() + 60000) },
         },
+        include: { integration: { select: accountIdentitySelect } },
       });
       const platforms: string[] = [];
       for (const platform of CONTROLLED_SEND_PLATFORMS) {
         const capability = (node.capabilities as any)?.[platform];
         if (!capability?.strictAccountVerification) continue;
         const fresh = sessions.filter(
-          (session) => session.platform === platform
+          (session) => session.platform === platform && matchesAccountSession(session.integration, session)
         );
         const actions = [
           capability.post && 'POST',
@@ -403,12 +407,7 @@ export class ExtensionNodeService {
   }
 
   private connection(node: Pick<ExtensionNode, 'status' | 'lastSeenAt'>) {
-    return node.status === 'REVOKED'
-      ? 'REVOKED'
-      : node.lastSeenAt &&
-        Date.now() - node.lastSeenAt.getTime() < NODE_ONLINE_MS
-      ? 'ONLINE'
-      : 'OFFLINE';
+    return nodeConnectionStatus(node, new Date());
   }
 
   async report(
@@ -759,51 +758,20 @@ export class ExtensionNodeService {
               },
             },
           },
-          include: { extensionNode: true },
+          include: { extensionNode: true, integration: { select: accountIdentitySelect } },
         })
       : [];
+    const now = new Date();
     return new Map(
       accounts.map((account) => {
-        const matched = rows.filter((row) => row.integrationId === account.id);
-        const terminals = matched.map((row) => {
-          const connectionStatus = this.connection(row.extensionNode);
-          const verified =
-            row.verificationStatus === 'VERIFIED' &&
-            !!row.verificationExpiresAt &&
-            row.verificationExpiresAt.getTime() > Date.now();
-          const capabilities = row.extensionNode
-            .capabilities as RegisterExtensionNodeDto['capabilities'];
-          const capable =
-            capabilities?.[row.platform]?.[action] === true &&
-            capabilities?.[row.platform]?.strictAccountVerification === true;
-          return {
-            nodeId: row.extensionNode.nodeId,
-            registeredByUserId: row.extensionNode.registeredByUserId,
-            name: row.extensionNode.name,
-            browser: row.extensionNode.browser,
-            connectionStatus,
-            sessionStatus: verified
-              ? 'VERIFIED'
-              : row.verificationStatus === 'VERIFIED'
-              ? 'STALE'
-              : 'UNKNOWN',
-            lastSeenAt: row.extensionNode.lastSeenAt,
-            verifiedAt: row.verifiedAt,
-            verificationExpiresAt: row.verificationExpiresAt,
-            online: connectionStatus === 'ONLINE',
-            verified,
-            capable,
-          };
-        });
+        const terminals = rows.filter(row => row.integrationId === account.id && matchesAccountSession(row.integration, row))
+          .map(row => projectAccountTerminal(row.extensionNode, row, now));
         return [
           account.id,
           {
-            sendAvailability: channelAvailability(
-              !!account.disabled,
-              terminals
-            ),
+            sendAvailability: terminalAvailability(terminals, action === 'post' ? 'POST' : 'REPLY', !!account.disabled),
             terminals: terminals.map(
-              ({ online, verified, capable, ...terminal }) => terminal
+              ({ id, observedAt, receivedAt, capabilities, ...terminal }) => terminal
             ),
           },
         ];

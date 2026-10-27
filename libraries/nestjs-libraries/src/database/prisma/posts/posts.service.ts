@@ -1,3 +1,4 @@
+import { ProjectInactiveException } from '@gitroom/nestjs-libraries/projects/project.exception';
 import { SendModeService } from '../../../extension/send-mode.service';
 import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
 import { v5 as sendUuid } from 'uuid';
@@ -1917,6 +1918,16 @@ export class PostsService {
     this.logger.log(
       `createPost: orgId=${orgId} userId=${userId ?? 'N/A'} type=${body.type} postsCount=${body.posts?.length ?? 0}`
     );
+    let existingDraftsOnly = false;
+    if (body.projectId && this._projectValidation) {
+      try {
+        await this._projectValidation.assertProjectActive(orgId, body.projectId);
+      } catch (error) {
+        if (body.type !== 'draft' || !(error instanceof ProjectInactiveException)) throw error;
+        await this._projectValidation.assertProjectAccess(orgId, body.projectId);
+        existingDraftsOnly = true;
+      }
+    }
     // Draft ceiling, checked ONCE for the whole batch before anything is written
     // — a partially-admitted batch would leave the caller unable to tell which
     // of its posts landed. Only drafts: scheduled/now posts are bounded by the
@@ -1944,6 +1955,7 @@ export class PostsService {
     const postList = [];
     const postNowErrors: string[] = [];
     const allCreatedPostIds: string[] = [];
+    let withdrewSchedule = false;
     for (const [itemIndex, post] of body.posts.entries()) {
       if (coordinated) {
         const originalId = post.value[0]?.id;
@@ -1993,7 +2005,7 @@ export class PostsService {
         }
       }
 
-      const { posts } = await this._postRepository.createOrUpdatePost(
+      const saved = await this._postRepository.createOrUpdatePost(
         coordinated ? 'draft' : body.type,
         orgId,
         body.type === 'now' ? dayjs().format('YYYY-MM-DDTHH:mm:00') : body.date,
@@ -2003,8 +2015,11 @@ export class PostsService {
         body.source,
         body.projectId,
         resolvedMethod === 'api' ? 'API' : resolvedMethod === 'extension' ? 'EXTENSION' : undefined,
-        undefined, coordinated ? 'CONTROLLED' : body.type !== 'draft' || body.source === 'engage' ? 'AUTONOMOUS' : undefined
+        undefined, coordinated ? 'CONTROLLED' : body.type !== 'draft' || body.source === 'engage' ? 'AUTONOMOUS' : undefined,
+        { userId, existingOnly: existingDraftsOnly, requestId: body.requestId }
       );
+      const { posts } = saved;
+      withdrewSchedule ||= saved.withdrewSchedule === true;
 
       if (!posts?.length) {
         return [] as any[];
@@ -2112,7 +2127,7 @@ export class PostsService {
     // Must happen after the loop so no iteration soft-deletes a sibling that hasn't been upserted yet.
     const group = body.posts[0]?.group;
     const isEditingExisting = body.posts.some((p) => p.value?.some((v) => !!v.id));
-    if (group && isEditingExisting && allCreatedPostIds.length > 0) {
+    if (group && isEditingExisting && allCreatedPostIds.length > 0 && !withdrewSchedule) {
       await this._postRepository.softDeleteGroupPosts(group, {
         organizationId: orgId,
         excludeIds: allCreatedPostIds,

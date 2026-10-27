@@ -102,3 +102,42 @@ Additional negative coverage checks malformed organization Settings and actual c
 Review artifacts: `/tmp/review-mode-guard.md`, `/tmp/review-send-quota.md`, `/tmp/review-extension-modes.md`, `/tmp/review-mode-cross.md`, `/tmp/review-mode-acceptance.md`. Final executed backend test names/statuses: `/tmp/postiz-review-final-executed-tests.json`.
 
 Acceptance reconciliation against the final executed test inventory: **51/51 P0/P1 sub-behaviors covered**, zero uncovered P0/P1 behaviors. Skipped infrastructure cases provide no acceptance evidence.
+
+## 2026-10-27 automation continuity regression verification
+
+- RED: missing-owner continuity and reallocation regressions produced 15 failures; owner-status and extension-display regressions failed before their implementations.
+- Focused GREEN: 147 backend tests passed.
+- Full backend suite: 4,931 passed, 0 failed, 15 skipped; frozen `apps/extension/**` excluded per repository instructions. Command: `pnpm exec vitest run --exclude 'apps/extension/**' --testTimeout=30000 --reporter=default --reporter=json --outputFile=/private/tmp/aisee-backend-full-final.json`. The first run had one existing remote-PostgreSQL billing parity test exceed the default five-second timeout; the complete rerun passed with a thirty-second limit and no skipped-test changes.
+- Independent extension suite: 3,151 passed, 0 failed, 0 skipped.
+- Backend production TypeScript and extension TypeScript checks passed.
+- Initialization preserves owner identity, settings, inactive switches, original schedules and accounts. It performs no platform send. Recovery uses durable administrator provenance and rejects missing/stale provenance and revoked membership. Tests cover idempotence, round trips, transaction rollback, old transition upgrade, project-error isolation and safe error-code filtering.
+- Source changes are local and require deployment. Live platform success is separate from automated tests; a normal existing-configuration save restored the affected reply owner's record and subsequent background execution published a reply without a forced send.
+
+
+### Inactive-project cancellation follow-up
+
+The live stored summary identified the blocked legacy schedule as `PROJECT_INACTIVE`. The old Move to Drafts action reused the select-account/send permission check and could not withdraw the schedule. The user explicitly requested cancellation with content retained as a draft.
+
+The original draft-save flow now validates membership, the full legacy thread and every claim/submission marker inside the shared mode lock. It saves requested draft edits, clears recurrence and never grants sending authority. The formerly introduced dedicated command has been removed. Repository/service and controller regressions cover preservation, idempotence, inactive-project independence, quarantine, membership/org isolation, coordinated/unknown protocols, partial submission and rollback on a concurrent guarded-write conflict. Frontend regressions exercise the real existing payload builder, normal POST /posts request, acknowledgements, identity changes and exclusion of coordinated/reconciling/succeeded/unknown summaries.
+
+Fresh complete results after the additional source changes:
+
+- Backend: **4,950 passed, 0 failed, 15 skipped**, 302 passed files and 3 skipped files; exit 0. `/private/tmp/aisee-backend-cancellation-full.json` and `.log`. Frozen extension excluded, thirty-second per-test timeout retained.
+- Standalone browser extension: **3,151 passed, 0 failed, 0 skipped**; source unchanged since the previously recorded full run.
+- Frontend complete test chain: **313 Node tests, 4 shell scenarios, 20 Python tests passed; 0 failed; 5 Python tests skipped**. `/private/tmp/aisee-frontend-full-serial.log`. The first parallel run stalled in existing Bing timeout tests under concurrent load and was stopped; the complete sequential rerun passed without changing those tests.
+- Backend production, frontend and standalone extension TypeScript: passed with no diagnostics. Relevant whitespace checks passed. No build, service restart, schema migration or deployment was performed.
+
+Deployment is still required for the draft-save safeguards and durable owner recovery. The live schedule remains queued until the normal deployed business command acknowledges DRAFT; source tests do not prove live cancellation. The normal Managed replies configuration save separately restored current reply automation and a new X reply was confirmed published. No old unconfirmed reply was resubmitted.
+
+
+### Original draft-save integration (2026-10-27)
+
+The extra cancellation route, service/coordinator wrappers and dedicated-route tests have been removed. All callers now use the existing POST /posts draft payload and acknowledgement. Activation enforcement moved into the post service so inactive projects can withdraw existing unclaimed legacy threads while new content and sends still require activation. Ownership failures and validation outages fail closed.
+
+The draft repository validates active organization membership, stored root/project/group and the exact complete ordered legacy thread under the existing mode lock. Per-segment guarded writes reject claimed/submitted/intent-bound/unknown/quarantined work; any child conflict rolls back the whole thread. Withdrawal saves requested content edits and clears recurrence, preserving independent sibling roots. An unchanged inherited account is preserved rather than treated as a route clear. Existing mutation receipts protect repeated requests and matching withdrawals from different dialogs/members; stale content or route revisions reject replay.
+
+TDD evidence: the first integration regression run had 15 failing cases; review then reproduced two inherited-route/idempotency failures and two cross-dialog/member failures before their fixes. The final focused backend run passed 55 tests, including 37 repository/service withdrawal regressions. Independent final review reported no remaining actionable finding in this flow.
+
+Frontend full verification: 330 Node tests, 4 shell scenarios and 20 Python tests passed; 0 failed, 5 Python cases skipped. Frontend TypeScript passed with no diagnostics. Logs: /private/tmp/aisee-merge-draft-frontend-check.log, /private/tmp/aisee-merge-draft-frontend-shell.log, /private/tmp/aisee-merge-draft-frontend-python.log, /private/tmp/aisee-merge-draft-frontend-types.log.
+
+The standalone extension is unchanged by this integration. No build, deployment, service restart or live database/social mutation was performed.

@@ -22,6 +22,7 @@ import {
 import { TERMINAL_SEND_INTENT_STATUSES, parseControlledDrain, handoverControlledIn, controlledDrainStateIn, controlledDrainAllowsIn, assertAutonomousAccountIn } from './send-mode-handover';
 import { isLegacyExecution } from './legacy-execution';
 import { canonicalControlledPlatform } from './controlled-platforms';
+import { readEngageConfigMetadata } from '../engage/engage-config-metadata';
 
 export const SEND_MODE_SYSTEM_KEY = 'sending.account_bound_enabled';
 export const SEND_MODE_ORGANIZATION_PREFIX = 'sending.organization_mode:';
@@ -775,6 +776,73 @@ export class SendModeService {
       initialPendingCount: this.pendingCount(eligible, effects) };
   }
 
+  /** Preserve configured automation across transport changes without selecting a new account. */
+  private async initializeAutomationOwnersIn(
+    tx: Prisma.TransactionClient, organizationId: string, userId?: string
+  ): Promise<number> {
+    const configs = await tx.engageConfig.findMany({ where: { organizationId, projectId: { not: null } } });
+    const owners = await tx.projectSendOwner.findMany({ where: { organizationId } });
+    const existing = new Set(owners.map(owner => `${owner.projectId}:${owner.action}`));
+    const missing: Array<{ projectId: string; action: 'POST' | 'REPLY' }> = [];
+    for (const config of configs) {
+      if (!config.projectId) continue;
+      const metadata = readEngageConfigMetadata(config);
+      const policies = Object.values(metadata.replyPolicies);
+      const actions: Array<'POST' | 'REPLY'> = [];
+      if (metadata.autoReplyEnabled || policies.some(policy => policy.autoReplyEnabled === true)) actions.push('REPLY');
+      if (metadata.publishingEnabled === true ||
+          (metadata.publishingEnabled === null && policies.some(policy => policy.publishingEnabled === true))) actions.push('POST');
+      for (const action of actions) {
+        if (!existing.has(`${config.projectId}:${action}`)) missing.push({ projectId: config.projectId, action });
+      }
+    }
+    if (!missing.length) return 0;
+    if (!userId) throw new ForbiddenException('AUTOMATION_POLICY_OWNER_REQUIRED');
+    const member = await this.memberIn(tx, organizationId, userId);
+    if (!['ADMIN', 'SUPERADMIN'].includes(member.role)) throw new ForbiddenException('ORGANIZATION_ADMIN_REQUIRED');
+    for (const { projectId, action } of missing) {
+      await tx.projectSendOwner.upsert({
+        where: { organizationId_projectId_action: { organizationId, projectId, action } },
+        create: { organizationId, projectId, action, userId }, update: {},
+      });
+    }
+    return missing.length;
+  }
+
+  /** Repair pre-fix cutovers using their recorded administrator, never an arbitrary member. */
+  async reconcileAutomationOwners(): Promise<number[]> {
+    const rows = await this.db.settings.findMany({ where: {
+      key: { startsWith: SEND_MODE_ORGANIZATION_PREFIX }, value: { path: ['mode'], equals: 'CONTROLLED' },
+    }, select: { key: true } });
+    const results: number[] = [];
+    for (const row of rows) {
+      const organizationId = row.key.slice(SEND_MODE_ORGANIZATION_PREFIX.length);
+      try {
+        results.push(await sendTransaction(this.db, async tx => {
+          const state = await this.lockIn(tx, organizationId);
+          if (state.mode !== 'CONTROLLED') return 0;
+          const setting = await tx.settings.findUnique({ where: { key: row.key } });
+          const config = this.parseOrganization(setting?.value);
+          const marker = this.parseReallocation(setting?.value);
+          const receipt = await tx.sendMutationReceipt.findFirst({ where: {
+            organizationId, operation: 'organization-send-mode',
+            result: { path: ['revision'], equals: state.revision },
+          }, orderBy: { createdAt: 'desc' } });
+          const result = receipt?.result as { configuredMode?: unknown; revision?: unknown } | undefined;
+          const userId = marker?.requestedByUserId ?? config.legacyDrain?.requestedByUserId ??
+            (result?.configuredMode === 'CONTROLLED' && result.revision === state.revision ? receipt?.userId : undefined);
+          return this.initializeAutomationOwnersIn(tx, organizationId, userId);
+        }));
+      } catch (error) {
+        const code = error instanceof Error && /^[A-Z][A-Z0-9_]{2,100}$/.test(error.message)
+          ? error.message : 'AUTOMATION_OWNER_RECONCILIATION_FAILED';
+        this.logger.warn(`Automation owner reconciliation blocked: organization=${organizationId} code=${code}`);
+        results.push(0);
+      }
+    }
+    return results;
+  }
+
   async reconcilePendingTransitions() {
     const rows = await this.db.settings.findMany({
       where: {
@@ -815,6 +883,10 @@ export class SendModeService {
               return false;
             }
             if (config.legacyDrain) {
+              // Restore configured owners before cleanup can discard their only
+              // administrator provenance. A failed repair rolls back cleanup too.
+              if (config.mode === 'CONTROLLED')
+                await this.initializeAutomationOwnersIn(tx, organizationId, config.legacyDrain.requestedByUserId);
               const reallocation = this.parseReallocation(setting?.value) ??
                 await this.newReallocationIn(tx, organizationId, config.legacyDrain.requestedByUserId);
               const { legacyDrain: _old, reallocation: _allocation, ...value } = setting!.value as Prisma.JsonObject;
@@ -827,6 +899,7 @@ export class SendModeService {
             if (!config.transition || !state.systemEnabled) return false;
             if (state.revision >= 2147483647)
               throw new ServiceUnavailableException('SEND_MODE_REVISION_EXHAUSTED');
+            await this.initializeAutomationOwnersIn(tx, organizationId, config.transition.requestedByUserId);
             const reallocation = await this.newReallocationIn(tx, organizationId, config.transition.requestedByUserId);
             await tx.settings.updateMany({ where: { key: row.key }, data: { value: sendJson({
               mode: 'CONTROLLED', revision: state.revision + 1,
@@ -1177,6 +1250,7 @@ export class SendModeService {
         ? (existingConfig.transition ? await this.normalizeTransitionIn(tx, organizationId, existingConfig.transition) : transition) : null);
       const reallocation = body.mode === 'CONTROLLED'
         ? this.parseReallocation(currentSetting?.value) ?? await this.newReallocationIn(tx, organizationId, userId) : null;
+      if (body.mode === 'CONTROLLED') await this.initializeAutomationOwnersIn(tx, organizationId, userId);
       await tx.settings.updateMany({
         where: { key: organizationSendModeKey(organizationId) },
         data: {

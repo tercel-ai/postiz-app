@@ -1,3 +1,4 @@
+import { AllowInactiveProject } from '@gitroom/nestjs-libraries/projects/allow-inactive-project.decorator';
 import { Headers, Optional } from '@nestjs/common';
 import { SendExecutionService } from '@gitroom/nestjs-libraries/extension/send-execution.service';
 import {
@@ -353,6 +354,7 @@ export class PostsController {
   }
 
   @Post('/')
+  @AllowInactiveProject()
   @ApiBody({ type: CreatePostDto })
   @ApiOkResponse({
     description: 'Creates one or more posts',

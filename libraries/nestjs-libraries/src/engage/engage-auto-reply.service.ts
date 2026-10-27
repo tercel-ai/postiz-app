@@ -199,6 +199,8 @@ export interface ReplyQueueStatusRow {
   platform: string;
   /** The platform-level managed-replies switch (replyPolicies[platform].autoReplyEnabled). */
   policyEnabled: boolean;
+  /** An execution prerequisite is missing even if every pacing gate is open. */
+  blockedReason?: string;
   /** Already generated, sitting in QUEUE, waiting for the extension to send it. */
   queuedCount: number;
   /** NEW opportunities that could still become a queued reply. */
@@ -464,6 +466,18 @@ export class EngageAutoReplyService implements OnModuleInit {
    * on a short cadence, so a trickle per poll spreads a day's target across the
    * day by construction — no separate scheduling clock needed.
    */
+  private async automaticReplyBlockReason(org: string, project: string): Promise<string | undefined> {
+    try {
+      if (!this._automaticSends) return 'AUTOMATION_OWNER_CHECK_FAILED';
+      await this._automaticSends.owner(org, project, 'REPLY');
+      return undefined;
+    } catch (error) {
+      const code = error instanceof Error ? error.message : '';
+      return ['AUTOMATION_POLICY_OWNER_REQUIRED', 'SEND_POLICY_OWNER_UNAVAILABLE'].includes(code)
+        ? code : 'AUTOMATION_OWNER_CHECK_FAILED';
+    }
+  }
+
   async getDueReplies(org: Organization, now = new Date(), options?: { coordinated: boolean }): Promise<DueReply[]> {
     const controlled = this._sendModes ? await this._sendModes.isControlled(org.id) : isAccountBoundSendingEnabled();
     const coordinated = options?.coordinated === true && controlled;
@@ -539,6 +553,14 @@ export class EngageAutoReplyService implements OnModuleInit {
     for (const config of configs) {
       const projectId = config.projectId!;
       const policies = (config.replyPolicies ?? {}) as Record<string, EngageReplyPolicy>;
+      if (coordinated) {
+        if (!Object.keys(policies).some(platform => (CONTROLLED_SEND_PLATFORMS as readonly string[]).includes(platform.toLowerCase()))) continue;
+        const blockedReason = await this.automaticReplyBlockReason(org.id, projectId);
+        if (blockedReason) {
+          this.logger.warn(`[reply-gate] ${projectId} SKIP ${blockedReason}`);
+          continue;
+        }
+      }
 
       // Data-driven: whichever platforms this project actually configured a
       // policy for, not a hardcoded pair. A platform absent from the map is
@@ -559,10 +581,6 @@ export class EngageAutoReplyService implements OnModuleInit {
         // Controlled producers must not charge generation for an unsupported write adapter.
         if (coordinated && !(CONTROLLED_SEND_PLATFORMS as readonly string[]).includes(platform)) continue;
         if (!coordinated && blockedPlatforms.includes(platform)) continue;
-        if (coordinated) {
-          try { await this._automaticSends!.owner(org.id, projectId, 'REPLY'); }
-          catch { continue; }
-        }
         if ((perPlatformCount.get(platform) ?? 0) >= pacing.maxPerPoll) continue;
 
         // Per-platform policy refines the project-level switch. Absent = the
@@ -851,6 +869,7 @@ export class EngageAutoReplyService implements OnModuleInit {
         this.getChannelDailyLimits(),
       ]);
 
+    const controlled = this._sendModes ? await this._sendModes.isControlled(org.id) : isAccountBoundSendingEnabled();
     const configs = await this._engageRepository.getAutoReplyConfigs(org.id);
     // Same per-platform memo as the gate: the warm-up clock belongs to the
     // account, so two projects on one platform must read one answer.
@@ -860,6 +879,7 @@ export class EngageAutoReplyService implements OnModuleInit {
     for (const config of configs) {
       const projectId = config.projectId!;
       const policies = (config.replyPolicies ?? {}) as Record<string, EngageReplyPolicy>;
+      const blockedReason = controlled ? await this.automaticReplyBlockReason(org.id, projectId) : undefined;
 
       for (const rawPlatform of Object.keys(policies)) {
         const platform = rawPlatform.toLowerCase();
@@ -982,6 +1002,7 @@ export class EngageAutoReplyService implements OnModuleInit {
           projectId,
           platform,
           policyEnabled,
+          ...(blockedReason ? { blockedReason } : {}),
           queuedCount,
           eligibleCount,
           withinActiveHours,

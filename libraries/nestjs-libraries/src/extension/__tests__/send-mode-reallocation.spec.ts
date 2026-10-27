@@ -1,7 +1,12 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, HttpException } from '@nestjs/common';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { setupSend } from './support/send-fixture';
 import { SendQuotaService } from '../send-quota.service';
+import {
+  ProjectInactiveException,
+  ProjectNotFoundException,
+  ProjectValidationUnavailableException,
+} from '../../projects/project.exception';
 
 beforeEach(() => vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true'));
 afterEach(() => vi.unstubAllEnvs());
@@ -107,6 +112,58 @@ it('isolates missing projects, invalid bindings and unsupported recurring roots,
     db.rows('post').find((row) => row.id === 'binding').sendIntentId
   ).toBeTruthy();
 });
+it.each([
+  [new ProjectNotFoundException(), 'PROJECT_NOT_FOUND'],
+  [new ProjectInactiveException(), 'PROJECT_INACTIVE'],
+  [new ProjectValidationUnavailableException(), 'PROJECT_VALIDATION_UNAVAILABLE'],
+])('preserves structured project failure %s while adopting valid work and recovering on retry', async (error, code) => {
+  const { db, service, post, projects } = fixture();
+  post('a-blocked', { projectId: 'blocked-project' });
+  post('z-ready');
+  const blocked = structuredClone(db.rows('post')[0]);
+  projects.assertProjectActive.mockImplementation(async (_org, project) => {
+    if (project === 'blocked-project') throw error;
+  });
+
+  expect(await service.reallocateUnsentLegacy('org', 'user')).toEqual([
+    { postId: 'a-blocked', code },
+  ]);
+  expect(db.rows('post').find(row => row.id === 'a-blocked')).toEqual(blocked);
+  expect(db.rows('post').find(row => row.id === 'z-ready').sendIntentId).toBeTruthy();
+  expect(db.rows('sendIntent')).toHaveLength(1);
+  expect(db.rows('sendExecution')).toHaveLength(0);
+
+  projects.assertProjectActive.mockResolvedValue(undefined);
+  expect(await service.reallocateUnsentLegacy('org', 'user')).toEqual([]);
+  expect(await service.reallocateUnsentLegacy('org', 'user')).toEqual([]);
+  expect(db.rows('post').find(row => row.id === 'a-blocked').sendIntentId).toBeTruthy();
+  expect(db.rows('sendIntent')).toHaveLength(2);
+  expect(db.rows('sendExecution')).toHaveLength(0);
+});
+
+it.each([
+  { code: 'Project not found', message: 'Internal provider details', expected: 'SEND_MODE_REALLOCATION_FAILED' },
+  { code: 'PROJECT_INACTIVE\nprivate details', message: 'Internal provider details', expected: 'SEND_MODE_REALLOCATION_FAILED' },
+  { code: 'PROJECT_INACTIVE\n', message: 'Internal provider details', expected: 'SEND_MODE_REALLOCATION_FAILED' },
+  { code: 'PROJECT_INACTIVE\r', message: 'Internal provider details', expected: 'SEND_MODE_REALLOCATION_FAILED' },
+  { code: 'A'.repeat(102), message: 'Internal provider details', expected: 'SEND_MODE_REALLOCATION_FAILED' },
+  { code: ['PROJECT_INACTIVE'], message: 'Internal provider details', expected: 'SEND_MODE_REALLOCATION_FAILED' },
+  { code: { value: 'PROJECT_INACTIVE' }, message: 'Internal provider details', expected: 'SEND_MODE_REALLOCATION_FAILED' },
+  { code: 404, message: 'SEND_BINDING_REQUIRED', expected: 'SEND_BINDING_REQUIRED' },
+  { code: 'PROJECT_INACTIVE', message: 'SEND_BINDING_REQUIRED', expected: 'PROJECT_INACTIVE' },
+])('sanitizes structured reallocation code $code and retains a safe message fallback', async ({ code, message, expected }) => {
+  const { db, service, post, projects } = fixture();
+  post('root');
+  const before = structuredClone(db.rows('post'));
+  projects.assertProjectActive.mockRejectedValue(new HttpException({ code, message }, 403));
+
+  expect(await service.reallocateUnsentLegacy('org', 'user')).toEqual([
+    { postId: 'root', code: expected },
+  ]);
+  expect(db.rows('post')).toEqual(before);
+  expect(db.rows('sendIntent')).toHaveLength(0);
+});
+
 it('does not convert claims, previously published content or partial threads', async () => {
   const { db, service, post } = fixture();
   post('claim', { releaseId: 'lease', claimedAt: new Date() });

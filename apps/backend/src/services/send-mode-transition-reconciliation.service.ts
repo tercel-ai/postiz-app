@@ -34,6 +34,7 @@ export class SendModeTransitionReconciliationService
       this.running = true;
       try {
         await this.modes.reconcilePendingTransitions();
+        await this.modes.reconcileAutomationOwners();
         for (const pending of await this.modes.pendingReallocations()) {
           try {
             const issues = await this.coordinator.reallocateUnsentLegacy(

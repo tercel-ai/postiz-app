@@ -9,6 +9,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   Injectable,
   NotFoundException,
   ServiceUnavailableException,
@@ -334,9 +335,13 @@ export class SendCoordinatorService {
           ...(root.integrationId ? { explicitIntegrationId: root.integrationId } : {}),
         });
       } catch (error) {
-        const message = error instanceof Error ? error.message : '';
-        issues.push({ postId: root.id, code: /^[A-Z][A-Z0-9_]{2,100}$/.test(message)
-          ? message : 'SEND_MODE_REALLOCATION_FAILED' });
+        const response = error instanceof HttpException ? error.getResponse() : null;
+        const responseCode = response && typeof response === 'object'
+          ? (response as { code?: unknown }).code : undefined;
+        const code = [responseCode, error instanceof Error ? error.message : undefined].find(
+          (value): value is string => typeof value === 'string' && value === value.trim() && /^[A-Z][A-Z0-9_]{2,100}$/.test(value)
+        );
+        issues.push({ postId: root.id, code: code ?? 'SEND_MODE_REALLOCATION_FAILED' });
       }
     }
     return issues;

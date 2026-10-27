@@ -6,6 +6,7 @@ describe('sending mode transition reconciliation lifecycle', () => {
   it('runs on boot and every fifteen seconds without an open UI and stops on shutdown', async () => {
     vi.useFakeTimers();
     const modes = {
+      reconcileAutomationOwners: vi.fn().mockResolvedValue([]),
       reconcilePendingTransitions: vi.fn().mockResolvedValue([]),
       pendingReallocations: vi.fn().mockResolvedValue([]),
     };
@@ -36,6 +37,7 @@ describe('sending mode transition reconciliation lifecycle', () => {
     let complete!: () => void;
     const modes = {
       pendingReallocations: vi.fn().mockResolvedValue([]),
+      reconcileAutomationOwners: vi.fn().mockResolvedValue([]),
       reconcilePendingTransitions: vi.fn(
         () =>
           new Promise<void>((resolve) => {
@@ -59,6 +61,7 @@ describe('sending mode transition reconciliation lifecycle', () => {
   it('continues mode settlement and reallocation while identity verification is stalled', async () => {
     vi.useFakeTimers();
     const modes = {
+      reconcileAutomationOwners: vi.fn().mockResolvedValue([]),
       reconcilePendingTransitions: vi.fn().mockResolvedValue([]),
       pendingReallocations: vi
         .fn()
@@ -95,6 +98,7 @@ describe('sending mode transition reconciliation lifecycle', () => {
   it('runs identity repair independently when mode reconciliation fails', async () => {
     vi.useFakeTimers();
     const modes = {
+      reconcileAutomationOwners: vi.fn().mockResolvedValue([]),
       reconcilePendingTransitions: vi
         .fn()
         .mockRejectedValue(new Error('settlement unavailable')),
@@ -122,6 +126,7 @@ it('reallocates pending organizations after mode reconciliation and persists the
   vi.useFakeTimers();
   const issues = [{ postId: 'root', code: 'SEND_PROJECT_REQUIRED' }];
   const modes = {
+    reconcileAutomationOwners: vi.fn().mockResolvedValue([]),
     reconcilePendingTransitions: vi.fn().mockResolvedValue([]),
     pendingReallocations: vi
       .fn()
@@ -137,6 +142,8 @@ it('reallocates pending organizations after mode reconciliation and persists the
   );
   service.onApplicationBootstrap();
   await vi.advanceTimersByTimeAsync(0);
+  expect(modes.reconcileAutomationOwners).toHaveBeenCalledTimes(1);
+  expect(modes.reconcileAutomationOwners.mock.invocationCallOrder[0]).toBeLessThan(modes.pendingReallocations.mock.invocationCallOrder[0]);
   expect(coordinator.reallocateUnsentLegacy).toHaveBeenCalledWith(
     'org',
     'admin'
@@ -150,6 +157,7 @@ it('reallocates pending organizations after mode reconciliation and persists the
 it('keeps processing other organizations when one reallocation fails', async () => {
   vi.useFakeTimers();
   const modes = {
+    reconcileAutomationOwners: vi.fn().mockResolvedValue([]),
     reconcilePendingTransitions: vi.fn().mockResolvedValue([]),
     pendingReallocations: vi.fn().mockResolvedValue([
       { organizationId: 'broken', userId: 'admin' },

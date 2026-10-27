@@ -1,3 +1,4 @@
+import { ALLOW_INACTIVE_PROJECT } from '@gitroom/nestjs-libraries/projects/allow-inactive-project.decorator';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PostsController } from '../posts.controller';
 
@@ -48,6 +49,13 @@ describe('PostsController.createPost', () => {
     vi.clearAllMocks();
     mocks = createMocks();
     controller = createController(mocks);
+  });
+
+  it('delegates existing draft saves through the original authenticated post route', async () => {
+    mocks.postsService.mapTypeToPost.mockResolvedValue({ type: 'draft', posts: [] });
+    await controller.createPost(fakeOrg, fakeUser, { type: 'draft' });
+    expect(mocks.postsService.createPost).toHaveBeenCalledWith('org-1', { type: 'draft', posts: [] }, 'user-1');
+    expect(Reflect.getMetadata(ALLOW_INACTIVE_PROJECT, PostsController.prototype.createPost)).toBe(true);
   });
 
   it('passes userId to PostsService.createPost', async () => {

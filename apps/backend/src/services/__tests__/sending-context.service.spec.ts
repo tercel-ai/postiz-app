@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SendingContextService } from '../sending-context.service';
 import { SendingContextController } from '../../api/routes/sending-context.controller';
+import { ExtensionNodeService } from '@gitroom/nestjs-libraries/extension/extension-node.service';
 import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { RequestMethod } from '@nestjs/common';
 
@@ -30,6 +31,7 @@ function setup() {
     projectSendBinding: { findMany: vi.fn().mockResolvedValue([{ platform: 'x', action: 'POST', integrationId: 'x1', revision: 7 }]) },
     organizationSendBinding: { findMany: vi.fn().mockResolvedValue([]) },
     extensionNode: { findMany: vi.fn().mockResolvedValue([structuredClone(node)]) },
+    extensionNodeSession: { findMany: vi.fn().mockResolvedValue([]) },
     $transaction: vi.fn(),
   };
   db.$transaction.mockImplementation(work => work(db));
@@ -78,16 +80,37 @@ describe('shared Project, Post and Reply sending context', () => {
     expect(result.accounts[0].actions.POST.canSelect).toBe(true);
     expect(result.accounts[0].actions.POST.availability).toBe(status === 'OFFLINE' ? 'WAITING_FOR_TERMINAL' : 'SESSION_UNVERIFIED');
   });
-  it('exposes unidentified plugin sessions without making synthetic IDs selectable', async () => {
+  it('omits unidentified sessions from account choices', async () => {
     const { service, db } = setup();
     const reported = structuredClone(node);
     Object.assign(reported.sessions[0], { integrationId: null, verificationStatus: 'UNKNOWN', accountIdentity: { handle: 'new-login' } });
     db.extensionNode.findMany.mockResolvedValue([reported]);
     const result = await service.get('org', 'user', 'project');
-    expect(result.accounts).toHaveLength(2);
-    expect(result.accounts[1]).toMatchObject({ key: 'session:session', integrationId: null, detectedByExtension: true,
-      actions: { POST: { canSelect: false, reason: 'ACCOUNT_IDENTITY_UNRESOLVED' }, REPLY: { canSelect: false } } });
+    expect(result.accounts).toHaveLength(1);
+    expect(result.accounts[0]).toMatchObject({ key: 'x1', integrationId: 'x1', detectedByExtension: false, terminals: [] });
     expect(result.accounts[0].actions.POST.availability).toBe('WAITING_FOR_TERMINAL');
+  });
+  it.each([null, 'deleted-integration'])('does not duplicate a Medium account for an unlinked session with integrationId %s', async integrationId => {
+    const { service, db } = setup();
+    db.integration.findMany.mockResolvedValue([{ ...account, providerIdentifier: 'medium',
+      identityNamespace: 'medium.user_id', name: 'qi1194085859', profile: 'qi1194085859' }]);
+    const reported = structuredClone(node);
+    Object.assign(reported.sessions[0], { platform: 'medium', integrationId, verificationStatus: 'UNKNOWN',
+      accountIdentity: { id: '123', namespace: 'medium.user_id', handle: 'qi1194085859' } });
+    db.extensionNode.findMany.mockResolvedValue([reported]);
+    db.integrationProject.findMany.mockResolvedValue([]);
+    const result = await service.get('org', 'user', 'project');
+    expect(result.accounts).toHaveLength(1);
+    expect(result.accounts[0]).toMatchObject({ integrationId: 'x1', name: 'qi1194085859',
+      detectedByExtension: false, terminals: [], actions: { POST: { canSelect: false, reason: 'ACCOUNT_NOT_ASSIGNED' } } });
+  });
+  it('returns no account choices when only unresolved sessions exist', async () => {
+    const { service, db } = setup();
+    db.integration.findMany.mockResolvedValue([]);
+    const reported = structuredClone(node);
+    Object.assign(reported.sessions[0], { integrationId: null, verificationStatus: 'UNKNOWN' });
+    db.extensionNode.findMany.mockResolvedValue([reported]);
+    expect((await service.get('org', 'user', 'project')).accounts).toEqual([]);
   });
   it('does not associate a session by matching handle when stable identity differs', async () => {
     const { service, db } = setup();
@@ -95,8 +118,57 @@ describe('shared Project, Post and Reply sending context', () => {
     reported.sessions[0].accountIdentity.id = 'another-id';
     db.extensionNode.findMany.mockResolvedValue([reported]);
     const result = await service.get('org', 'user', 'project');
+    expect(result.accounts).toHaveLength(1);
     expect(result.accounts[0].terminals).toEqual([]);
-    expect(result.accounts[1].integrationId).toBeNull();
+  });
+  it.each([
+    ['stable ID', { accountIdentity: { id: '456', namespace: 'x.rest_id', handle: 'alice' } }],
+    ['namespace', { accountIdentity: { id: '123', namespace: 'x.handle', handle: 'alice' } }],
+    ['missing identity', { accountIdentity: {} }],
+    ['missing association', { integrationId: null }],
+    ['wrong association', { integrationId: 'other' }],
+    ['platform', { platform: 'medium' }],
+  ])('uses the same strict terminal identity rule in both APIs for a mismatched %s', async (_label, changes) => {
+    const { service, db } = setup();
+    const reported = structuredClone(node);
+    Object.assign(reported.sessions[0], changes);
+    db.extensionNode.findMany.mockResolvedValue([reported]);
+    db.extensionNodeSession.findMany.mockResolvedValue([
+      { ...reported.sessions[0], integration: account, extensionNode: reported },
+    ]);
+    const context = await service.get('org', 'user', 'project');
+    const views = await new ExtensionNodeService(db as any).accountViews('org', 'user', [account]);
+    expect(context.accounts[0].terminals).toEqual([]);
+    expect(views.get(account.id)).toMatchObject({ terminals: [], sendAvailability: 'WAITING_FOR_TERMINAL' });
+  });
+  it.each(['VERIFIED', 'STALE', 'UNKNOWN', 'LOGGED_OUT', 'UNSUPPORTED'])('preserves the same %s session status in both APIs', async status => {
+    const { service, db } = setup();
+    const reported = structuredClone(node);
+    reported.sessions[0].verificationStatus = status;
+    db.extensionNode.findMany.mockResolvedValue([reported]);
+    db.extensionNodeSession.findMany.mockResolvedValue([
+      { ...reported.sessions[0], integration: account, extensionNode: reported },
+    ]);
+    const context = await service.get('org', 'user', 'project');
+    const views = await new ExtensionNodeService(db as any).accountViews('org', 'user', [account]);
+    expect(views.get(account.id)?.terminals[0].sessionStatus).toBe(status);
+    expect(views.get(account.id)?.sendAvailability).toBe(context.accounts[0].actions.POST.availability);
+    expect(context.accounts[0].terminals[0].sessionStatus).toBe(status);
+    expect(JSON.stringify(views.get(account.id))).not.toContain('secret');
+  });
+  it('shows expired identity evidence as stale in both APIs without renewing it from an online heartbeat', async () => {
+    const { service, db } = setup();
+    const reported = structuredClone(node);
+    reported.sessions[0].verificationExpiresAt = new Date(now.getTime() - 1);
+    db.extensionNode.findMany.mockResolvedValue([reported]);
+    db.extensionNodeSession.findMany.mockResolvedValue([
+      { ...reported.sessions[0], integration: account, extensionNode: reported },
+    ]);
+    const context = await service.get('org', 'user', 'project');
+    const views = await new ExtensionNodeService(db as any).accountViews('org', 'user', [account]);
+    expect(views.get(account.id)).toMatchObject({ sendAvailability: 'SESSION_UNVERIFIED',
+      terminals: [{ connectionStatus: 'ONLINE', sessionStatus: 'STALE', verificationExpiresAt: reported.sessions[0].verificationExpiresAt }] });
+    expect(context.accounts[0].terminals[0]).toMatchObject({ connectionStatus: 'ONLINE', sessionStatus: 'STALE' });
   });
   it.each(['reddit', 'linkedin', 'medium', 'quora', 'hackernews', 'devto'])('includes %s platform actors in the same selection shape', async platform => {
     const { service, db } = setup();

@@ -1,8 +1,8 @@
 import { SendModeService } from '../../../extension/send-mode.service';
-import { BadRequestException, ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { isLegacyExecution, legacyExecutionWhere } from '../../../extension/legacy-execution';
 import { PrismaRepository, PrismaTransaction } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
-import { sendTransaction } from '../../../extension/send-coordination.utils';
+import { sendHash, sendTransaction } from '../../../extension/send-coordination.utils';
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { Post as PostBody } from '@gitroom/nestjs-libraries/dtos/posts/create.post.dto';
 import { APPROVED_SUBMIT_FOR_ORDER, Post, Prisma, PublishMethod, State } from '@prisma/client';
@@ -2197,15 +2197,16 @@ export class PostsRepository {
     projectId?: string,
     publishMethod?: PublishMethod,
     tx?: Prisma.TransactionClient,
-    admissionMode?: 'AUTONOMOUS' | 'CONTROLLED'
-  ): Promise<{ previousPost: string | undefined; posts: Post[] }> {
+    admissionMode?: 'AUTONOMOUS' | 'CONTROLLED',
+    draftContext?: { userId?: string; existingOnly?: boolean; requestId?: string }
+  ): Promise<{ previousPost: string | undefined; posts: Post[]; withdrewSchedule?: boolean }> {
     let restrictToUnclaimedDrafts = false;
     let protectedLegacyIds: string[] = [];
     if (this._sendModes && (admissionMode || state === 'draft')) {
       if (!tx) {
         if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
         return sendTransaction(this._tx.model, client => this.createOrUpdatePost(
-          state, orgId, date, body, tags, inter, source, projectId, publishMethod, client, admissionMode
+          state, orgId, date, body, tags, inter, source, projectId, publishMethod, client, admissionMode, draftContext
         ));
       }
       const mode = admissionMode === 'CONTROLLED'
@@ -2216,21 +2217,108 @@ export class PostsRepository {
       if (!admissionMode && state === 'draft') {
         restrictToUnclaimedDrafts = !!(mode.transition || mode.legacyDrain);
       }
-      if (mode.transition || mode.legacyDrain)
+      if (state === 'draft' || mode.transition || mode.legacyDrain)
         protectedLegacyIds = await this._sendModes.activeLegacyPostIdsIn(tx, orgId);
     }
     if ((body.accountSelectionMode === 'INHERIT' && body.integration?.id) ||
         (body.accountSelectionMode === 'EXPLICIT' && !body.integration?.id))
       throw new BadRequestException('SEND_ACCOUNT_SELECTION_CONFLICT');
-    const clearSelection = body.accountSelectionMode === 'INHERIT' && body.value.some((value) => !!value.id);
+    let clearSelection = body.accountSelectionMode === 'INHERIT' && body.value.some((value) => !!value.id);
     if (clearSelection && (!Number.isSafeInteger(body.expectedRouteRevision) ||
         body.expectedRouteRevision! < 0 || body.expectedRouteRevision! > 2147483646))
       throw new BadRequestException('SEND_ROUTE_REVISION_REQUIRED');
     if (clearSelection && !tx) {
       if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
       return sendTransaction(this._tx.model, (client) => this.createOrUpdatePost(
-        state, orgId, date, body, tags, inter, source, projectId, publishMethod, client, admissionMode
+        state, orgId, date, body, tags, inter, source, projectId, publishMethod, client, admissionMode, draftContext
       ));
+    }
+    let withdrewSchedule = false;
+    let withdrawalReceipt: {
+      key: { organizationId: string; userId: string; operation: string; requestId: string };
+      requestHash: string;
+    } | undefined;
+    const withdrawalIds = new Set<string>();
+    if (state === 'draft' && !admissionMode && tx) {
+      const rootId = body.value[0]?.id;
+      const root = rootId ? await tx.post.findFirst({
+        where: { id: rootId, organizationId: orgId },
+      }) : null;
+      if (root && restrictToUnclaimedDrafts && (root.sendIntentId || root.releaseId ||
+          root.releaseURL || root.claimedAt || protectedLegacyIds.includes(root.id)))
+        throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
+      const requestHash = sendHash({ date, body: { ...body, itemKey: undefined }, tags, inter, source, projectId, publishMethod });
+      const receiptKey = root && draftContext?.userId ? {
+        organizationId: orgId, userId: draftContext.userId,
+        operation: `draft-withdrawal:${root.id}`,
+        requestId: draftContext.requestId ?? requestHash,
+      } : undefined;
+      let receipt = receiptKey ? await tx.sendMutationReceipt.findUnique({
+        where: { organizationId_userId_operation_requestId: receiptKey },
+      }) : null;
+      if (receipt && receipt.requestHash !== requestHash)
+        throw new ConflictException('SEND_IDEMPOTENCY_CONFLICT');
+      if (!receipt && root?.state === 'DRAFT' && receiptKey) {
+        // Independently opened dialogs have distinct request IDs for the same withdrawal.
+        const matches = await tx.sendMutationReceipt.findMany({ where: {
+          organizationId: orgId, operation: receiptKey.operation, requestHash,
+        } });
+        receipt = matches.map(match => ({
+          receipt: match,
+          revision: (match.result as { segments?: { revision: number }[] }).segments?.[0]?.revision ?? -1,
+        })).sort((left, right) => right.revision - left.revision)[0]?.receipt ?? null;
+      }
+      if (draftContext?.existingOnly || (root && root.state !== 'DRAFT') || receipt) {
+        if (!root || root.deletedAt || root.parentPostId ||
+            !['QUEUE', 'DRAFT'].includes(root.state) ||
+            (projectId !== undefined && root.projectId !== projectId) ||
+            (body.group && body.group !== root.group))
+          throw new ConflictException('LEGACY_SCHEDULE_NOT_CANCELLABLE');
+        const member = draftContext?.userId ? await tx.userOrganization.findUnique({
+          where: { userId_organizationId: { userId: draftContext.userId, organizationId: orgId } },
+        }) : null;
+        if (!member || member.disabled) throw new ForbiddenException('SEND_POLICY_OWNER_REQUIRED');
+        const groupPosts = await tx.post.findMany({
+          where: { organizationId: orgId, group: root.group, deletedAt: null },
+        });
+        const chain = [root];
+        while (true) {
+          const children = groupPosts.filter(post => post.parentPostId === chain[chain.length - 1].id);
+          if (!children.length) break;
+          if (children.length !== 1 || chain.some(post => post.id === children[0].id))
+            throw new ConflictException('INVALID_SEND_CHAIN');
+          chain.push(children[0]);
+        }
+        if (chain.length !== body.value.length || chain.some((post, index) =>
+            post.id !== body.value[index].id || post.projectId !== root.projectId ||
+            post.providerIdentifier !== root.providerIdentifier ||
+            !['QUEUE', 'DRAFT'].includes(post.state) || !isLegacyExecution(post.executionProtocol) ||
+            post.sendIntentId || post.releaseId || post.releaseURL || post.claimedAt ||
+            protectedLegacyIds.includes(post.id)))
+          throw new ConflictException('LEGACY_SCHEDULE_NOT_CANCELLABLE');
+        if (receipt) {
+          const saved = receipt.result as { segments?: { id: string; revision: number; routeRevision: number }[] };
+          if (saved.segments?.length !== chain.length || chain.some((post, index) =>
+              post.state !== 'DRAFT' || post.id !== saved.segments![index].id ||
+              post.contentRevision !== saved.segments![index].revision ||
+              post.routeRevision !== saved.segments![index].routeRevision))
+            throw new ConflictException('SEND_DRAFT_CHANGED');
+          return { previousPost: root.id, posts: chain, withdrewSchedule: true };
+        }
+        if (clearSelection) {
+          // An unchanged inherited route is not an account-clear mutation.
+          if (chain.some(post => post.integrationId || post.routeRevision !== body.expectedRouteRevision))
+            throw new ConflictException('SEND_DRAFT_ROUTE_CHANGED');
+          clearSelection = false;
+        }
+        withdrawalReceipt = { key: receiptKey!, requestHash };
+        // Compare every segment in the same transaction as the draft write.
+        for (const post of chain) withdrawalIds.add(post.id);
+        withdrewSchedule = true;
+        body = { ...body, group: root.group };
+      }
+    } else if (draftContext?.existingOnly) {
+      throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
     }
     const posts: Post[] = [];
     // Reuse existing group when editing, new UUID only for fresh posts.
@@ -2241,7 +2329,7 @@ export class PostsRepository {
       const id = value.id || uuidv4();
       if (value.id && protectedLegacyIds.includes(id))
         throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
-      if (restrictToUnclaimedDrafts && value.id) {
+      if (restrictToUnclaimedDrafts && value.id && !withdrawalIds.has(id)) {
         const existing = await tx!.post.findFirst({ where: { id, organizationId: orgId } });
         if (existing && (existing.state !== 'DRAFT' || existing.sendIntentId || existing.releaseId || protectedLegacyIds.includes(existing.id)))
           throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
@@ -2298,7 +2386,7 @@ export class PostsRepository {
         content: value.content,
         delay: value.delay || 0,
         group: uuid,
-        intervalInDays: inter ? +inter : null,
+        intervalInDays: withdrewSchedule ? null : inter ? +inter : null,
         ...(type === 'create' ? { source: source || 'calendar' } : {}),
         approvedSubmitForOrder: APPROVED_SUBMIT_FOR_ORDER.NO,
         state: state === 'draft' ? ('DRAFT' as const) : ('QUEUE' as const),
@@ -2361,7 +2449,12 @@ export class PostsRepository {
           where: {
             id,
             organizationId: orgId,
-            ...(restrictToUnclaimedDrafts ? { state: 'DRAFT', releaseId: null } : {}),
+            ...(restrictToUnclaimedDrafts && !withdrawalIds.has(id) ? { state: 'DRAFT', releaseId: null } : {}),
+            ...(withdrawalIds.has(id) ? {
+              state: { in: ['QUEUE', 'DRAFT'] }, deletedAt: null,
+              releaseId: null, releaseURL: null, claimedAt: null,
+              projectId: projectId ?? undefined, group: uuid,
+            } : {}),
             ...(clearSelection ? {
               state: 'DRAFT', sendIntentId: null, releaseId: null, routeRevision: body.expectedRouteRevision,
             } : admissionMode === 'CONTROLLED'
@@ -2441,7 +2534,13 @@ export class PostsRepository {
       )?.id!
       : undefined;
 
-    return { previousPost, posts };
+    if (withdrawalReceipt) {
+      await tx!.sendMutationReceipt.create({ data: {
+        ...withdrawalReceipt.key, requestHash: withdrawalReceipt.requestHash,
+        result: { segments: posts.map(post => ({ id: post.id, revision: post.contentRevision, routeRevision: post.routeRevision })) },
+      } });
+    }
+    return { previousPost, posts, withdrewSchedule };
   }
 
   async submit(id: string, order: string, buyerOrganizationId: string) {

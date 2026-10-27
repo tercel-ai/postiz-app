@@ -46,3 +46,9 @@ See [plan.md](../plan.md) § Design Decisions: State Machine and Extension Proto
 ## Additional Admission Boundary
 
 Wrap legacy server post/comment/plug/finisher platform writes with existing receipt-backed autonomousEffect admission. Persist AUTHORIZED before invoking the platform outside retryable transactions. Preserve UNKNOWN on errors/crash; immutable business keys, live Post provenance and unresolved-root checks prevent stale workflow snapshots or rescheduling from creating another send right. Administrators may audit pending receipts through the typed list/resolve API; NOT_SUBMITTED never automatically retries. Verify callbacks run once under concurrent retries and mode changes.
+
+## Automation continuity regression coverage
+
+A mode switch must initialize missing configured POST and REPLY owners atomically from its authenticated administrator. Earlier cutovers recover from durable switch provenance before reallocation clears that provenance. Initialization is idempotent and preserves existing owners and all automation settings. Missing provenance or revoked membership must remain blocked, with an actionable queue status. Reallocation preserves sanitized structured project error codes, keeps failed content intact, and continues unrelated roots.
+
+Blocked inactive-project legacy schedules must remain withdrawable without reactivating sending. The existing POST /posts draft-save flow validates active membership and the complete unchanged legacy thread inside the mode-locked transaction, fences reallocation and legacy claims, and rejects submitted/coordinated/quarantined work. Inactive projects allow existing saved content only. All Move to Drafts callers use the original payload and verify its root acknowledgement before showing success.

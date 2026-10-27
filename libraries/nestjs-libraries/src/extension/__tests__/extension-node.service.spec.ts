@@ -375,6 +375,8 @@ describe('node-scoped session reports', () => {
       {
         integrationId: 'account',
         platform: 'x',
+        accountIdentity: { id: '123', namespace: 'x.rest_id' },
+        integration: { id: 'account', providerIdentifier: 'x', internalId: '123', identityNamespace: 'x.rest_id' },
         verificationStatus: 'VERIFIED',
         verificationExpiresAt: new Date(Date.now() + 30_000),
         verifiedAt: new Date(),
