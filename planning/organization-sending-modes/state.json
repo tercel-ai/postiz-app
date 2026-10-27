@@ -1,7 +1,7 @@
 {
   "feature": "organization-sending-modes",
   "created": "2026-10-20T02:39:20Z",
-  "updated": "2026-10-27T09:34:15.344749Z",
+  "updated": "2026-10-27T10:11:29.026275Z",
   "status": "completed",
   "execution_order": [
     "mode-configuration",
@@ -172,6 +172,37 @@
         "deployment": "local only"
       },
       "fixed_at": "2026-10-27T09:34:15.344749Z"
+    },
+    {
+      "bug": "Merge legacy schedule withdrawal safeguards into the original draft-save API and remove the extra route",
+      "root_cause_level": 1,
+      "root_cause": "The extra cancellation route duplicated the normal draft-save API. Moving its checks without preserving inherited routes and semantic withdrawal receipts broke accountless withdrawal and repeated requests.",
+      "fixed_files": [
+        "apps/backend/src/api/routes/posts.controller.ts",
+        "apps/backend/src/api/routes/__tests__/posts.controller.createPost.spec.ts",
+        "libraries/nestjs-libraries/src/database/prisma/posts/posts.service.ts",
+        "libraries/nestjs-libraries/src/database/prisma/posts/posts.repository.ts",
+        "libraries/nestjs-libraries/src/database/prisma/posts/__tests__/posts.repository.draft-withdrawal.spec.ts",
+        "libraries/nestjs-libraries/src/database/prisma/posts/__tests__/posts.service.projectId.spec.ts"
+      ],
+      "commits": [],
+      "doc_updates": [
+        "docs/organization-sending-modes.md",
+        "planning/organization-sending-modes/tasks/backend-routing.md",
+        "planning/organization-sending-modes/verification.md"
+      ],
+      "tests": {
+        "passed": 4894,
+        "failed": 0,
+        "skipped": 96
+      },
+      "frontend_tests": {
+        "passed": 354,
+        "failed": 0,
+        "skipped": 5
+      },
+      "typecheck": "Backend and frontend passed",
+      "fixed_at": "2026-10-27T10:11:29.026275Z"
     }
   ],
   "metadata": {

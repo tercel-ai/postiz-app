@@ -141,3 +141,5 @@ TDD evidence: the first integration regression run had 15 failing cases; review 
 Frontend full verification: 330 Node tests, 4 shell scenarios and 20 Python tests passed; 0 failed, 5 Python cases skipped. Frontend TypeScript passed with no diagnostics. Logs: /private/tmp/aisee-merge-draft-frontend-check.log, /private/tmp/aisee-merge-draft-frontend-shell.log, /private/tmp/aisee-merge-draft-frontend-python.log, /private/tmp/aisee-merge-draft-frontend-types.log.
 
 The standalone extension is unchanged by this integration. No build, deployment, service restart or live database/social mutation was performed.
+
+Final complete backend verification after the last source edit: **4,894 passed, 0 failed, 96 skipped**; DATABASE_URL/REDIS_URL empty, frozen extension excluded. JSON: /private/tmp/aisee-merge-draft-backend-verified.json; full output: /private/tmp/aisee-merge-draft-backend-verified.log. Backend production TypeScript passed with no diagnostics (/private/tmp/aisee-merge-draft-types-verified.log). Infrastructure skips do not supply live PostgreSQL or provider acceptance evidence.
