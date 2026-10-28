@@ -7,11 +7,12 @@ import { IntegrationRepository } from '../integration.repository';
 function setup() {
   const integration = {
     findFirst: vi.fn().mockResolvedValue(null),
+    findMany: vi.fn().mockResolvedValue([]),
     upsert: vi.fn().mockResolvedValue({ id: 'account' }),
     updateMany: vi.fn(),
   };
   const repository = new IntegrationRepository(
-    { model: { integration } } as any,
+    { model: { integration, $transaction: vi.fn(async work => work({ integration })) } } as any,
     {} as any,
     {} as any,
     {} as any,
@@ -131,6 +132,20 @@ function stableFixture() {
   return {db,repository,oauth,plugin};
 }
 describe('OAuth and extension identity convergence',()=>{
+  it('persists canonical OAuth refresh credentials without merging an unchanged-profile duplicate', async () => {
+    const f = stableFixture();
+    const session = await f.plugin();
+    f.db.rows('integration')[0].token = 'expired-token';
+    f.db.seed('integration', {
+      id: 'preexisting-duplicate', organizationId: 'org', providerIdentifier: 'x', type: 'social',
+      identityNamespace: 'legacy', internalId: 'old-handle', profile: '@ALICE', token: 'other-token',
+    });
+    expect(await f.oauth()).toMatchObject({ id: session.account!.id,
+      token: 'new-oauth', refreshToken: 'new-refresh', identityNamespace: 'x.rest_id' });
+    expect(f.db.rows('integration')).toHaveLength(2);
+    expect(f.db.rows('integration').find(row => row.id === 'preexisting-duplicate').token)
+      .toBe('other-token');
+  });
   it('attaches OAuth credentials to the existing plugin row and retains project/post references',async()=>{
     const f=stableFixture();const session=await f.plugin();
     f.db.seed('post',{id:'historic',integrationId:session.account!.id});

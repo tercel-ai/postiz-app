@@ -3,6 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { Integration, Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma/prisma.service';
 import { sendHash, sendTransaction } from './send-coordination.utils';
+import { hasIntegrationProfileConflict, isNewIntegrationProfileClaim } from '../database/prisma/integrations/integration-profile.utils';
 
 export interface StableSocialIdentity {
   platform: string;
@@ -136,6 +137,13 @@ export class SocialAccountIdentityService {
     )
       return { blockCode: 'ACCOUNT_IDENTITY_UNRESOLVED' };
     const account = matches[0];
+    const profile = options.handle?.trim() || account?.profile;
+    if (isNewIntegrationProfileClaim(account, {
+      organizationId: org, providerIdentifier: platform, type: account?.type ?? 'social',
+      profile, deletedAt: null,
+    }) && await hasIntegrationProfileConflict(
+      tx, org, platform, profile, account?.id
+    )) return { blockCode: 'ACCOUNT_PROFILE_CONFLICT' };
     const recovery =
       account && (account.deletedAt || account.identityNamespace === 'legacy')
         ? {

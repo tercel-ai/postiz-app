@@ -24,7 +24,7 @@ REQUIRED / OPTIONAL 是 CONTROLLED 内部的账号预选政策：REQUIRED 要求
 2. 需要多节点：系统管理员先开放系统能力；组织管理员在最新版插件 Options 的 Organization sending mode 中选择 **Use controlled sending**。
 3. 插件自动使用已有 Node ID 注册并上报当前平台账号。Options 的 **Check / retry node registration** 显示 HTTP 状态和错误码；失败时排查该错误，不自动转自主发送。
 4. 设置 Project 默认账号，或在单条 Post/Reply 指定账号。Organization 全局默认可不设置。REQUIRED 下没有可解析账号会要求补选；OPTIONAL 下可等待首次合格领取绑定。
-5. 需要退回自主发送：先完成/处理阻塞任务，再由管理员点击 **Use autonomous sending**。失败时依据返回的 blockers 处理，不通过关闭系统能力强行降级。
+5. 需要退回自主发送：由管理员点击 **Use autonomous sending**，再查看 `controlledDrain` 的收尾进度和问题。不能安全交接的任务继续保留保护；不通过关闭系统能力强行降级。
 
 aisee-app 的 Organization 模式入口和业务页面接入仍需前端按文档实现；本次已提供后端 API 和插件 Options 入口。
 
@@ -72,6 +72,15 @@ flowchart TD
 | 系统关闭 | 已受控组织暂停新工作；允许迟到结果继续结算，不清理未知结果或账号锁。 |
 
 新模式与任务收尾独立提交。旧后台可能仍返回 HTTP 409 `SEND_MODE_SWITCH_UNSAFE`；新后台不再要求等完整组织队列结束才能反向切换。系统不取消已领取任务、不清锁、不退款、不复制任务，也不声称超时意味着平台没有提交。
+
+### 队列和正在发送的帖子
+
+- **AUTONOMOUS → CONTROLLED**：尚未开始的旧 `QUEUE` 帖子进入重新分配流程，按原账号和日期转入受控发送。已经开始的帖子、存在自主发送凭证的工作，以及已开始 thread 的相关段落保留原执行路径，通过 `legacyDrain` 收尾或等待结果核实。重新分配可能因账号、项目或绑定等问题受阻；通过 `GET /sending/mode` 的 `reallocation.remainingCount`、`blockedCount` 和 `issues` 查看进度及原因。
+- **CONTROLLED → AUTONOMOUS**：没有执行历史、账号信息完整且满足安全交接条件的草稿和队列帖子转入自主路径；原 Intent 标记为 `HANDED_OVER`，Post 保留账号、内容和日期。已有执行历史的任务保留原受控路径。无法安全交接的任务继续受保护，原因见 `controlledDrain.issues`；例如插件发送的 LinkedIn 公司账号队列暂不支持交接。
+
+插件的发送如果已取得后端许可，模式切换不会主动中断该次发送；插件继续执行并上报结果。反向切换后，插件会恢复本地保存的受控执行记录和待上报结果；收尾期间不领取全新的普通受控任务，未完成的领取请求可按原请求恢复。如果切换先于发送许可发生，新的发送可能被拒绝或延后，实际结果以准入和授权检查为准。
+
+平台请求发出后若插件、网络或平台响应中断，结果可能为 `UNKNOWN`。不能仅凭异常或超时判断未发送，也不能直接重发；先停止原执行器并核查平台事实，再通过已有对账流程处理。
 
 安全退回自主模式只影响后续自主业务。原受控内容的 Intent、提交日志、平台结果和配额流水永久保留；不能通过旧回调、变更账号、改写 Post 或重新排队绕过原内容保护。UNKNOWN 必须核查并走已有对账，不可当失败重发。
 

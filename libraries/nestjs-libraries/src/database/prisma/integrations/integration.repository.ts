@@ -10,6 +10,7 @@ import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { PlugDto } from '@gitroom/nestjs-libraries/dtos/plugs/plug.dto';
 import { mergeAdditionalSettings, parseAdditionalSettings } from './additional-settings.utils';
 import { mergeSessionHandleIntoMetadata } from './extension-session.utils';
+import { hasIntegrationProfileConflict, isNewIntegrationProfileClaim } from './integration-profile.utils';
 
 @Injectable()
 export class IntegrationRepository {
@@ -159,14 +160,27 @@ export class IntegrationRepository {
       params.picture = await this.storage.uploadSimple(params.picture);
     }
 
-    return this._integration.model.integration.update({
-      where: {
-        id,
-      },
-      data: {
-        ...params,
-      },
-    });
+    const db = this._integration.model as PrismaService;
+    const changesProfileScope = (['profile', 'organizationId', 'providerIdentifier', 'type', 'deletedAt'] as const)
+      .some(key => params[key] !== undefined);
+    const write = async (tx: Prisma.TransactionClient) => {
+      if (changesProfileScope) {
+        const current = await tx.integration.findUnique({ where: { id } });
+        if (current) {
+          const effective = {
+            ...current,
+            ...Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined)),
+          };
+          if (isNewIntegrationProfileClaim(current, effective) &&
+              await hasIntegrationProfileConflict(tx, effective.organizationId,
+                effective.providerIdentifier, effective.profile, id)) {
+            throw new ConflictException('ACCOUNT_PROFILE_CONFLICT');
+          }
+        }
+      }
+      return tx.integration.update({ where: { id }, data: { ...params } });
+    };
+    return changesProfileScope ? sendTransaction(db, write) : write(db);
   }
 
   disconnectChannel(org: string, id: string) {
@@ -275,114 +289,128 @@ export class IntegrationRepository {
         }});
       });
     }
-    // Pre-compute merged additionalSettings to avoid await inside upsert args.
-    // Only query existing settings when there's something to merge.
-    let mergedAdditionalSettings: string | undefined;
-    if (additionalSettings) {
-      const existing = await this._integration.model.integration.findFirst({
-        where: { internalId, organizationId: org, providerIdentifier: provider, identityNamespace },
-        select: { additionalSettings: true },
-      });
-      mergedAdditionalSettings = mergeAdditionalSettings(
-        existing?.additionalSettings,
-        additionalSettings
-      );
-    }
+    const db = this._integration.model as PrismaService;
+    const writeLegacy = async (tx: Prisma.TransactionClient) => {
+      // Reconnect can restore a deleted row while retaining its profile even when
+      // the provider does not return a username. Check the effective profile.
+      const existing = type === 'social' || additionalSettings
+        ? await tx.integration.findFirst({
+          where: { internalId, organizationId: org, providerIdentifier: provider, identityNamespace },
+        })
+        : null;
+      const effectiveProfile = username === undefined ? existing?.profile : username;
+      if (isNewIntegrationProfileClaim(existing, {
+        organizationId: org, providerIdentifier: provider, type,
+        profile: effectiveProfile, deletedAt: null,
+      }) && await hasIntegrationProfileConflict(
+        tx, org, provider, effectiveProfile, existing?.id
+      )) {
+        throw new ConflictException('ACCOUNT_PROFILE_CONFLICT');
+      }
+      let mergedAdditionalSettings: string | undefined;
+      if (additionalSettings) {
+        mergedAdditionalSettings = mergeAdditionalSettings(
+          existing?.additionalSettings,
+          additionalSettings
+        );
+      }
 
-    const upsert = await this._integration.model.integration.upsert({
-      where: {
-        organizationId_providerIdentifier_identityNamespace_internalId: {
-          internalId,
-          organizationId: org,
+      const upsert = await tx.integration.upsert({
+        where: {
+          organizationId_providerIdentifier_identityNamespace_internalId: {
+            internalId,
+            organizationId: org,
+            providerIdentifier: provider,
+            identityNamespace,
+          },
+        },
+        create: {
+          type: type as any,
+          name,
           providerIdentifier: provider,
           identityNamespace,
-        },
-      },
-      create: {
-        type: type as any,
-        name,
-        providerIdentifier: provider,
-        identityNamespace,
-        token,
-        profile: username,
-        ...(picture ? { picture } : {}),
-        inBetweenSteps: isBetweenSteps,
-        refreshToken,
-        ...(expiresIn
-          ? { tokenExpiration: new Date(Date.now() + expiresIn * 1000) }
-          : {}),
-        internalId,
-        organizationId: org,
-        refreshNeeded: false,
-        rootInternalId: internalId.split('_').pop(),
-        ...(customInstanceDetails ? { customInstanceDetails } : {}),
-        additionalSettings: additionalSettings
-          ? JSON.stringify(additionalSettings)
-          : '[]',
-      },
-      update: {
-        ...(mergedAdditionalSettings ? { additionalSettings: mergedAdditionalSettings } : {}),
-        ...(customInstanceDetails ? { customInstanceDetails } : {}),
-        type: type as any,
-        ...(!refresh
-          ? {
-            inBetweenSteps: isBetweenSteps,
-          }
-          : {}),
-        ...(picture ? { picture } : {}),
-        profile: username,
-        providerIdentifier: provider,
-        token,
-        refreshToken,
-        ...(expiresIn
-          ? { tokenExpiration: new Date(Date.now() + expiresIn * 1000) }
-          : {}),
-        internalId,
-        organizationId: org,
-        deletedAt: null,
-        refreshNeeded: false,
-      },
-    });
-
-    if (oneTimeToken) {
-      const rootId =
-        (
-          await this._integration.model.integration.findFirst({
-            where: {
-              organizationId: org,
-              internalId: internalId,
-              providerIdentifier: provider,
-              identityNamespace,
-            },
-          })
-        )?.rootInternalId || internalId.split('_').pop()!;
-
-      await this._integration.model.integration.updateMany({
-        where: {
-          id: {
-            not: upsert.id,
-          },
-          organizationId: org,
-          rootInternalId: rootId,
-          // Legacy LinkedIn member/page rows share a verified OAuth grant root.
-          // Do not extend this compatibility family to unknown identity namespaces.
-          providerIdentifier: identityNamespace === 'legacy' && ['linkedin', 'linkedin-page'].includes(provider)
-            ? { in: ['linkedin', 'linkedin-page'] }
-            : provider,
-          identityNamespace,
-        },
-        data: {
           token,
+          profile: username,
+          ...(picture ? { picture } : {}),
+          inBetweenSteps: isBetweenSteps,
           refreshToken,
-          refreshNeeded: false,
           ...(expiresIn
             ? { tokenExpiration: new Date(Date.now() + expiresIn * 1000) }
             : {}),
+          internalId,
+          organizationId: org,
+          refreshNeeded: false,
+          rootInternalId: internalId.split('_').pop(),
+          ...(customInstanceDetails ? { customInstanceDetails } : {}),
+          additionalSettings: additionalSettings
+            ? JSON.stringify(additionalSettings)
+            : '[]',
+        },
+        update: {
+          ...(mergedAdditionalSettings ? { additionalSettings: mergedAdditionalSettings } : {}),
+          ...(customInstanceDetails ? { customInstanceDetails } : {}),
+          type: type as any,
+          ...(!refresh
+            ? {
+              inBetweenSteps: isBetweenSteps,
+            }
+            : {}),
+          ...(picture ? { picture } : {}),
+          profile: username,
+          providerIdentifier: provider,
+          token,
+          refreshToken,
+          ...(expiresIn
+            ? { tokenExpiration: new Date(Date.now() + expiresIn * 1000) }
+            : {}),
+          internalId,
+          organizationId: org,
+          deletedAt: null,
+          refreshNeeded: false,
         },
       });
-    }
 
-    return upsert;
+      if (oneTimeToken) {
+        const rootId =
+          (
+            await tx.integration.findFirst({
+              where: {
+                organizationId: org,
+                internalId: internalId,
+                providerIdentifier: provider,
+                identityNamespace,
+              },
+            })
+          )?.rootInternalId || internalId.split('_').pop()!;
+
+        await tx.integration.updateMany({
+          where: {
+            id: {
+              not: upsert.id,
+            },
+            organizationId: org,
+            rootInternalId: rootId,
+            // Legacy LinkedIn member/page rows share a verified OAuth grant root.
+            // Do not extend this compatibility family to unknown identity namespaces.
+            providerIdentifier: identityNamespace === 'legacy' && ['linkedin', 'linkedin-page'].includes(provider)
+              ? { in: ['linkedin', 'linkedin-page'] }
+              : provider,
+            identityNamespace,
+          },
+          data: {
+            token,
+            refreshToken,
+            refreshNeeded: false,
+            ...(expiresIn
+              ? { tokenExpiration: new Date(Date.now() + expiresIn * 1000) }
+              : {}),
+          },
+        });
+      }
+
+      return upsert;
+    };
+    return type === 'social' ? sendTransaction(db, writeLegacy) : writeLegacy(db);
   }
 
   needsToBeRefreshed() {
@@ -765,22 +793,34 @@ export class IntegrationRepository {
     checkedAt: Date,
     matchedUpdates: { profile?: string; picture?: string } = {}
   ) {
-    for (const row of rows) {
-      const merged = mergeSessionHandleIntoMetadata(row.metadata, handle);
-      const isMatched = row.id === matchedId;
+    const db = this._integration.model as PrismaService;
+    const write = async (tx: Prisma.TransactionClient) => {
+      if (matchedId && matchedUpdates.profile !== undefined) {
+        const matched = await tx.integration.findUnique({ where: { id: matchedId } });
+        if (matched && isNewIntegrationProfileClaim(matched, { ...matched, profile: matchedUpdates.profile }) &&
+            await hasIntegrationProfileConflict(tx, matched.organizationId,
+              matched.providerIdentifier, matchedUpdates.profile, matchedId)) {
+          throw new ConflictException('ACCOUNT_PROFILE_CONFLICT');
+        }
+      }
+      for (const row of rows) {
+        const merged = mergeSessionHandleIntoMetadata(row.metadata, handle);
+        const isMatched = row.id === matchedId;
 
-      await this._integration.model.integration.update({
-        where: { id: row.id },
-        data: {
-          activeSessionClient: isMatched ? 'EXTENSION' : 'API',
-          extensionSessionCheckedAt: checkedAt,
-          // DbNull (not JsonNull): an empty bucket should clear the column to
-          // SQL NULL, not store the JSON literal `null` as its value.
-          metadata: merged ? (merged as Prisma.InputJsonValue) : Prisma.DbNull,
-          ...(isMatched ? matchedUpdates : {}),
-        },
-      });
-    }
+        await tx.integration.update({
+          where: { id: row.id },
+          data: {
+            activeSessionClient: isMatched ? 'EXTENSION' : 'API',
+            extensionSessionCheckedAt: checkedAt,
+            // DbNull (not JsonNull): an empty bucket should clear the column to
+            // SQL NULL, not store the JSON literal `null` as its value.
+            metadata: merged ? (merged as Prisma.InputJsonValue) : Prisma.DbNull,
+            ...(isMatched ? matchedUpdates : {}),
+          },
+        });
+      }
+    };
+    return matchedUpdates.profile !== undefined ? sendTransaction(db, write) : write(db);
   }
 
   async disableChannel(org: string, id: string) {

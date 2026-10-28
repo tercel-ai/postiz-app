@@ -413,6 +413,9 @@ model Integration {
   disabled              Boolean                @default(false)
   tokenExpiration       DateTime?
   refreshToken          String?
+  // Active social profiles are unique per organization/provider after handle
+  // normalization. The partial expression index is maintained in
+  // migrations/unique-active-integration-profile.sql (not expressible in Prisma).
   profile               String?
   deletedAt             DateTime?
   createdAt             DateTime               @default(now())

@@ -4,10 +4,11 @@ afterEach(() => vi.unstubAllEnvs());
 function fixture() {
   const integration = {
     findFirst: vi.fn().mockResolvedValue(null),
+    findMany: vi.fn().mockResolvedValue([]),
     upsert: vi.fn().mockResolvedValue({ id: 'legacy' }),
   };
   const repository = new IntegrationRepository(
-    { model: { integration } } as any,
+    { model: { integration, $transaction: vi.fn(async work => work({ integration })) } } as any,
     {} as any,
     {} as any,
     {} as any,

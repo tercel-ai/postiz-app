@@ -123,8 +123,8 @@ describe('shared stable social actor identity', () => {
     const f = fixture();
     await f.resolve();
     const results = await Promise.all([
-      f.resolve('x', 'x.rest_id', '456'),
-      f.resolve('x', 'x.rest_id', '789'),
+      f.resolve('x', 'x.rest_id', '456', { handle: 'bob' }),
+      f.resolve('x', 'x.rest_id', '789', { handle: 'carol' }),
     ]);
     expect(results.filter((r) => r.account)).toHaveLength(1);
     expect(results.find((r) => r.blockCode)?.blockCode).toBe(
@@ -144,14 +144,56 @@ describe('shared stable social actor identity', () => {
       ).account?.id
     ).toBe(first.account?.id);
     expect(
-      (await f.resolve('x', 'x.rest_id', '456', { canCreate: false })).blockCode
+      (await f.resolve('x', 'x.rest_id', '456', { canCreate: false, handle: 'bob' })).blockCode
     ).toBe('ACCOUNT_CREATION_NOT_ALLOWED');
   });
-  it('does not merge different stable IDs based on a reused handle', async () => {
+  it('blocks a reused profile without merging different stable IDs', async () => {
     const f = fixture();
     const first = await f.resolve();
     const second = await f.resolve('x', 'x.rest_id', '456');
+    expect(second).toEqual({ blockCode: 'ACCOUNT_PROFILE_CONFLICT' });
+    expect(f.db.rows('integration')).toHaveLength(1);
+    expect(f.db.rows('integration')[0].id).toBe(first.account?.id);
+    expect(f.db.rows('integration')[0].internalId).toBe('123');
+  });
+  it('blocks a normalized profile collision with an unresolved old account', async () => {
+    const f = fixture();
+    f.db.seed('integration', {
+      id: 'old', organizationId: 'org', providerIdentifier: 'x', type: 'social',
+      identityNamespace: 'legacy', internalId: 'unknown', profile: ' @ALICE ',
+    });
+    expect(await f.resolve()).toEqual({ blockCode: 'ACCOUNT_PROFILE_CONFLICT' });
+    expect(f.db.rows('integration')).toHaveLength(1);
+    expect(f.db.rows('integration')[0].identityNamespace).toBe('legacy');
+  });
+  it('keeps an existing stable identity refresh working while old profile duplicates await cleanup', async () => {
+    const f = fixture();
+    const first = await f.resolve();
+    f.db.seed('integration', {
+      id: 'old-duplicate', organizationId: 'org', providerIdentifier: 'x', type: 'social',
+      identityNamespace: 'legacy', internalId: 'old-handle', profile: '@Alice',
+    });
+    expect(await f.resolve('x', 'x.rest_id', '123', { handle: '@ALICE' }))
+      .toMatchObject({ registrationStatus: 'EXISTING', account: { id: first.account!.id } });
+    expect(f.db.rows('integration')).toHaveLength(2);
+    expect(f.db.rows('integration').find(row => row.id === 'old-duplicate').identityNamespace).toBe('legacy');
+  });
+  it('blocks profile changes on an existing stable actor when another active actor owns that profile', async () => {
+    const f = fixture();
+    const first = await f.resolve();
+    await f.resolve('x', 'x.rest_id', '456', { handle: 'bob' });
+    expect(await f.resolve('x', 'x.rest_id', '123', { handle: '@BOB' }))
+      .toEqual({ blockCode: 'ACCOUNT_PROFILE_CONFLICT' });
+    expect(f.db.rows('integration').find(row => row.id === first.account?.id).profile).toBe('alice');
+  });
+  it('does not let deleted profiles reserve a handle or auto-restore a different identity', async () => {
+    const f = fixture();
+    const first = await f.resolve();
+    f.db.rows('integration')[0].deletedAt = new Date();
+    const second = await f.resolve('x', 'x.rest_id', '456');
     expect(second.account?.id).not.toBe(first.account?.id);
+    expect(second.account?.profile).toBe('alice');
+    expect(f.db.rows('integration')[0].deletedAt).not.toBeNull();
   });
   it('isolates ambiguous duplicates and different namespaces instead of choosing a row', async () => {
     const f = fixture();

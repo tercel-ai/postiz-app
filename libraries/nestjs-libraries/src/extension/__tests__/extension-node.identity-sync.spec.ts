@@ -66,6 +66,21 @@ function fixture() {
   return { db, service, report };
 }
 describe('terminal identity synchronization', () => {
+  it('reports profile conflicts without creating or verifying a parallel account', async () => {
+    const f = fixture();
+    f.db.seed('integration', {
+      id: 'old-account', organizationId: 'org', providerIdentifier: 'x', type: 'social',
+      identityNamespace: 'legacy', internalId: 'old-handle', profile: '@Alice',
+    });
+    const result: any = await f.report();
+    expect(result.results[0]).toMatchObject({
+      blockCode: 'ACCOUNT_PROFILE_CONFLICT', integrationId: null,
+      verificationStatus: 'UNKNOWN',
+    });
+    expect(f.db.rows('integration')).toHaveLength(1);
+    expect(f.db.rows('integration')[0].internalId).toBe('old-handle');
+    expect(f.db.rows('extensionNodeReportReceipt')).toHaveLength(1);
+  });
   it('keeps social identity synchronization independent of account sending-state enrollment', async () => {
     const f = fixture();
     const result: any = await f.report();
