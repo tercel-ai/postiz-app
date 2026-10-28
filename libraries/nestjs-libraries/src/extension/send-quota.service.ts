@@ -242,7 +242,8 @@ export class SendQuotaService {
           const pacingValue = values.get('engage_reply_pacing') as {
             minGapMinutes?: number;
           } | null;
-          gapMs = Math.max(
+          // Automatic project cadence must not extend the shared account safety clock.
+          const projectGapMs = Math.max(
             gapMs,
             replyGapMinutes(schedule, now, {
               minGapMinutes: Math.max(
@@ -276,8 +277,8 @@ export class SendQuotaService {
               status: { in: ['AUTHORIZED', 'UNKNOWN'] },
               authorizedAt: { not: null },
               OR: [
-                { submitBefore: { gt: new Date(now.getTime() - gapMs) } },
-                { submitBefore: null, authorizedAt: { gt: new Date(now.getTime() - gapMs - 30_000) } },
+                { submitBefore: { gt: new Date(now.getTime() - projectGapMs) } },
+                { submitBefore: null, authorizedAt: { gt: new Date(now.getTime() - projectGapMs - 30_000) } },
               ],
               execution: {
                 intent: {
@@ -293,7 +294,7 @@ export class SendQuotaService {
             throw new ForbiddenException('PROJECT_REPLY_INTERVAL');
           if (
             last?.confirmedAt &&
-            now.getTime() < last.confirmedAt.getTime() + gapMs
+            now.getTime() < last.confirmedAt.getTime() + projectGapMs
           )
             throw new ForbiddenException('PROJECT_REPLY_INTERVAL');
         }

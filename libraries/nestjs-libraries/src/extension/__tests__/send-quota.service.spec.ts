@@ -226,6 +226,55 @@ describe('existing send policy and quota compatibility', () => {
     });
     return { ...fixture, intent, account };
   }
+  it('keeps a 150-minute automatic project cadence out of the three-minute X account cooldown', async () => {
+    const { db, quotas, intent, account } = await policy();
+    Object.assign(db.rows('engageConfig')[0].metadata.replyPolicies.x, {
+      dailyReplyLimit: 4, windowStart: '08:00', windowEnd: '18:00', timezone: 'UTC',
+    });
+    const automatic = await quotas.resolve(db as any, { ...intent, sendOrigin: 'AUTOMATION' }, account, 0, now);
+    expect(automatic.gapMs).toBe(3 * 60_000);
+    expect(automatic.budgets.find(b => b.dimension === 'REPLY_ROOTS_AUTO')).toMatchObject({ limit: 4, enforce: true });
+  });
+
+  it('allows a manual reply after account pacing while retaining automatic project spacing', async () => {
+    const { db, service, create, quotas } = await policy();
+    Object.assign(db.rows('engageConfig')[0].metadata.replyPolicies.x, {
+      dailyReplyLimit: 4, windowStart: '08:00', windowEnd: '18:00', timezone: 'UTC',
+    });
+    Object.assign(db.rows('sendIntent')[0], { action: 'REPLY', sendOrigin: 'AUTOMATION' });
+    const actor = { id: '123', idNamespace: 'x.rest_id' };
+    const automatic = await service.reserveApi('org', 'root', 'automatic', now);
+    await service.authorizeApiSegment('org', automatic.id, 0, actor, now);
+    await service.apiOutcome('org', automatic.id, 0, {
+      status: 'confirmed', eventId: 'automatic-confirmed', platformId: 'automatic-reply',
+    }, now);
+    await create('manual');
+    const manualIntent = db.rows('sendIntent').find(row => row.rootPostId === 'manual');
+    manualIntent.action = 'REPLY';
+    const manualPost = db.rows('post').find(row => row.id === 'manual');
+    const session = {
+      integrationId: 'account', verificationStatus: 'VERIFIED',
+      verificationExpiresAt: new Date(now.getTime() + 4 * 60 * 60_000),
+      accountIdentity: { id: '123', namespace: 'x.rest_id' },
+    };
+    const before = new Date(now.getTime() + 3 * 60_000 - 1);
+    expect(await service.claimableIn(db as any, 'org', manualPost, session as any, 'REPLY', before)).toBe(false);
+    const later = new Date(now.getTime() + 3 * 60_000);
+    expect(await service.claimableIn(db as any, 'org', manualPost, session as any, 'REPLY', later)).toBe(true);
+    const manual = await service.reserveApi('org', 'manual', 'manual', later);
+    expect((await service.authorizeApiSegment('org', manual.id, 0, actor, later)).granted).toBe(true);
+    await service.apiOutcome('org', manual.id, 0, {
+      status: 'confirmed', eventId: 'manual-confirmed', platformId: 'manual-reply',
+    }, later);
+    const account = db.rows('accountWriteState')[0];
+    expect(account.nextWriteNotBefore).toEqual(new Date(later.getTime() + 3 * 60_000));
+    await expect(quotas.resolve(db as any, { ...manualIntent, sendOrigin: 'AUTOMATION' }, account, 0, later))
+      .rejects.toThrow('PROJECT_REPLY_INTERVAL');
+    const nextAutomatic = new Date(later.getTime() + 150 * 60_000);
+    await expect(quotas.resolve(db as any, { ...manualIntent, sendOrigin: 'AUTOMATION' }, account, 0, nextAutomatic))
+      .resolves.toHaveProperty('gapMs', 3 * 60_000);
+  });
+
   it('keeps business root quotas separate from each actual platform write', async () => {
     const { db, quotas, intent, account } = await policy();
     const root = await quotas.resolve(db as any, intent, account, 0, now);

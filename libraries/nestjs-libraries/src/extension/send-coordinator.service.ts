@@ -176,7 +176,35 @@ export class SendCoordinatorService {
         }
         queuedReplyEnqueue = { allowed: reason === null, reason };
       }
-      return sendBusinessSummary(root, intent, executions, segments, blockCode, modeState.mode === 'CONTROLLED', continuing, queuedReplyEnqueue);
+      const summary = sendBusinessSummary(root, intent, executions, segments, blockCode, modeState.mode === 'CONTROLLED', continuing, queuedReplyEnqueue);
+      const serverNow = new Date();
+      let nextSendNotBefore: Date | null = null;
+      let reason: string | null = blockCode ?? (summary.paused ? 'ACCOUNT_BINDINGS_NOT_ENABLED' : null);
+      if (!reason && (summary.status === 'RECONCILING' || summary.status === 'PARTIAL_SUCCESS'))
+        reason = 'SEND_RECONCILIATION_REQUIRED';
+      if (!reason && ['RESERVED', 'SENDING'].includes(intent?.status ?? '')) reason = 'SEND_IN_PROGRESS';
+      if (!reason && root.state === 'QUEUE' && intent?.status === 'QUEUED') {
+        const account = intent.canonicalAccountKey ? await tx.accountWriteState.findUnique({
+          where: { organizationId_canonicalAccountKey: { organizationId: org, canonicalAccountKey: intent.canonicalAccountKey } },
+          select: { nextWriteNotBefore: true, activeExecutionId: true, rolloutReady: true },
+        }) : null;
+        if (!account) reason = 'ACCOUNT_BINDING_REQUIRED';
+        else if (!account.rolloutReady) reason = 'ACCOUNT_COORDINATION_AUDIT_REQUIRED';
+        else if (account.activeExecutionId) reason = 'ACCOUNT_WRITE_BUSY';
+        else {
+          if (root.publishDate && root.publishDate > serverNow) {
+            nextSendNotBefore = root.publishDate;
+            reason = 'SEND_NOT_DUE';
+          }
+          if (account.nextWriteNotBefore && account.nextWriteNotBefore > serverNow &&
+              (!nextSendNotBefore || account.nextWriteNotBefore > nextSendNotBefore)) {
+            nextSendNotBefore = account.nextWriteNotBefore;
+            reason = 'ACCOUNT_WRITE_INTERVAL';
+          }
+        }
+      }
+      // This is a known lower bound, never a send permit or an exact execution estimate.
+      return { ...summary, timing: { serverNow, nextSendNotBefore, reason } };
     });
   }
 

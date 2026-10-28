@@ -816,3 +816,56 @@ describe('Engage list and detail sending projections', () => {
     }
   });
 });
+
+
+describe('queued send timing projection', () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(sendNow); });
+  afterEach(() => vi.useRealTimers());
+
+  it.each([
+    { schedule: 60_000, cooldown: 180_000, reason: 'ACCOUNT_WRITE_INTERVAL' },
+    { schedule: 240_000, cooldown: 180_000, reason: 'SEND_NOT_DUE' },
+  ])('projects the later bound without granting send permission: $reason', async ({ schedule, cooldown, reason }) => {
+    const { db, service, create } = setupSend();
+    await create('root', 'EXTENSION');
+    db.rows('post')[0].publishDate = new Date(sendNow.getTime() + schedule);
+    db.rows('accountWriteState')[0].nextWriteNotBefore = new Date(sendNow.getTime() + cooldown);
+    const before = JSON.stringify([db.rows('post'), db.rows('sendIntent'), db.rows('accountWriteState'), db.rows('sendExecution')]);
+    const result = await service.businessSummary('org', 'user', 'root');
+    expect(result).toMatchObject({ timing: {
+      serverNow: sendNow, nextSendNotBefore: new Date(sendNow.getTime() + Math.max(schedule, cooldown)), reason,
+    } });
+    expect(result.allowedActions.retry.allowed).toBe(false);
+    expect(JSON.stringify(result)).not.toContain('canonicalAccountKey');
+    expect(JSON.stringify([db.rows('post'), db.rows('sendIntent'), db.rows('accountWriteState'), db.rows('sendExecution')])).toBe(before);
+  });
+
+  it.each(['PROJECT_INACTIVE', 'ACCOUNT_WRITE_BUSY', 'ACCOUNT_COORDINATION_AUDIT_REQUIRED', 'SEND_RECONCILIATION_REQUIRED', 'ACCOUNT_BINDINGS_NOT_ENABLED'])(
+    'does not predict a send time for an indefinite blocker: %s', async reason => {
+      const { db, service, create, projects } = setupSend();
+      await create('root', 'EXTENSION');
+      const account = db.rows('accountWriteState')[0];
+      account.nextWriteNotBefore = new Date(sendNow.getTime() + 180_000);
+      if (reason === 'PROJECT_INACTIVE') projects.getActivationVerdict.mockResolvedValue('inactive');
+      if (reason === 'ACCOUNT_WRITE_BUSY') account.activeExecutionId = 'other-execution';
+      if (reason === 'ACCOUNT_COORDINATION_AUDIT_REQUIRED') account.rolloutReady = false;
+      if (reason === 'SEND_RECONCILIATION_REQUIRED') db.rows('sendIntent')[0].status = 'RECONCILING';
+      if (reason === 'ACCOUNT_BINDINGS_NOT_ENABLED') vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'false');
+      expect(await service.businessSummary('org', 'user', 'root')).toMatchObject({ timing: {
+        serverNow: sendNow, nextSendNotBefore: null, reason,
+      } });
+    }
+  );
+
+  it('does not borrow another organization or account cooldown and clears elapsed bounds', async () => {
+    const { db, service, create } = setupSend();
+    await create('root', 'EXTENSION');
+    db.rows('accountWriteState')[0].nextWriteNotBefore = new Date(sendNow.getTime() - 1);
+    for (const [id, organizationId, canonicalAccountKey] of [['foreign-org', 'other', 'account-key'], ['foreign-account', 'org', 'other-key']]) {
+      db.seed('accountWriteState', { id, organizationId, canonicalAccountKey, nextWriteNotBefore: new Date(sendNow.getTime() + 999_000), rolloutReady: true });
+    }
+    expect(await service.businessSummary('org', 'user', 'root')).toMatchObject({ timing: {
+      serverNow: sendNow, nextSendNotBefore: null, reason: null,
+    } });
+  });
+});
