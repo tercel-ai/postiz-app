@@ -238,7 +238,7 @@ export class SendCoordinatorService {
     return account;
   }
 
-  async claimableIn(
+  async claimabilityReasonIn(
     tx: Prisma.TransactionClient,
     org: string,
     post: import('@prisma/client').Post,
@@ -248,19 +248,17 @@ export class SendCoordinatorService {
   ) {
     const intent = post.sendIntentId
       ? await tx.sendIntent.findUnique({ where: { id: post.sendIntentId } }) : null;
-    if (!intent || intent.organizationId !== org || intent.rootPostId !== post.id ||
-        intent.projectId !== post.projectId || intent.action !== action ||
-        intent.platform !== canonicalControlledPlatform(post.providerIdentifier!) ||
-        intent.routeRevision !== post.routeRevision || intent.contentRevision !== post.contentRevision ||
-        !['QUEUED', 'RESERVED'].includes(intent.status) || intent.hasConfirmedSegments ||
-        !session.integrationId || session.verificationStatus !== 'VERIFIED' ||
-        !session.verificationExpiresAt || session.verificationExpiresAt <= now)
-      return false;
+    if (!intent) return 'SEND_INTENT_MISSING';
+    if (intent.organizationId !== org || intent.rootPostId !== post.id || intent.projectId !== post.projectId || intent.action !== action || intent.platform !== canonicalControlledPlatform(post.providerIdentifier!)) return 'SEND_INTENT_MISMATCH';
+    if (intent.routeRevision !== post.routeRevision || intent.contentRevision !== post.contentRevision) return 'SEND_INTENT_REVISION_MISMATCH';
+    if (!['QUEUED', 'RESERVED'].includes(intent.status)) return 'SEND_INTENT_NOT_QUEUED';
+    if (intent.hasConfirmedSegments) return 'SEND_INTENT_ALREADY_PARTIALLY_CONFIRMED';
+    if (!session.integrationId || session.verificationStatus !== 'VERIFIED' || !session.verificationExpiresAt || session.verificationExpiresAt <= now) return 'SESSION_NOT_VERIFIED_OR_EXPIRED';
     const owner = (intent.policySnapshot as { policyOwnerUserId?: string }).policyOwnerUserId;
     const member = owner ? await tx.userOrganization.findUnique({
       where: { userId_organizationId: { userId: owner, organizationId: org } },
     }) : null;
-    if (!member || member.disabled) return false;
+    if (!member || member.disabled) return 'POLICY_OWNER_UNAVAILABLE';
     const integration = await tx.integration.findFirst({ where: {
       id: session.integrationId, organizationId: org, disabled: false, deletedAt: null,
     } });
@@ -268,18 +266,15 @@ export class SendCoordinatorService {
       organizationId: org, projectId: intent.projectId, integrationId: session.integrationId, disabled: false,
     } });
     const actor = session.accountIdentity as { id?: string; namespace?: string } | null;
-    if (await this.modes.legacyAccountBlockedIn(tx, org, session.integrationId)) return false;
-    if (!integration || integration.inBetweenSteps || !relation ||
-        (action === 'REPLY' && relation.engageEnabled !== true) ||
-        canonicalControlledPlatform(integration.providerIdentifier) !== intent.platform ||
-        !integration.identityNamespace || integration.identityNamespace === 'legacy' ||
-        !actor?.id || !actor.namespace || !matchesSendActor({
-          id: integration.internalId, idNamespace: integration.identityNamespace,
-        }, { id: actor.id, idNamespace: actor.namespace })) return false;
-    if (intent.integrationId && (intent.integrationId !== session.integrationId ||
-        post.integrationId !== intent.integrationId || !intent.target ||
-        !matchesSendActor(intent.target as unknown as SendActor, { id: actor.id, idNamespace: actor.namespace })))
-      return false;
+    if (await this.modes.legacyAccountBlockedIn(tx, org, session.integrationId)) return 'LEGACY_ACCOUNT_BLOCKED';
+    if (!integration) return 'INTEGRATION_UNAVAILABLE';
+    if (integration.inBetweenSteps) return 'INTEGRATION_SETUP_INCOMPLETE';
+    if (!relation) return 'PROJECT_INTEGRATION_UNAVAILABLE';
+    if (action === 'REPLY' && relation.engageEnabled !== true) return 'PROJECT_ENGAGE_DISABLED';
+    if (canonicalControlledPlatform(integration.providerIdentifier) !== intent.platform) return 'INTEGRATION_PLATFORM_MISMATCH';
+    if (!integration.identityNamespace || integration.identityNamespace === 'legacy') return 'INTEGRATION_IDENTITY_UNAVAILABLE';
+    if (!actor?.id || !actor.namespace || !matchesSendActor({ id: integration.internalId, idNamespace: integration.identityNamespace }, { id: actor.id, idNamespace: actor.namespace })) return 'SESSION_ACCOUNT_MISMATCH';
+    if (intent.integrationId && (intent.integrationId !== session.integrationId || post.integrationId !== intent.integrationId || !intent.target || !matchesSendActor(intent.target as unknown as SendActor, { id: actor.id, idNamespace: actor.namespace }))) return 'SEND_TARGET_ACCOUNT_MISMATCH';
     let account = await tx.accountWriteState.findFirst({ where: {
       organizationId: org, integrationId: session.integrationId,
       ...(intent.canonicalAccountKey ? { canonicalAccountKey: intent.canonicalAccountKey } : {}),
@@ -287,20 +282,27 @@ export class SendCoordinatorService {
       intent.canonicalAccountKey ?? canonicalSendAccount(org, integration.providerIdentifier,
         integration.identityNamespace, integration.internalId));
     if (account) account = await releaseExpiredAccountWriterIn(tx, account, now);
-    if (!account?.rolloutReady || account.activeExecutionId ||
-        (account.nextWriteNotBefore && account.nextWriteNotBefore > now)) return false;
+    if (!account?.rolloutReady) return 'ACCOUNT_NOT_READY';
+    if (account.activeExecutionId) return 'ACCOUNT_EXECUTION_ACTIVE';
+    if (account.nextWriteNotBefore && account.nextWriteNotBefore > now) return 'ACCOUNT_COOLDOWN_ACTIVE';
     if (intent.activeExecutionId) {
       const previous = await tx.sendExecution.findUnique({ where: { id: intent.activeExecutionId } });
-      if (!previous || previous.status !== 'RESERVED' || previous.leaseExpiresAt > now) return false;
+      if (!previous || previous.status !== 'RESERVED' || previous.leaseExpiresAt > now) return 'INTENT_EXECUTION_UNAVAILABLE';
     }
     if (intent.sendOrigin === 'AUTOMATION') {
       try { await this.quotas.resolve(tx, intent, account, 0, now); }
       catch (error) {
-        if (error instanceof ForbiddenException || error instanceof BadRequestException) return false;
+        if (error instanceof ForbiddenException || error instanceof BadRequestException)
+          return /^[A-Z][A-Z0-9_]*$/.test(error.message) ? error.message : 'AUTOMATION_POLICY_BLOCKED';
         throw error;
       }
     }
-    return true;
+    return null;
+  }
+
+
+  async claimableIn(tx: Prisma.TransactionClient, org: string, post: import('@prisma/client').Post, session: import('@prisma/client').ExtensionNodeSession, action: 'POST' | 'REPLY', now: Date) {
+    return (await this.claimabilityReasonIn(tx, org, post, session, action, now)) === null;
   }
 
   private async chain(

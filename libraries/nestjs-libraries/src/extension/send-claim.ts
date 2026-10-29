@@ -20,7 +20,7 @@ export async function claimControlledSend<T>(
   auth: NodeAuthentication,
   body: Claim,
   response: (execution: SendExecution, nodeId: string) => T
-): Promise<{ items: T[]; executionId?: string; status?: string }> {
+): Promise<{ items: T[]; reason?: string; executionId?: string; status?: string }> {
   await sends.enabled(auth.org);
   if (!body.requestId?.trim() || body.requestId.length > 128 || !['POST', 'REPLY'].includes(body.action))
     throw new BadRequestException('INVALID_SEND_CLAIM');
@@ -43,10 +43,10 @@ export async function claimControlledSend<T>(
     if (!receipt && !original) return null;
     if ((receipt?.requestHash ?? original!.requestHash) !== fingerprint)
       throw new ConflictException('CLAIM_REQUEST_CONFLICT');
-    if (!original) return { items: [] as T[] };
+    if (!original) return { items: [] as T[], reason: (receipt?.result as { reason?: string })?.reason ?? 'REPLAYED_EMPTY_RESULT' };
     if (original.status !== 'RESERVED' || original.leaseExpiresAt <= new Date() ||
         original.nodeCredentialVersion !== node.credentialVersion)
-      return { items: [], executionId: original.id, status: original.status };
+      return { items: [] as T[], reason: 'REPLAYED_EXECUTION_UNAVAILABLE', executionId: original.id, status: original.status };
     return { items: [response(original, node.nodeId)] };
   };
   const initial = await sendTransaction(db, async (tx) => {
@@ -54,7 +54,7 @@ export async function claimControlledSend<T>(
     const node = await nodes.authenticateIn(tx, auth.org, auth.user, auth.nodeId, auth.token);
     const replay = await replayIn(tx, node);
     if (replay) return { replay };
-    if (modeState.mode !== 'CONTROLLED') return { replay: { items: [] as T[] } };
+    if (modeState.mode !== 'CONTROLLED') return { replay: { items: [] as T[], reason: 'CONTROLLED_SEND_NOT_ACTIVE' } };
     await sends.verifyPolicyIn(tx);
     const sessions = (await tx.extensionNodeSession.findMany({ where: {
       extensionNodeId: node.id, organizationId: auth.org, verificationStatus: 'VERIFIED',
@@ -77,6 +77,7 @@ export async function claimControlledSend<T>(
   let cycleStartedAt = start && cursor?.cycleStartedAt ? cursor.cycleStartedAt : new Date();
   let wrapped = !start;
   let scanned = 0;
+  let reason = sessions.length ? 'NO_MATCHING_DUE_POST' : 'NO_VERIFIED_SESSION_WITH_CAPABILITY';
   const eligible: Prisma.PostWhereInput = {
     organizationId: auth.org, state: 'QUEUE', parentPostId: null, deletedAt: null,
     executionProtocol: 'ACCOUNT_BOUND_V1', publishMethod: 'EXTENSION',
@@ -93,7 +94,7 @@ export async function claimControlledSend<T>(
   const cycleWhere = (): Prisma.PostWhereInput => ({
     ...eligible, createdAt: { lte: cycleStartedAt }, publishDate: { lte: cycleStartedAt },
   });
-  const saveIn = async (tx: Prisma.TransactionClient, executionId: string | null, after: Position | null) => {
+  const saveIn = async (tx: Prisma.TransactionClient, executionId: string | null, after: Position | null, emptyReason?: string) => {
     if (!body.rootPostId) {
       const current = await tx.sendClaimCursor.findUnique({ where: {
         extensionNodeId_action: { extensionNodeId: node.id, action: body.action },
@@ -114,7 +115,7 @@ export async function claimControlledSend<T>(
       if (saved.count !== 1) throw new ConflictException('CLAIM_SCAN_CHANGED');
     }
     await tx.sendMutationReceipt.create({ data: {
-      ...keyFor(node), requestHash: fingerprint, result: { executionId },
+      ...keyFor(node), requestHash: fingerprint, result: { executionId, ...(emptyReason ? { reason: emptyReason } : {}) },
     } });
   };
   const projectVerdicts = new Map<string, boolean>();
@@ -142,10 +143,10 @@ export async function claimControlledSend<T>(
     for (const candidate of candidates) {
       scanned++;
       position = { publishDate: candidate.publishDate, id: candidate.id };
-      if (!candidate.projectId) continue;
+      if (!candidate.projectId) { reason = 'POST_PROJECT_MISSING'; continue; }
       if (!projectVerdicts.has(candidate.projectId))
         projectVerdicts.set(candidate.projectId, await sends.claimProjectActive(auth.org, candidate.projectId));
-      if (!projectVerdicts.get(candidate.projectId)) continue;
+      if (!projectVerdicts.get(candidate.projectId)) { reason = 'PROJECT_UNAVAILABLE_OR_INACTIVE'; continue; }
       const result = await sendTransaction(db, async (tx) => {
         await sends.assertControlledIn(tx, auth.org);
         const currentNode = await nodes.authenticateIn(tx, auth.org, auth.user, auth.nodeId, auth.token);
@@ -163,7 +164,12 @@ export async function claimControlledSend<T>(
           ...(post.integrationId ? { integrationId: post.integrationId } : { actorKey: '' }),
           verificationStatus: 'VERIFIED', verificationExpiresAt: { gt: new Date() },
         } });
-        if (!session || !(await sends.claimableIn(tx, auth.org, post, session, body.action, new Date()))) return null;
+        if (!session) { reason = 'VERIFIED_SESSION_UNAVAILABLE'; return null; }
+        const claimabilityReason = await sends.claimabilityReasonIn(tx, auth.org, post, session, body.action, new Date());
+        if (claimabilityReason) {
+          reason = claimabilityReason;
+          return null;
+        }
         const intent = post.integrationId
           ? await tx.sendIntent.findUniqueOrThrow({ where: { id: post.sendIntentId! } })
           : await sends.bindCurrentActorIn(tx, auth.org, post.id, session, new Date());
@@ -183,7 +189,7 @@ export async function claimControlledSend<T>(
           'CONTROLLED_MEDIA_NOT_RESOLVED', 'INVALID_SEND_CHAIN', 'SEND_CONTENT_CHANGED',
           'SEND_INTENT_CHANGED', 'SEND_ALREADY_OWNED', 'CONTENT_NOT_SENDABLE',
           'PARTIAL_SEND_REQUIRES_RECONCILIATION',
-        ].includes(error.message)) return null;
+        ].includes(error.message)) { reason = error.message; return null; }
         throw error;
       });
       if (result) return result;
@@ -196,7 +202,8 @@ export async function claimControlledSend<T>(
     const replay = await replayIn(tx, currentNode);
     if (replay) return replay;
     await sends.verifyPolicyIn(tx);
-    await saveIn(tx, null, position);
-    return { items: [] };
+    if (scanned >= SCAN_LIMIT) reason = 'SCAN_LIMIT_REACHED';
+    await saveIn(tx, null, position, reason);
+    return { items: [], reason };
   });
 }

@@ -259,8 +259,10 @@ describe('existing send policy and quota compatibility', () => {
     };
     const before = new Date(now.getTime() + 3 * 60_000 - 1);
     expect(await service.claimableIn(db as any, 'org', manualPost, session as any, 'REPLY', before)).toBe(false);
+    expect(await service.claimabilityReasonIn(db as any, 'org', manualPost, session as any, 'REPLY', before)).toBe('ACCOUNT_COOLDOWN_ACTIVE');
     const later = new Date(now.getTime() + 3 * 60_000);
     expect(await service.claimableIn(db as any, 'org', manualPost, session as any, 'REPLY', later)).toBe(true);
+    expect(await service.claimabilityReasonIn(db as any, 'org', manualPost, session as any, 'REPLY', later)).toBeNull();
     const manual = await service.reserveApi('org', 'manual', 'manual', later);
     expect((await service.authorizeApiSegment('org', manual.id, 0, actor, later)).granted).toBe(true);
     await service.apiOutcome('org', manual.id, 0, {
