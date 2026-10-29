@@ -1,4 +1,4 @@
-import { accountBindingError } from './account-binding-error';
+import { accountBindingError, type AccountBindingPurpose } from './account-binding-error';
 import { canonicalSendAccount } from './send-coordination.utils';
 import {
   BadRequestException,
@@ -135,7 +135,8 @@ export class SendBindingService {
     project: string | undefined,
     platform: string,
     action: SendAction,
-    id: string
+    id: string,
+    purpose: AccountBindingPurpose = 'SEND'
   ) {
     const relation =
       project !== undefined
@@ -161,7 +162,8 @@ export class SendBindingService {
       org,
       project,
       platform,
-      action
+      action,
+      purpose
     );
     if (code) {
       if (
@@ -438,7 +440,8 @@ export class SendBindingService {
         : 'sending-accounts:organization',
       body.requestId,
       body.accounts,
-      'LAST_WRITE_WINS'
+      'LAST_WRITE_WINS',
+      'CONFIGURE'
     );
     return { saved: result.saved, bindings: result.bindings };
   }
@@ -486,6 +489,7 @@ export class SendBindingService {
       requestId,
       { accounts, requestPayload },
       'OPTIMISTIC',
+      'SEND',
       updateSettings
     );
     return {
@@ -506,6 +510,7 @@ export class SendBindingService {
     requestId: string | undefined,
     payload: unknown,
     mode: 'LAST_WRITE_WINS' | 'OPTIMISTIC',
+    purpose: AccountBindingPurpose,
     updateSettings?: (
       settings: EngageConfigMetadata
     ) => EngageConfigMetadata & { scanEnabled?: boolean }
@@ -581,7 +586,8 @@ export class SendBindingService {
               project,
               platform,
               action,
-              change.integrationId
+              change.integrationId,
+              purpose
             );
           validated.push({ platform, action, change, prior });
         }

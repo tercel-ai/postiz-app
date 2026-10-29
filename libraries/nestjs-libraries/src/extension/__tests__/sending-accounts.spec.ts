@@ -165,18 +165,18 @@ describe('independent sending account resources', () => {
       .mockResolvedValueOnce({ id: 'b', revision: 3 });
     db.integrationProject.findFirst
       .mockResolvedValueOnce({ integration: actor, disabled: false, engageEnabled: true })
-      .mockResolvedValueOnce({ integration: actor, disabled: false, engageEnabled: false });
+      .mockResolvedValueOnce({ integration: { ...actor, id: 'reddit-account', providerIdentifier: 'reddit' }, disabled: false, engageEnabled: true });
     await expect(
       service.saveDefaults(
         'org',
         'user',
         {
-          accounts: { x: { POST: choice(), REPLY: choice() } },
+          accounts: { x: { POST: choice(), REPLY: choice('reddit-account') } },
           requestId: 'save',
         },
         'project'
       )
-    ).rejects.toMatchObject({ status: 403 });
+    ).rejects.toMatchObject({ status: 400 });
     expect(db.projectSendBinding.create).not.toHaveBeenCalled();
     expect(db.sendMutationReceipt.create).not.toHaveBeenCalled();
   });
@@ -502,5 +502,64 @@ describe.each([undefined, 'project'])('last-write-wins defaults at scope %s', pr
     await service.saveDefaults('org', 'user', body('a', 'x1'), project);
     await service.saveDefaults('org', 'user', body('b', 'x2'), project);
     expect(['sendIntent', 'sendExecution', 'sendQuotaReservation'].map(name => db.rows(name))).toEqual(snapshot);
+  });
+});
+
+describe('account preferences before execution verification', () => {
+  const platforms = ['x', 'reddit', 'linkedin', 'medium', 'quora', 'hackernews', 'devto'] as const;
+  function pendingIdentity(platform: string) {
+    const db = memorySendDatabase();
+    db.seed('userOrganization', { userId: 'user', organizationId: 'org', disabled: false });
+    const account = { ...actor, id: 'legacy-account', providerIdentifier: platform, identityNamespace: 'legacy', internalId: 'old-key' };
+    db.seed('integration', account);
+    db.seed('integrationProject', { integrationId: account.id, organizationId: 'org', projectId: 'project',
+      disabled: false, engageEnabled: true, integration: account });
+    const projects = { assertProjectActive: vi.fn(), assertProjectAccess: vi.fn() };
+    return { db, account, service: new SendBindingService(db as any, projects as any) };
+  }
+  for (const project of [undefined, 'project']) it.each(platforms)('saves pending %s identity preferences without authorizing execution at scope '+String(project), async platform => {
+    const { db, service, account } = pendingIdentity(platform);
+    const result = await service.saveDefaults('org', 'user', { requestId: 'preference', accounts: {
+      [platform]: { POST: { integrationId: account.id }, REPLY: { integrationId: account.id } },
+    } }, project);
+    expect(result.saved).toBe(true);
+    expect(db.rows(project === undefined ? 'organizationSendBinding' : 'projectSendBinding')).toHaveLength(2);
+    expect(db.rows('integration')[0]).toMatchObject({ identityNamespace: 'legacy', internalId: 'old-key' });
+    const defaults = await service.getDefaults('org', 'user', project);
+    expect(defaults.accounts[platform].POST).toMatchObject({ effectiveIntegrationId: account.id, blockCode: 'ACCOUNT_IDENTITY_UNRESOLVED' });
+    for (const action of ['POST', 'REPLY'] as const) {
+      await expect(service.resolve('org', 'project', platform, action)).rejects.toThrow('ACCOUNT_IDENTITY_UNRESOLVED');
+      await expect(service.resolveForEnqueueInTransaction(db as any, 'org', 'project', platform, action, undefined, true)).rejects.toThrow('ACCOUNT_IDENTITY_UNRESOLVED');
+    }
+    expect(db.rows('sendIntent')).toHaveLength(0);
+    expect(db.rows('sendExecution')).toHaveLength(0);
+  });
+  it.each([
+    [{ disabled: true }, {}, 'ACCOUNT_DISABLED'],
+    [{ inBetweenSteps: true }, {}, 'ACCOUNT_DISABLED'],
+    [{}, { engageEnabled: false }, 'REPLY_ACCOUNT_DISABLED'],
+  ])('stores preferences while preserving existing execution restrictions: %s %s', async (accountPatch, relationPatch, error) => {
+    const { db, service, account } = pendingIdentity('x');
+    Object.assign(db.rows('integration')[0], { identityNamespace: 'x.rest_id', internalId: '123' }, accountPatch);
+    Object.assign(db.rows('integrationProject')[0], relationPatch, { integration: db.rows('integration')[0] });
+    await expect(service.saveDefaults('org', 'user', { requestId: 'preference', accounts: { x: { REPLY: { integrationId: account.id } } } }, 'project')).resolves.toMatchObject({ saved: true });
+    await expect(service.resolve('org', 'project', 'x', 'REPLY')).rejects.toThrow(error);
+  });
+  it.each([
+    [{ organizationId: 'other' }, {}, 'ACCOUNT_DISABLED'],
+    [{ deletedAt: new Date('2026-10-29T00:00:00Z') }, {}, 'ACCOUNT_DISABLED'],
+    [{ providerIdentifier: 'reddit' }, {}, 'ACCOUNT_PLATFORM_MISMATCH'],
+    [{}, { disabled: true }, 'ACCOUNT_NOT_ASSIGNED'],
+  ])('refuses an invalid configuration target before persisting any preferences: %s %s', async (accountPatch, relationPatch, error) => {
+    const { db, service, account } = pendingIdentity('x');
+    Object.assign(db.rows('integration')[0], accountPatch);
+    Object.assign(db.rows('integrationProject')[0], relationPatch, { integration: db.rows('integration')[0] });
+    await expect(service.saveDefaults('org', 'user', { requestId: 'preference', accounts: { x: { POST: { integrationId: account.id } } } }, 'project')).rejects.toThrow(error);
+    expect(db.rows('projectSendBinding')).toHaveLength(0);
+  });
+  it('keeps automation binding changes strict while a default preference is pending verification', async () => {
+    const { db, service, account } = pendingIdentity('x');
+    await expect(service.save('org', 'user', 'project', 'POST', { x: { integrationId: account.id, expectedRevision: 0 } })).rejects.toThrow('ACCOUNT_IDENTITY_UNRESOLVED');
+    expect(db.rows('projectSendBinding')).toHaveLength(0);
   });
 });

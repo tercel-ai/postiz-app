@@ -1,9 +1,12 @@
 import { Integration } from '@prisma/client';
 import { SendAction } from './send-binding.dto';
 
+export type AccountBindingPurpose = 'SEND' | 'CONFIGURE';
+
 const canonicalPlatform = (provider: string) =>
   provider === 'linkedin-page' ? 'linkedin' : provider.toLowerCase();
 
+/** Preferences keep the selected integration; only sending requires a ready actor. */
 export function accountBindingError(
   account:
     | Pick<
@@ -21,19 +24,20 @@ export function accountBindingError(
   org: string,
   project: string | undefined,
   platform: string,
-  action: SendAction
+  action: SendAction,
+  purpose: AccountBindingPurpose = 'SEND'
 ): string | null {
   if (project !== undefined && (!relation || relation.disabled))
     return 'ACCOUNT_NOT_ASSIGNED';
   if (
     !account ||
     account.organizationId !== org ||
-    account.disabled ||
     account.deletedAt ||
-    account.inBetweenSteps
+    (purpose === 'SEND' && (account.disabled || account.inBetweenSteps))
   )
     return 'ACCOUNT_DISABLED';
   if (
+    purpose === 'SEND' &&
     project !== undefined &&
     action === 'REPLY' &&
     relation!.engageEnabled !== true
@@ -42,9 +46,8 @@ export function accountBindingError(
   if (canonicalPlatform(account.providerIdentifier) !== platform)
     return 'ACCOUNT_PLATFORM_MISMATCH';
   if (
-    !account.internalId ||
-    !account.identityNamespace ||
-    account.identityNamespace === 'legacy'
+    purpose === 'SEND' &&
+    (!account.internalId || !account.identityNamespace || account.identityNamespace === 'legacy')
   )
     return 'ACCOUNT_IDENTITY_UNRESOLVED';
   return null;
