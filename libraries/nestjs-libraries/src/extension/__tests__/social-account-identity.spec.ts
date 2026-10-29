@@ -343,3 +343,85 @@ it('never turns an absent Reddit ID into the string undefined',async()=>{
   expect(stableSocialIdentity('reddit','reddit.user_id',undefined as any)).toBeNull();
   expect(stableSocialIdentity('reddit','reddit.user_id','')).toBeNull();
 });
+
+describe('explicit migration of handle-based legacy accounts', () => {
+  const actors = [
+    ['x', 'x.rest_id', '123'], ['reddit', 'reddit.user_id', 'abc'],
+    ['linkedin', 'linkedin.fs_miniProfile', 'ACoAlice'], ['medium', 'medium.handle', 'alice'],
+    ['quora', 'quora.user_id', '123'], ['hackernews', 'hackernews.handle', 'alice'], ['devto', 'devto.user_id', '123'],
+  ] as const;
+  it.each(actors)('offers confirmation and migrates %s in place without losing project configuration', async (platform, namespace, id) => {
+    const f = fixture();
+    f.db.seed('integration', { id: 'legacy-account', organizationId: 'org', providerIdentifier: platform,
+      identityNamespace: 'legacy', internalId: '@alice', profile: 'alice', type: 'social',
+      name: 'Custom name', token: 'old-credential', metadata: { custom: 42 } });
+    f.db.seed('integrationProject', { organizationId: 'org', integrationId: 'legacy-account', projectId: 'project', disabled: false, engageEnabled: true });
+    f.db.seed('projectSendBinding', { organizationId: 'org', projectId: 'project', platform, action: 'POST', integrationId: 'legacy-account', revision: 3 });
+    f.db.seed('post', { id: 'historical-post', organizationId: 'org', integrationId: 'legacy-account', projectId: 'project', state: 'PUBLISHED', content: 'Original post' });
+    f.db.seed('sentReply', { id: 'historical-reply', organizationId: 'org', integrationId: 'legacy-account', projectId: 'project', content: 'Original reply' });
+    const history = structuredClone({ posts: f.db.rows('post'), replies: f.db.rows('sentReply') });
+    const projects = structuredClone(f.db.rows('integrationProject'));
+    const bindings = structuredClone(f.db.rows('projectSendBinding'));
+    expect(await f.resolve(platform, namespace, id)).toMatchObject({ blockCode: 'ACCOUNT_PROFILE_CONFLICT',
+      recovery: { integrationId: 'legacy-account', action: 'VERIFY_LEGACY', name: 'Custom name' } });
+    expect(f.db.rows('integration')[0].identityNamespace).toBe('legacy');
+    const result = await f.resolve(platform, namespace, id, { extensionRecovery: {
+      integrationId: 'legacy-account', verifiedByUserId: 'admin', probeId: 'fresh-live-proof',
+    } });
+    expect(result).toMatchObject({ registrationStatus: 'EXISTING', account: { id: 'legacy-account', internalId: id,
+      identityNamespace: namespace, name: 'Custom name', token: 'old-credential', metadata: { custom: 42,
+        identityAudit: { method: 'EXPLICIT_EXTENSION_RECOVERY' } } } });
+    expect(f.db.rows('integration')).toHaveLength(1);
+    expect(f.db.rows('integrationProject')).toEqual(projects);
+    expect(f.db.rows('projectSendBinding')).toEqual(bindings);
+    expect({ posts: f.db.rows('post'), replies: f.db.rows('sentReply') }).toEqual(history);
+  });
+  it.each(['sendIntent', 'accountWriteState'])('refuses identity replacement when %s already relies on the old account', async table => {
+    const f = fixture();
+    f.db.seed('integration', { id: 'old', organizationId: 'org', providerIdentifier: 'quora', type: 'social',
+      identityNamespace: 'legacy', internalId: 'Alice', profile: 'alice' });
+    f.db.seed(table, { organizationId: 'org', integrationId: 'old' });
+    expect(await f.resolve('quora', 'quora.user_id', '123', { extensionRecovery: {
+      integrationId: 'old', verifiedByUserId: 'admin', probeId: 'live',
+    } })).toMatchObject({ blockCode: 'ACCOUNT_IDENTITY_IN_USE' });
+    expect(f.db.rows('integration')[0].internalId).toBe('Alice');
+  });
+  it('does not offer an arbitrary recovery for ambiguous legacy profiles', async () => {
+    const f = fixture();
+    for (const key of ['alice', '@alice']) f.db.seed('integration', { id: `old-${key}`, organizationId: 'org', providerIdentifier: 'quora',
+      type: 'social', identityNamespace: 'legacy', internalId: key, profile: 'alice' });
+    expect(await f.resolve('quora', 'quora.user_id', '123')).toEqual({ blockCode: 'ACCOUNT_PROFILE_CONFLICT' });
+  });
+  it('refuses a confirmed legacy account whose profile differs from the freshly verified actor', async () => {
+    const f = fixture();
+    f.db.seed('integration', { id: 'old', organizationId: 'org', providerIdentifier: 'quora', type: 'social',
+      identityNamespace: 'legacy', internalId: 'Bob', profile: 'bob' });
+    expect(await f.resolve('quora', 'quora.user_id', '123', { extensionRecovery: {
+      integrationId: 'old', verifiedByUserId: 'admin', probeId: 'live',
+    } })).toMatchObject({ blockCode: 'ACCOUNT_RECOVERY_CHANGED' });
+    expect(f.db.rows('integration')[0].internalId).toBe('Bob');
+  });
+});
+
+it('never repurposes a legacy account with a different platform ID just because its current profile matches', async () => {
+  const f = fixture();
+  f.db.seed('integration', { id: 'old', organizationId: 'org', providerIdentifier: 'x', type: 'social',
+    identityNamespace: 'legacy', internalId: '123', profile: 'alice' });
+  expect(await f.resolve('x', 'x.rest_id', '456', { extensionRecovery: {
+    integrationId: 'old', verifiedByUserId: 'admin', probeId: 'live',
+  } })).toMatchObject({ blockCode: 'ACCOUNT_RECOVERY_CHANGED' });
+  expect(f.db.rows('integration')[0].internalId).toBe('123');
+});
+
+it('refuses legacy handle promotion when a different canonical identity already owns the profile', async () => {
+  const f = fixture();
+  f.db.seed('integration', { id: 'old', organizationId: 'org', providerIdentifier: 'quora', type: 'social',
+    identityNamespace: 'legacy', internalId: 'Alice', profile: 'alice' });
+  f.db.seed('integration', { id: 'canonical', organizationId: 'org', providerIdentifier: 'quora', type: 'social',
+    identityNamespace: 'quora.user_id', internalId: '123', profile: 'alice' });
+  expect(await f.resolve('quora', 'quora.user_id', '456', { extensionRecovery: {
+    integrationId: 'old', verifiedByUserId: 'admin', probeId: 'live',
+  } })).toMatchObject({ blockCode: 'ACCOUNT_PROFILE_CONFLICT' });
+  expect(f.db.rows('integration').find(row => row.id === 'old')).toMatchObject({ identityNamespace: 'legacy', internalId: 'Alice' });
+  expect(f.db.rows('integration')).toHaveLength(2);
+});

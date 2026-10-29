@@ -95,3 +95,44 @@ describe('cookie-bound actor continuity', () => {
       accountRecovery: { integrationId: initial.results[0].integrationId, confirmed: true } }, 5)).rejects.toThrow('ACCOUNT_RECOVERY_EVIDENCE_REQUIRED');
   });
 });
+
+describe('seven-platform availability continuity', () => {
+  const actors = [
+    ['x', '123', 'x.rest_id'], ['reddit', 'abc', 'reddit.user_id'],
+    ['linkedin', 'ACoAlice', 'linkedin.fs_miniProfile'], ['medium', 'alice', 'medium.handle'],
+    ['quora', '123', 'quora.user_id'], ['hackernews', 'alice', 'hackernews.handle'],
+    ['devto', '123', 'devto.user_id'],
+  ] as const;
+  it.each(actors)('renews %s through the persisted report and projects it as available without due work', async (platform, id, namespace) => {
+    const db = memorySendDatabase();
+    db.seed('extensionNode', { id: 'node', nodeId: 'node', organizationId: 'org', status: 'ACTIVE', lastReportSequence: 0,
+      capabilities: { [platform]: { post: true, reply: true, strictAccountVerification: true } } });
+    const service = new ExtensionNodeService(db as any);
+    vi.spyOn(service, 'authenticateIn').mockImplementation(async () => db.rows('extensionNode')[0]);
+    vi.spyOn(service as any, 'member').mockResolvedValue({ role: 'ADMIN' });
+    const actor = { ...live, platform, id, identityNamespace: namespace,
+      evidenceKind: platform === 'x' || platform === 'reddit' ? 'LIVE_COOKIE_ID' : 'LIVE_PAGE_ACTOR' };
+    const report = (row: any, sequence: number) => service.report('org', 'user', 'node', 'token',
+      { checkedAt: row.identityObservedAt, reportSequence: sequence, platforms: [row] }, { canCreateChannels: true, maxChannels: 2 });
+    const initial: any = await report(actor, 1);
+    const prior = structuredClone(db.rows('extensionNodeSession')[0]);
+    vi.setSystemTime(later);
+    const result: any = await report({ ...actor, evidenceKind: 'SESSION_BOUND_ACTOR', probeId: 'continuity', identityObservedAt: later.toISOString() }, 2);
+    expect(result.results[0]).toMatchObject({ integrationId: initial.results[0].integrationId, verificationStatus: 'VERIFIED' });
+    expect(db.rows('integration')).toHaveLength(1);
+    const current = db.rows('extensionNodeSession')[0];
+    expect(current).toMatchObject({ verifiedAt: prior.verifiedAt, probeId: prior.probeId, sessionRevision: prior.sessionRevision,
+      verificationExpiresAt: new Date(later.getTime() + 300_000) });
+    const { projectAccountTerminal, terminalAvailability } = await import('../extension-node.projection');
+    const terminal = projectAccountTerminal(db.rows('extensionNode')[0] as any, current as any, later);
+    expect(terminal).toMatchObject({ connectionStatus: 'ONLINE', sessionStatus: 'VERIFIED' });
+    expect(terminalAvailability([terminal], 'POST')).toBe('AVAILABLE');
+    expect(terminalAvailability([terminal], 'REPLY')).toBe('AVAILABLE');
+    const identity = { id, namespace, sessionBinding: binding };
+    const reading = { ...actor, evidenceKind: 'SESSION_BOUND_ACTOR', probeId: 'new', identityObservedAt: later.toISOString() };
+    const previous = { ...prior, accountIdentity: identity, lastVerifiedIdentity: identity };
+    expect(sessionDecision({ ...reading, sessionBinding: 'b'.repeat(64) }, previous, later, initial.results[0].integrationId).verificationStatus).toBe('UNKNOWN');
+    expect(sessionDecision(reading, previous, later, 'different-account').verificationStatus).toBe('UNKNOWN');
+    expect(sessionDecision({ ...reading, preflightChallenge: 'challenge' }, previous, later, initial.results[0].integrationId).verificationStatus).toBe('UNKNOWN');
+  });
+});

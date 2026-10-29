@@ -1,3 +1,4 @@
+import { normalizeHandle } from '../database/prisma/integrations/extension-session.utils';
 import { requiresLegacyIdentityKey } from './integration-identity-schema';
 import { Injectable } from '@nestjs/common';
 import { Integration, Prisma } from '@prisma/client';
@@ -136,14 +137,32 @@ export class SocialAccountIdentityService {
       )
     )
       return { blockCode: 'ACCOUNT_IDENTITY_UNRESOLVED' };
-    const account = matches[0];
+    let account = matches[0];
+    // A matching legacy profile is only a recovery suggestion. It is not stable
+    // identity proof and must never silently create, merge or verify an account.
+    const reportedHandle = normalizeHandle(options.handle ?? '');
+    const legacyProfiles = !account && options.source === 'EXTENSION' && reportedHandle
+      ? rows.filter(row => row.identityNamespace === 'legacy' && !row.deletedAt &&
+        row.type === 'social' && normalizeHandle(row.profile ?? '') === reportedHandle &&
+        normalizeHandle(row.internalId) === reportedHandle)
+      : [];
+    const legacyProfile = legacyProfiles.length === 1 ? legacyProfiles[0] : undefined;
+    if (!account && options.extensionRecovery) {
+      if (legacyProfile?.id !== options.extensionRecovery.integrationId)
+        return { blockCode: 'ACCOUNT_RECOVERY_CHANGED' };
+      account = legacyProfile;
+    }
+    const suggestedRecovery = !account && legacyProfile ? {
+      integrationId: legacyProfile.id, action: 'VERIFY_LEGACY' as const,
+      name: legacyProfile.name || legacyProfile.profile || legacyProfile.internalId,
+    } : undefined;
     const profile = options.handle?.trim() || account?.profile;
-    if (isNewIntegrationProfileClaim(account, {
+    if ((account?.identityNamespace === 'legacy' || isNewIntegrationProfileClaim(account, {
       organizationId: org, providerIdentifier: platform, type: account?.type ?? 'social',
       profile, deletedAt: null,
-    }) && await hasIntegrationProfileConflict(
+    })) && await hasIntegrationProfileConflict(
       tx, org, platform, profile, account?.id
-    )) return { blockCode: 'ACCOUNT_PROFILE_CONFLICT' };
+    )) return { blockCode: 'ACCOUNT_PROFILE_CONFLICT', ...(suggestedRecovery ? { recovery: suggestedRecovery } : {}) };
     const recovery =
       account && (account.deletedAt || account.identityNamespace === 'legacy')
         ? {

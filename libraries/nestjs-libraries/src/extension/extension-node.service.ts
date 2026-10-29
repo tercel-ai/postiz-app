@@ -594,6 +594,11 @@ export class ExtensionNodeService {
           if (
             !entry.accountRecovery &&
             resolved.recovery?.action === 'VERIFY_LEGACY' &&
+            // Automatic migration requires the same platform ID. A matching
+            // handle can only suggest explicit administrator confirmation.
+            accounts.some(account => account.id === resolved.recovery!.integrationId &&
+              stableSocialIdentity(observationProvider(entry), entry.identityNamespace!, account.internalId)?.id ===
+                stableSocialIdentity(observationProvider(entry), entry.identityNamespace!, entry.id!)?.id) &&
             (await this.automaticLegacyRecoveryAllowedIn(tx, org, user))
           ) {
             resolved = await identityService.resolveIn(

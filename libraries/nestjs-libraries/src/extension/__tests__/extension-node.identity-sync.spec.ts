@@ -634,3 +634,21 @@ it('invalidates company eligibility on a LinkedIn member change or logout', asyn
   expect(session.verificationStatus).toBe('UNKNOWN');
   expect(session.verificationExpiresAt).toBeNull();
 });
+
+it('requires explicit confirmation to migrate a legacy Quora handle and preserves the original project binding', async () => {
+  const f = fixture();
+  f.db.seed('userOrganization', { userId: 'user', organizationId: 'org', role: 'ADMIN', disabled: false });
+  f.db.seed('integration', { id: 'old-quora', organizationId: 'org', providerIdentifier: 'quora', type: 'social',
+    identityNamespace: 'legacy', internalId: 'Cathy-4011', profile: 'Cathy-4011', name: 'Original account' });
+  f.db.seed('integrationProject', { organizationId: 'org', integrationId: 'old-quora', projectId: 'project', disabled: false });
+  const reading = { platform: 'quora', id: '456', identityNamespace: 'quora.user_id', handle: 'Cathy-4011', evidenceKind: 'LIVE_PAGE_ACTOR' };
+  const preview: any = await f.report('node-a', reading);
+  expect(preview.results[0]).toMatchObject({ integrationId: null, verificationStatus: 'UNKNOWN',
+    recovery: { integrationId: 'old-quora', action: 'VERIFY_LEGACY' } });
+  expect(f.db.rows('integration')[0].identityNamespace).toBe('legacy');
+  const confirmed: any = await f.report('node-a', { ...reading, accountRecovery: { integrationId: 'old-quora', confirmed: true } });
+  expect(confirmed.results[0]).toMatchObject({ integrationId: 'old-quora', verificationStatus: 'VERIFIED', registrationStatus: 'EXISTING' });
+  expect(f.db.rows('integration')).toHaveLength(1);
+  expect(f.db.rows('integrationProject')[0].integrationId).toBe('old-quora');
+  expect(f.db.rows('integration')[0].metadata.identityAudit.method).toBe('EXPLICIT_EXTENSION_RECOVERY');
+});

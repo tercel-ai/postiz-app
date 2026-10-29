@@ -1,4 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
+import { stableSocialIdentity } from './social-account-identity.service';
 
 export const SESSION_TTL_MS = 300_000;
 export const NODE_ONLINE_MS = 180_000;
@@ -137,8 +138,8 @@ export function sessionDecision(
     !entry.preflightChallenge && sameAccount && previous?.verificationStatus === 'VERIFIED' && !!previous.verifiedAt &&
     /^[a-f0-9]{64}$/.test(entry.sessionBinding ?? '') && entry.sessionBinding === priorIdentity?.sessionBinding &&
     entry.identityNamespace === priorIdentity?.namespace && !!entry.id && entry.id === priorIdentity.id &&
-    ((entry.platform === 'linkedin' && entry.identityNamespace === 'linkedin.fs_miniProfile') ||
-      (entry.platform === 'devto' && entry.identityNamespace === 'devto.user_id') ||
+    ((entry.identityNamespace !== 'linkedin.organization_id' &&
+        !!stableSocialIdentity(entry.platform, entry.identityNamespace, entry.id)) ||
       (entry.platform === 'linkedin' && entry.identityNamespace === 'linkedin.organization_id' &&
         entry.actorContext === 'COMPANY_ADMIN' && ['COMPANY_ADMIN', 'COMPOSER'].includes(priorIdentity.actorContext ?? '') &&
         !!entry.controllerId && entry.controllerId === priorIdentity.controllerId));

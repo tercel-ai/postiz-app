@@ -1,3 +1,4 @@
+import { CONTROLLED_SEND_PLATFORMS } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
 import { ApiOperation } from '@nestjs/swagger';
 import { SendModeService } from '@gitroom/nestjs-libraries/extension/send-mode.service';
 import { PrismaService } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
@@ -193,7 +194,7 @@ export class SendProtocolController {
       sendingMode: state.mode, modeRevision: state.revision,
       autonomousAllowed: state.autonomousAllowed,
       controlledDrain: Boolean(state.controlledDrain?.remainingCount),
-      sessionBoundActors: true,
+      sessionBoundActors: true, sessionBoundPlatforms: [...CONTROLLED_SEND_PLATFORMS],
       coordinationRequired: state.mode !== 'AUTONOMOUS', nodesEnabled: controlled,
       userId: user.id, organizationId: org.id, serverNow: new Date().toISOString() };
   }
