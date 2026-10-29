@@ -1337,7 +1337,8 @@ export class SendCoordinatorService {
     execution: SendExecution,
     index: number,
     outcome: SendOutcome,
-    now: Date
+    now: Date,
+    verifiedReply = false
   ) {
     if (
       outcome.url &&
@@ -1422,7 +1423,7 @@ export class SendCoordinatorService {
       segment.status === 'CONFIRMED' &&
       outcome.status === 'confirmed' &&
       previousResult?.platformId !== outcome.platformId;
-    if (segment.status === 'NOT_SUBMITTED' && outcome.status === 'confirmed')
+    if (segment.status === 'NOT_SUBMITTED' && outcome.status === 'confirmed' && !verifiedReply)
       conflict = true;
     if (
       segment.status === 'PENDING' &&
@@ -1496,7 +1497,7 @@ export class SendCoordinatorService {
       }
     } else if (
       segment.status !== 'CONFIRMED' &&
-      segment.status !== 'NOT_SUBMITTED'
+      (segment.status !== 'NOT_SUBMITTED' || (verifiedReply && outcome.status === 'confirmed'))
     ) {
       if (outcome.status === 'definitely_not_submitted') {
         if (
@@ -1555,7 +1556,9 @@ export class SendCoordinatorService {
           data: { status: 'RECONCILING', revision: { increment: 1 } },
         });
       } else {
-        await this.quotas.settle(tx, org, execution.id, index, true, now);
+        if (segment.status === 'NOT_SUBMITTED')
+          await this.quotas.correctLateConfirmation(tx, org, execution.id, index, now);
+        else await this.quotas.settle(tx, org, execution.id, index, true, now);
         await tx.sendSegment.update({
           where: { id: segment.id },
           data: {
@@ -1710,6 +1713,101 @@ export class SendCoordinatorService {
         previousResult: previous?.result as { platformId?: string } | null,
         nextWriteNotBefore: account.nextWriteNotBefore,
       };
+    });
+  }
+
+  /** An attended owner review settles a single saved Medium reply through its original ledger. */
+  async verifySavedReply(
+    org: string,
+    user: string,
+    executionId: string,
+    sentReplyId: string,
+    body: SendOutcome & { expectedResolutionRevision: number; text: string; targetUrl: string; reviewedNotSent?: boolean }
+  ) {
+    return sendTransaction(this.db, async (tx) => {
+      await this.assertMember(tx, org, user);
+      const execution = await this.execution(tx, org, executionId);
+      const intent = await tx.sendIntent.findFirst({ where: { id: execution.sendIntentId, organizationId: org } });
+      const reply = await tx.engageSentReply.findFirst({ where: {
+        id: sentReplyId, organizationId: org, projectId: execution.projectId,
+      } });
+      const post = reply && await tx.post.findFirst({ where: {
+        id: reply.postId, organizationId: org, projectId: execution.projectId, sendIntentId: execution.sendIntentId,
+      } });
+      const payload = execution.payload as Array<{ id: string; text?: string; content?: string; settings?: string }>;
+      const target = execution.target as { id?: string; idNamespace?: string };
+      const normalize = (text: string) => text.normalize('NFC').replace(/[\u200b\ufeff]/g, '').replace(/\s+/g, ' ').trim();
+      const storyId = (value?: string) => {
+        try {
+          const url = new URL(value ?? '');
+          return url.protocol === 'https:' && !url.username && !url.password && !url.port
+            ? /(?:\/p\/|[-/])([a-f0-9]{12})\/?$/i.exec(url.pathname)?.[1]?.toLowerCase() : undefined;
+        } catch { return undefined; }
+      };
+      let settings: { replyUrl?: string } = {};
+      try { settings = JSON.parse(payload?.[0]?.settings ?? '{}'); } catch { /* Reject malformed original settings below. */ }
+      if (!intent || !reply || !post || post.deletedAt || post.error?.startsWith('Manually marked failed: ') ||
+          intent.rootPostId !== post.id || intent.projectId !== execution.projectId ||
+          intent.platform !== 'medium' || intent.action !== 'REPLY' || execution.platform !== 'medium' ||
+          execution.action !== 'REPLY' || payload?.length !== 1 || payload[0].id !== post.id ||
+          target.idNamespace !== 'medium.handle' || !target.id ||
+          !storyId(settings.replyUrl) || storyId(body.targetUrl) !== storyId(settings.replyUrl) || !body.text?.trim() ||
+          normalize(body.text) !== normalize(payload[0].text ?? payload[0].content ?? ''))
+        reject('SEND_REPLY_VERIFICATION_SCOPE_MISMATCH');
+      if (!['confirmed', 'definitely_not_submitted'].includes(body.status) || !body.evidence?.trim())
+        throw new BadRequestException('SEND_RECONCILIATION_EVIDENCE_REQUIRED');
+      let platformId: string | undefined;
+      if (body.status === 'confirmed') {
+        let url: URL;
+        try { url = new URL(body.url ?? ''); } catch { throw new BadRequestException('INVALID_MEDIUM_REPLY_RECEIPT'); }
+        const match = url.pathname.match(/^\/@([^/]+)\/[^/]+-([a-f0-9]{12})$/i);
+        if (url.protocol !== 'https:' || url.host !== 'medium.com' || url.username || url.password ||
+            url.search || url.hash || !match || match[1] !== target.id ||
+            storyId(settings.replyUrl) === match[2].toLowerCase())
+          throw new BadRequestException('INVALID_MEDIUM_REPLY_RECEIPT');
+        platformId = body.url;
+      } else if (!body.reviewedNotSent || !body.stopped) {
+        reject('REPLY_ABSENCE_REVIEW_REQUIRED');
+      }
+      const event: SendOutcome = {
+        eventId: `reply-review:${user}:${sendHash(body.eventId)}`,
+        status: body.status, evidence: `Reply owner ${user}: ${body.evidence}`,
+        ...(platformId ? { platformId, url: body.url } : { stopped: true }),
+      };
+      if (execution.fencingVersion !== intent.fencingVersion ||
+          (intent.activeExecutionId && intent.activeExecutionId !== executionId))
+        reject('SEND_REPLY_VERIFICATION_NOT_SETTLED');
+      const prior = await tx.sendOutcomeEvent.findUnique({ where: { executionId_segmentIndex_eventId: {
+        executionId, segmentIndex: 0, eventId: event.eventId,
+      } } });
+      if (prior) {
+        if (prior.requestHash !== sendHash(event)) reject('SEND_OUTCOME_EVENT_CONFLICT');
+        if (body.status === 'definitely_not_submitted' &&
+            (intent.status !== 'FAILED_FINAL' || intent.activeExecutionId || intent.hasConfirmedSegments))
+          reject('SEND_RETRY_UNSAFE');
+        return body.status === 'confirmed' ? { status: 'confirmed' as const, url: body.url! } : { status: 'retryable' as const };
+      }
+      if (!Number.isSafeInteger(body.expectedResolutionRevision) || body.expectedResolutionRevision !== execution.resolutionRevision)
+        reject('SEND_RESOLUTION_REVISION_CONFLICT');
+      const segments = await tx.sendSegment.findMany({ where: { executionId, organizationId: org } });
+      const segment = segments[0];
+      const now = new Date();
+      // A lookup never revokes a live writer or supersedes a newer retry.
+      if (segments.length !== 1 || segment.segmentIndex !== 0 || segment.postId !== post.id ||
+          !['RECONCILING', 'FAILED_FINAL'].includes(execution.status) ||
+          !['UNKNOWN', 'NOT_SUBMITTED'].includes(segment.status) ||
+          (segment.submitBefore && segment.submitBefore > now))
+        reject('SEND_REPLY_VERIFICATION_NOT_SETTLED');
+      if (body.status === 'definitely_not_submitted' && intent.hasConfirmedSegments)
+        reject('SEND_RETRY_UNSAFE');
+      const result = await this.outcomeIn(tx, execution, 0, event, now, true);
+      if (result.conflict) reject('SEND_OUTCOME_CONFLICT_REQUIRES_RECONCILIATION');
+      const settled = await tx.sendIntent.findUniqueOrThrow({ where: { id: intent.id } });
+      if (body.status === 'definitely_not_submitted' &&
+          (settled.status !== 'FAILED_FINAL' || settled.activeExecutionId || settled.hasConfirmedSegments))
+        reject('SEND_RETRY_UNSAFE');
+      await tx.sendExecution.update({ where: { id: executionId }, data: { resolutionRevision: { increment: 1 } } });
+      return body.status === 'confirmed' ? { status: 'confirmed' as const, url: body.url! } : { status: 'retryable' as const };
     });
   }
 

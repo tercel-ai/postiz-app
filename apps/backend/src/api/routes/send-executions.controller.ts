@@ -26,6 +26,7 @@ import {
   EnqueueSendDto,
   StopSendDto,
   ReconcileSendDto,
+  VerifySavedReplyDto,
 } from '@gitroom/nestjs-libraries/extension/send-execution.dto';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 
@@ -155,6 +156,16 @@ export class SendExecutionsController {
 @Controller('/sending/executions')
 export class SendReconciliationController {
   constructor(private readonly sends: SendCoordinatorService) {}
+  @Post('/:id/replies/:sentReplyId/verify')
+  verifyReply(
+    @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
+    @Param('id') id: string,
+    @Param('sentReplyId') sentReplyId: string,
+    @Body() body: VerifySavedReplyDto
+  ) {
+    return this.sends.verifySavedReply(org.id, user.id, id, sentReplyId, body);
+  }
   @Get('/:id')
   get(
     @GetOrgFromRequest() org: Organization,

@@ -51,3 +51,10 @@ export class QueueStoredReplyDto {
   @IsOptional() @IsInt() @Min(1) expectedContentRevision?: number;
   @IsOptional() @IsString() @MaxLength(128) requestId?: string;
 }
+
+/** Full original reply scope plus an explicit review for a negative lookup. */
+export class VerifySavedReplyDto extends ReconcileSendDto {
+  @IsString() @MaxLength(100000) text: string;
+  @IsString() @MaxLength(2048) targetUrl: string;
+  @IsOptional() @IsBoolean() reviewedNotSent?: boolean;
+}
