@@ -109,6 +109,7 @@ export class SendModeController {
   }
 
   @Get('/autonomous-effects')
+  @ApiOperation({ summary: 'List unresolved autonomous write receipts' })
   listAutonomousEffects(
     @GetOrgFromRequest() org: Organization,
     @GetUserFromRequest() user: User

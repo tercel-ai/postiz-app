@@ -2,6 +2,7 @@ import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { AuthMiddleware } from '@gitroom/backend/services/auth/auth.middleware';
 import { AuthService } from '@gitroom/backend/services/auth/auth.service';
 import { AdminSettingsController } from './routes/admin-settings.controller';
+import { AdminSendRecoveryController } from './routes/admin-send-recovery.controller';
 import { AdminOrganizationsController } from './routes/admin-organizations.controller';
 import { AdminPostsController } from './routes/admin-posts.controller';
 import { AdminIntegrationsController } from './routes/admin-integrations.controller';
@@ -15,6 +16,7 @@ import { AdminExtensionController } from './routes/admin-extension.controller';
 import { AdminEngageController } from './routes/admin-engage.controller';
 
 const adminControllers = [
+  AdminSendRecoveryController,
   AdminSettingsController,
   AdminOrganizationsController,
   AdminPostsController,

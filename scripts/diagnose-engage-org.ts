@@ -1,11 +1,9 @@
+import { recoveryDatabase } from './lib/recovery-database';
 /**
  * Read-only Engage reply inventory. No reply content or credentials are printed.
  * Verify the actual connection target before using --database-verified.
  */
-import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import dotenv from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 
 async function main() {
@@ -24,15 +22,8 @@ async function main() {
   }
   const limit = Number(values.limit);
   if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error('Limit must be an integer from 1 to 1000');
-  const envPath = resolve(__dirname, '../.env');
-  const env = existsSync(envPath) ? dotenv.parse(readFileSync(envPath)) : {};
-  const url = new URL(process.env.DATABASE_URL || env.DATABASE_URL || '');
-  if (!['postgres:', 'postgresql:'].includes(url.protocol) || decodeURIComponent(url.pathname.slice(1)) !== 'aisee_postiz_dev') {
-    throw new Error('DATABASE_URL must name aisee_postiz_dev');
-  }
-  url.searchParams.set('connect_timeout', '5');
-  url.searchParams.set('pool_timeout', '5');
-  const db = new PrismaClient({ datasources: { db: { url: url.href } }, log: [] });
+  const connection = recoveryDatabase(values['database-verified']);
+  const db = new PrismaClient({ datasources: { db: { url: connection.url } }, log: [] });
   try {
     const organizationId = values['organization-id'];
     const [total, rows, unlinked] = await Promise.all([

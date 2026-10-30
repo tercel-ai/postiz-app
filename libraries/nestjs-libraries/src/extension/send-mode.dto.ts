@@ -160,3 +160,16 @@ export class ResolveLegacyReplyRecoveryDto extends BrowserReplyRecoveryDto {
   @MaxLength(2000)
   evidence!: string;
 }
+
+export class ResolveLegacyPostRecoveryDto extends BrowserReplyRecoveryDto {
+  @IsIn([true])
+  executorStopped!: true;
+
+  @IsIn([true])
+  noPendingSubmit!: true;
+
+  @IsString()
+  @Matches(/\S/)
+  @MaxLength(2000)
+  evidence!: string;
+}

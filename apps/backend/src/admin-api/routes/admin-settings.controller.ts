@@ -32,11 +32,11 @@ import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.req
 import { User } from '@prisma/client';
 import { SEND_ACCOUNT_POLICY_KEY, SendPolicyService } from '@gitroom/nestjs-libraries/extension/send-policy.service';
 import { SaveSystemSendPolicyDto } from '@gitroom/nestjs-libraries/extension/send-policy.dto';
-import { SendModeService, SEND_MODE_SYSTEM_KEY, SEND_MODE_ORGANIZATION_PREFIX } from '@gitroom/nestjs-libraries/extension/send-mode.service';
+import { SendModeService, SEND_MODE_SYSTEM_KEY, SEND_MODE_ORGANIZATION_PREFIX, SEND_MAINTENANCE_RECOVERY_PREFIX } from '@gitroom/nestjs-libraries/extension/send-mode.service';
 import { SaveSystemSendModeDto } from '@gitroom/nestjs-libraries/extension/send-mode.dto';
 
 const RESERVED_KEYS = ['ai_model_pricing', SEND_ACCOUNT_POLICY_KEY, SEND_MODE_SYSTEM_KEY];
-const reservedKey = (key: string) => RESERVED_KEYS.includes(key) || key.startsWith(SEND_MODE_ORGANIZATION_PREFIX);
+const reservedKey = (key: string) => RESERVED_KEYS.includes(key) || (key.startsWith(SEND_MODE_ORGANIZATION_PREFIX) || key.startsWith(SEND_MAINTENANCE_RECOVERY_PREFIX));
 
 function safePage(val?: string): number {
   const n = val ? Number(val) : 1;

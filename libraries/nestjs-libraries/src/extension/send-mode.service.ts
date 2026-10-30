@@ -16,6 +16,7 @@ import {
   CancelSendModeTransitionDto,
   ResolveAutonomousEffectDto,
   ResolveLegacyReplyRecoveryDto,
+  ResolveLegacyPostRecoveryDto,
   SaveSendModeDto,
   SaveSystemSendModeDto,
 } from './send-mode.dto';
@@ -26,6 +27,9 @@ import { readEngageConfigMetadata } from '../engage/engage-config-metadata';
 
 export const SEND_MODE_SYSTEM_KEY = 'sending.account_bound_enabled';
 export const SEND_MODE_ORGANIZATION_PREFIX = 'sending.organization_mode:';
+export const SEND_MAINTENANCE_RECOVERY_PREFIX = 'sending.maintenance-recovery:';
+export interface MaintenanceRecoveryActor { kind: 'MAINTENANCE'; operator: string; host: string }
+export type MaintenanceRecoveryRequest = Omit<ResolveLegacyPostRecoveryDto, 'expectedUserId' | 'reviewConfirmed'> & { expectedActorKey: string };
 export const organizationSendModeKey = (organizationId: string) =>
   `${SEND_MODE_ORGANIZATION_PREFIX}${organizationId}`;
 export type OrganizationSendingMode = 'AUTONOMOUS' | 'CONTROLLED';
@@ -108,6 +112,9 @@ export interface SendModeTransitionState {
     | null;
   lastCheckedAt: string;
   pendingByKind: Record<string, number>;
+  recoveryPosts?: Array<{ postId: string; source: string; state: string; platform: string | null; claimPresent: boolean; publicationEvidencePresent: boolean }>;
+  missingPostIds?: string[];
+  recoveryPostsTruncated?: boolean;
 }
 export interface SendModeState {
   organizationId: string;
@@ -419,7 +426,7 @@ export class SendModeService {
           {
             OR: [
               { executionProtocol: null },
-              { executionProtocol: { not: 'ACCOUNT_BOUND_V1' } },
+              { executionProtocol: { notIn: ['ACCOUNT_BOUND_V1', 'LEGACY_QUARANTINED'] } },
             ],
           },
           {
@@ -707,6 +714,11 @@ export class SendModeService {
       estimatedCompletionAt: null,
       waitReason,
       lastCheckedAt: new Date().toISOString(),
+      recoveryPosts: remainingPosts.slice(0, 100).map(post => ({ postId: post.id, source: post.source,
+        state: post.state, platform: post.providerIdentifier, claimPresent: !!post.releaseId,
+        publicationEvidencePresent: !!post.releaseURL })),
+      missingPostIds: missingIds.slice(0, 100),
+      recoveryPostsTruncated: remainingPosts.length > 100 || missingIds.length > 100,
       pendingByKind: {
         queuedPosts: remainingPosts.filter((post) => post.state === 'QUEUE')
           .length,
@@ -965,6 +977,9 @@ export class SendModeService {
     existingPostIds?: string[]
   ) {
     const state = await this.lockIn(tx, organizationId);
+    if (existingPostIds?.length && await tx.post.findFirst({ where: { organizationId,
+      id: { in: existingPostIds }, executionProtocol: 'LEGACY_QUARANTINED' } }))
+      throw new ConflictException('LEGACY_CONTENT_QUARANTINED');
     if (state.configuredMode === 'CONTROLLED' && state.legacyDrain && existingPostIds?.length) {
       const captured = await this.capturedWorkIn(tx, organizationId);
       const active = new Set((await this.pendingPostsIn(tx, organizationId)).map(post => post.id));
@@ -2262,6 +2277,166 @@ export class SendModeService {
       if (saved.count !== 1) throw retryConflict();
       await this.releaseUnsentReplyClaimIn(tx, organizationId, next);
       return { id, status: next.status, organizationId, userId };
+    });
+  }
+
+  private async legacyPostRecoveryIn(tx: Prisma.TransactionClient, organizationId: string, postId: string) {
+    const first = await tx.post.findFirst({ where: { organizationId, id: postId } });
+    if (!first) throw new BadRequestException('LEGACY_POST_NOT_FOUND');
+    // Inspect the entire connected thread, including deleted and published ancestors.
+    const posts = new Map([[first.id, first]]);
+    let frontier = [first];
+    while (frontier.length) {
+      const ids = frontier.map(post => post.id);
+      const parents = frontier.map(post => post.parentPostId).filter((id): id is string => !!id && !posts.has(id));
+      const neighbors = await tx.post.findMany({ where: { organizationId,
+        OR: [{ id: { in: parents } }, { parentPostId: { in: ids } }] }, orderBy: { id: 'asc' }, take: 501 });
+      frontier = neighbors.filter(post => !posts.has(post.id));
+      for (const post of frontier) posts.set(post.id, post);
+      if (posts.size > 500 || neighbors.length > 500) throw new ConflictException('LEGACY_THREAD_TOO_LARGE');
+    }
+    const ordered = [...posts.values()].sort((a, b) => a.id.localeCompare(b.id));
+    const [setting, allReceipts, active] = await Promise.all([
+      tx.settings.findUnique({ where: { key: organizationSendModeKey(organizationId) } }),
+      this.autonomousRecordsIn(tx, organizationId),
+      this.activeLegacyPostIdsIn(tx, organizationId),
+    ]);
+    const config = this.parseOrganization(setting?.value);
+    const captured = config.legacyDrain ?? config.transition;
+    const receipts = allReceipts.filter(({ result }) => result.postIds?.some(id => posts.has(id)))
+      .sort((a, b) => a.row.id.localeCompare(b.row.id));
+    const reasons: string[] = [];
+    if (config.mode !== 'CONTROLLED') reasons.push('CONTROLLED_MODE_REQUIRED');
+    if (ordered.some(post => post.source !== 'calendar')) reasons.push('CALENDAR_THREAD_REQUIRED');
+    if (ordered.some(post => post.sendIntentId || !isLegacyExecution(post.executionProtocol))) reasons.push('CONTROLLED_THREAD_MEMBER');
+    if (ordered.some(post => post.parentPostId && !posts.has(post.parentPostId))) reasons.push('THREAD_PARENT_MISSING');
+    if (!ordered.some(post => active.includes(post.id))) reasons.push('NO_LEGACY_OWNERSHIP');
+    if (receipts.some(({ result }) => ['AUTHORIZED', 'UNKNOWN'].includes(result.status))) reasons.push('UNRESOLVED_RECEIPT');
+    const candidates = ordered.filter(post => post.state !== 'PUBLISHED');
+    if (!candidates.length) reasons.push('NO_UNSETTLED_POSTS');
+    const recoveryRevision = sendHash({ posts: ordered, setting: setting?.value, receipts, active: active.filter(id => posts.has(id)).sort() });
+    const view = { organizationId, postId, recoveryRevision, canResolve: reasons.length === 0, reasons,
+      action: 'QUARANTINE_LEGACY_THREAD', postIds: ordered.map(post => post.id),
+      posts: ordered.map(post => ({ id: post.id, state: post.state, platform: post.providerIdentifier,
+        parentPostId: post.parentPostId, deleted: !!post.deletedAt, claimPresent: !!post.releaseId,
+        publicationEvidencePresent: !!post.releaseURL, captured: !!captured?.eligiblePostIds.includes(post.id) })),
+      receipts: receipts.map(({ row, result }) => ({ id: row.id, status: result.status, revision: result.revision })),
+    };
+    return { view, ordered, candidates, setting, captured };
+  }
+
+  private async assertRecoveryAdministratorIn(tx: Prisma.TransactionClient, organizationId: string, userId: string) {
+    const user = userId ? await tx.user.findUnique({ where: { id: userId }, select: { isSuperAdmin: true, activated: true } }) : null;
+    if (!user?.isSuperAdmin || !user.activated) throw new ForbiddenException('PLATFORM_SUPERADMIN_REQUIRED');
+    if (!await tx.organization.findUnique({ where: { id: organizationId }, select: { id: true } }))
+      throw new BadRequestException('RECOVERY_ORGANIZATION_NOT_FOUND');
+  }
+
+  async getAdminRecoveryState(organizationId: string, userId: string) {
+    return sendTransaction(this.db, async tx => {
+      await this.assertRecoveryAdministratorIn(tx, organizationId, userId);
+      return { ...(await this.stateIn(tx, organizationId)), userId, canManage: true };
+    });
+  }
+
+  async getLegacyPostRecovery(organizationId: string, userId: string, postId: string) {
+    return sendTransaction(this.db, async tx => {
+      await this.assertRecoveryAdministratorIn(tx, organizationId, userId);
+      return { ...(await this.legacyPostRecoveryIn(tx, organizationId, postId)).view, userId };
+    });
+  }
+
+  async resolveLegacyPostRecovery(organizationId: string, userId: string, postId: string, body: ResolveLegacyPostRecoveryDto) {
+    this.browserOwner(organizationId, userId, body);
+    return this.resolveCalendarRecovery(organizationId, postId, body, { kind: 'USER', userId });
+  }
+
+  // Trusted local operations only. These methods are intentionally not exposed by an HTTP controller.
+  private async maintenanceActorIn(tx: Prisma.TransactionClient, organizationId: string, actor: MaintenanceRecoveryActor) {
+    if (actor?.kind !== 'MAINTENANCE' || typeof actor.operator !== 'string' || !actor.operator.trim() || actor.operator.length > 256 ||
+      typeof actor.host !== 'string' || !actor.host.trim() || actor.host.length > 256) throw new BadRequestException('INVALID_MAINTENANCE_ACTOR');
+    if (!await tx.organization.findUnique({ where: { id: organizationId }, select: { id: true } }))
+      throw new BadRequestException('RECOVERY_ORGANIZATION_NOT_FOUND');
+    return sendHash(actor);
+  }
+
+  async getMaintenanceRecoveryState(organizationId: string, actor: MaintenanceRecoveryActor) {
+    return sendTransaction(this.db, async tx => {
+      const actorKey = await this.maintenanceActorIn(tx, organizationId, actor);
+      return { ...(await this.stateIn(tx, organizationId)), actorKey, actor, canManage: true };
+    });
+  }
+
+  async getMaintenancePostRecovery(organizationId: string, actor: MaintenanceRecoveryActor, postId: string) {
+    return sendTransaction(this.db, async tx => {
+      const actorKey = await this.maintenanceActorIn(tx, organizationId, actor);
+      return { ...(await this.legacyPostRecoveryIn(tx, organizationId, postId)).view, actorKey, actor };
+    });
+  }
+
+  async resolveMaintenancePostRecovery(organizationId: string, actor: MaintenanceRecoveryActor, postId: string, body: MaintenanceRecoveryRequest) {
+    if (body.expectedOrganizationId !== organizationId) throw new ForbiddenException('SEND_OWNER_CHANGED');
+    if (body.expectedActorKey !== sendHash(actor)) throw new ConflictException('MAINTENANCE_ACTOR_CHANGED');
+    return this.resolveCalendarRecovery(organizationId, postId, body, actor);
+  }
+
+  private async resolveCalendarRecovery(organizationId: string, postId: string,
+    body: ResolveLegacyPostRecoveryDto | MaintenanceRecoveryRequest,
+    actor: { kind: 'USER'; userId: string } | MaintenanceRecoveryActor) {
+    if (typeof body.requestId !== 'string' || !body.requestId.trim() || body.requestId.length > 128 ||
+      typeof body.expectedRecoveryRevision !== 'string' || !/^[a-f0-9]{64}$/.test(body.expectedRecoveryRevision) ||
+      body.executorStopped !== true || body.noPendingSubmit !== true || typeof body.evidence !== 'string' ||
+      !body.evidence.trim() || body.evidence.length > 2000) throw new BadRequestException('INVALID_LEGACY_POST_RECOVERY');
+    return sendTransaction(this.db, async tx => {
+      const maintenance = actor.kind === 'MAINTENANCE';
+      const userId = actor.kind === 'USER' ? actor.userId : null;
+      const actorKey = maintenance ? await this.maintenanceActorIn(tx, organizationId, actor) : null;
+      if (!maintenance) await this.assertRecoveryAdministratorIn(tx, organizationId, userId);
+      await this.lockIn(tx, organizationId);
+      const key = { organizationId, userId, operation: 'legacy-post-recovery', requestId: body.requestId };
+      const auditKey = `${SEND_MAINTENANCE_RECOVERY_PREFIX}${organizationId}:${body.requestId}`;
+      const requestHash = sendHash(maintenance ? { postId, body, actor } : { postId, body });
+      const previous = maintenance
+        ? (await tx.settings.findUnique({ where: { key: auditKey } }))?.value as { requestHash?: string; result?: Prisma.JsonValue } | null
+        : await tx.sendMutationReceipt.findUnique({ where: { organizationId_userId_operation_requestId: key } });
+      if (previous) {
+        if (previous.requestHash !== requestHash) throw new ConflictException('REQUEST_ID_CONFLICT');
+        return previous.result;
+      }
+      const recovery = await this.legacyPostRecoveryIn(tx, organizationId, postId);
+      if (recovery.view.recoveryRevision !== body.expectedRecoveryRevision) throw new ConflictException('LEGACY_POST_RECOVERY_CHANGED');
+      if (!recovery.view.canResolve) throw new ConflictException({ message: 'LEGACY_POST_RECOVERY_UNSAFE', reasons: recovery.view.reasons });
+      const quarantinedPostIds = recovery.candidates.map(post => post.id);
+      const now = new Date();
+      for (const post of recovery.candidates) {
+        const saved = await tx.post.updateMany({ where: { organizationId, id: post.id, state: post.state,
+          sendIntentId: null, executionProtocol: post.executionProtocol ?? null, deletedAt: post.deletedAt,
+          releaseId: post.releaseId, claimedAt: post.claimedAt, releaseURL: post.releaseURL,
+          routeRevision: post.routeRevision, contentRevision: post.contentRevision },
+          // Preserve platform evidence. Archived content cannot be retried as a fresh send.
+          data: { state: 'DRAFT', deletedAt: post.deletedAt ?? now, releaseId: null, executionProtocol: 'LEGACY_QUARANTINED' } });
+        if (saved.count !== 1) throw new ConflictException('LEGACY_POST_RECOVERY_CHANGED');
+      }
+      if (recovery.captured && recovery.setting) {
+        const ids = new Set(recovery.ordered.map(post => post.id));
+        const value = recovery.setting.value as Prisma.JsonObject;
+        const field = value.legacyDrain ? 'legacyDrain' : 'transition';
+        const occurrences = { ...recovery.captured.eligiblePostOccurrences };
+        for (const id of ids) delete occurrences[id];
+        const saved = await tx.settings.updateMany({ where: { key: organizationSendModeKey(organizationId), value: { equals: recovery.setting.value as Prisma.InputJsonValue } },
+          data: { value: sendJson({ ...value, [field]: { ...recovery.captured,
+            eligiblePostIds: recovery.captured.eligiblePostIds.filter(id => !ids.has(id)), eligiblePostOccurrences: occurrences } }) } });
+        if (saved.count !== 1) throw new ConflictException('LEGACY_POST_RECOVERY_CHANGED');
+      }
+      const result = { resolved: true, organizationId, ...(maintenance ? { actor, actorKey } : { userId }), postId, quarantinedPostIds,
+        recoveryRevision: recovery.view.recoveryRevision, executorStopped: true, noPendingSubmit: true,
+        priorStates: recovery.candidates.map(post => ({ postId: post.id, state: post.state,
+          deletedAt: post.deletedAt?.toISOString() ?? null, claimFingerprint: sendHash({ releaseId: post.releaseId, claimedAt: post.claimedAt }) })),
+        evidence: body.evidence, nextAction: 'CHECK_SEND_MODE_AND_RETRY_NEW_CONTENT' };
+      if (maintenance) await tx.settings.create({ data: { key: auditKey, type: 'object',
+        description: 'Immutable local maintenance recovery receipt', value: sendJson({ requestHash, result, createdAt: now.toISOString() }) } });
+      else await tx.sendMutationReceipt.create({ data: { ...key, requestHash, result: sendJson(result) } });
+      return result;
     });
   }
 

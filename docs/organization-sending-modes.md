@@ -357,3 +357,145 @@ The existing `POST /posts` route with `type: "draft"` withdraws an unsubmitted l
 The route retains organization/project ownership validation. The post service requires an active project for new drafts and sending. An inactive project permits only existing saved legacy content: the repository checks active organization membership, the unchanged project/group/root and the complete ordered thread inside the shared sending-mode transaction. Missing or additional segments cannot turn withdrawal into new content creation. Unchanged inherited account selection is preserved without a route-clear mutation. The existing request ID and mutation-receipt storage make acknowledged/interrupted withdrawals and matching withdrawals from independent dialogs safe. Replays recheck membership, the whole chain, content and route revisions; they do not restore recurrence or clean up sibling roots. No new HTTP parameter or schema is introduced.
 
 Coordinated intents, unknown execution protocols, published/failed/deleted roots, claimed work, publication evidence, and legacy drain/quarantine ownership reject withdrawal. Guarded writes compare every segment against claim/submission markers; a concurrent conflict rolls back the entire thread. Independent sibling roots in the same group are preserved. The existing Move to Drafts action submits the normal draft payload only for QUEUE summaries with an explicitly null sendIntentId and verifies the returned original root before showing success. Withdrawal removes the root from subsequent reallocation scans. Deploy the backend safeguards before the updated frontend; source verification does not cancel a live schedule.
+
+## Historical calendar thread archival and platform administration
+
+Controlled mode can coexist with legacyDrain. It preserves historical ownership,
+not a lease timer. The October 2026 incident contained 14 captured calendar posts:
+three deleted X continuations with publication evidence, ten X draft continuations,
+and one deleted Reddit task with a claim, with no autonomous effect receipts.
+The snapshot cannot identify the earlier callback, deletion, or migration that
+created these inconsistencies. A missing calendar recovery workflow allowed them
+to block new account/platform writes indefinitely. Age and deletion alone are
+not proof that an executor stopped or that content was never published.
+
+GET /sending/mode still supplies bounded legacyDrain.recoveryPosts, missingPostIds,
+and recoveryPostsTruncated to existing organization clients. Calendar recovery is
+exclusively a platform-administration operation. Its former organization routes
+/sending/mode/legacy-posts/:id/recovery have been removed. Existing original-owner
+and organization-admin Engage reply recovery endpoints remain unchanged.
+
+Platform administrator routes:
+
+```http
+GET /admin/organizations/:organizationId/sending-mode
+GET /admin/organizations/:organizationId/sending-mode/legacy-posts/:postId/recovery
+POST /admin/organizations/:organizationId/sending-mode/legacy-posts/:postId/recovery
+```
+
+The controller uses @SuperAdmin(). The service independently verifies that the
+acting User has isSuperAdmin=true and activated=true and that the target organization
+exists. No membership in the target organization is required. The target comes
+from the URL, not showorg or the administrator's personal organization. A plain
+organization ADMIN/SUPERADMIN membership is not platform administrator authority.
+
+Inspection walks the entire connected calendar thread within the target
+organization, including deleted/published ancestors, bounded to 500 posts. It
+returns safe post summaries, canResolve, reasons, and recoveryRevision. Tokens,
+publication URLs, and content are not exposed. Missing parents, controlled thread
+members, non-calendar content, unresolved receipts, and no legacy ownership all
+prevent archival.
+
+After stopping all original executors for the affected platform and confirming
+there is no pending submission, the platform administrator can POST:
+
+```json
+{
+  "expectedOrganizationId": "target-organization-from-the-URL",
+  "expectedUserId": "authenticated-platform-administrator-id",
+  "requestId": "new-unique-recovery-request",
+  "expectedRecoveryRevision": "revision-from-the-current-inspection",
+  "executorStopped": true,
+  "noPendingSubmit": true,
+  "evidence": "Actual executor-stop evidence and why this thread is being retired"
+}
+```
+
+These flags are explicit attestations. Recovery soft-deletes non-published thread
+members as DRAFT with executionProtocol=LEGACY_QUARANTINED, clears release IDs, and
+removes reviewed captured ownership. Published members, publication URLs, claim
+timestamps, and existing receipt evidence remain intact. The transaction records
+the platform administrator, evidence, prior states, and claim fingerprints in
+SendMutationReceipt. Identical request replay is idempotent; changed snapshots or
+changed bodies using an existing request ID conflict.
+
+Archived content is excluded from active legacy writer detection and blocked at
+autonomous authorization and controlled enqueue, including after a later mode
+switch or accidental restoration of a deletion flag. It is never scheduled again.
+AUTHORIZED/UNKNOWN receipts require their existing resolution workflow first.
+The reconciliation worker checks completion every 15 seconds. Mode completion
+does not prove that a new reply was sent; verify a fresh claim separately.
+
+### Token-free service recovery script
+
+Use scripts/recover-legacy-calendar.ts from this repository. It creates only a
+Prisma client and SendModeService, not a full Nest application, so background
+workers/timers are not started. It calls the same service and transaction logic as
+the admin routes. No HTTP token, deployed backend, raw SQL, or schema migration is
+needed. It uses the local DATABASE_URL (environment overrides the repository .env)
+and refuses databases other than aisee_postiz_dev. Before any invocation, verify
+the actual connection target, then supply --database-verified.
+
+The operator must be trusted to run maintenance using local database credentials.
+The script automatically records the operating-system user and hostname as a
+MAINTENANCE actor; it never selects, creates, or impersonates a business User.
+No --admin-user-id parameter is required or accepted. Dedicated maintenance methods
+are not exposed by any HTTP controller. HTTP recovery still checks an enabled
+platform superadmin. Local maintenance receipts are stored atomically with archival
+under the reserved sending.maintenance-recovery: Settings prefix, without a User
+foreign key. Generic Settings writes and deletion cannot edit these receipts.
+
+Preparation performs reads only:
+
+```bash
+pnpm exec ts-node --project scripts/tsconfig.json scripts/recover-legacy-calendar.ts \
+  --database-verified
+```
+
+It saves legacy-calendar-maintenance-plan.json, fixed to the reported organization and
+these five thread seeds:
+
+- cmmx3xtrr0001qm9v1xe367c2
+- cmtjwxswz0003qma4zktadhdr
+- cmtjy4sff0001qmtwdqu3e98x
+- cmtjy7l8s0005qmtwqgdmyfiv
+- cmtl6v2ku000uqm38heofs35v
+
+Review all members, including any ancestors outside the original 14-item inventory.
+After confirming every thread is eligible and completing the actual executor-stop
+checks, put the evidence in a local text file and run:
+
+```bash
+pnpm exec ts-node --project scripts/tsconfig.json scripts/recover-legacy-calendar.ts \
+  --database-verified \
+  --apply --executors-stopped --no-pending-submit --evidence-file evidence.txt
+```
+
+The version-3 plan binds the target database connection fingerprint and maintenance
+actor key (operating-system user and host). Earlier API or user-based service plans
+cannot be reused. Each thread is
+inspected again immediately before mutation; only the organization snapshot revision
+may differ after an earlier archival. Thread, content summary, or receipt changes
+require a new review. The companion .journal.json persists the exact mutation
+before calling the service. After an uncertain result, keep plan and journal and
+rerun the same command to replay its original request ID. Never discard an uncertain
+journal merely to bypass a conflict.
+
+The old scripts/recover-legacy-calendar-api.ts name is a compatibility launcher for
+the same token-free service runner. It no longer accepts --api-base or uses
+POSTIZ_API_TOKEN. Read-only diagnose-engage-org.ts and diagnose-legacy-send-block.ts
+share the same connection guard. Agents prepare these artifacts; recovery is run
+by the user or through the project's own operational pipeline, never by an agent
+writing directly to the database.
+
+The maintenance runner checks `configuredMode=CONTROLLED`, not the effective
+sending mode. `mode=PAUSED` with controlled configuration is eligible for review:
+archiving retired work must not require enabling actual sending. The runner
+prints only the database host/port/name/schema (no credentials) and reports the
+actual organization, configured/effective mode, and system capability on a scope
+or mode mismatch. If the organization is actually configured autonomous, stop and
+check the connection/deployment rather than changing the mode automatically.
+Before connecting for apply, it checks for both the prepared plan and evidence
+file and reports the specific missing path. An unsuccessful preparation cannot
+be followed by apply; review preparation output and create the evidence file only
+from actual executor-stop/no-pending-submit checks.

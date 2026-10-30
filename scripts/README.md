@@ -589,3 +589,16 @@ Skipped groups:
 
 Re-run with --execute to write these changes.
 ```
+
+## Legacy calendar recovery
+
+Use `recover-legacy-calendar.ts --help` for token-free service-based maintenance.
+Supply `--database-verified` only after verifying the actual database is
+`aisee_postiz_dev`. The script automatically records the OS user and host as its
+maintenance actor; no token or user ID is needed.
+The default run only prepares a review plan. Mutations require `--apply`, explicit
+executor-stop/no-pending-submit flags, and an evidence file. Keep the plan and
+journal for idempotent recovery after interruption. See
+[the recovery runbook](../docs/organization-sending-modes.md#token-free-service-recovery-script).
+`recover-legacy-calendar-api.ts` remains a compatibility launcher and no longer
+uses HTTP or tokens. Earlier API and user-based service plans require a fresh maintenance plan.

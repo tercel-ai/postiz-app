@@ -390,6 +390,7 @@ export class SendCoordinatorService {
       await this.assertControlledIn(tx, org);
       const posts = await this.chain(tx, org, rootId);
       const first = posts[0];
+      if (posts.some(post => post.executionProtocol === 'LEGACY_QUARANTINED')) reject('LEGACY_CONTENT_QUARANTINED');
       const activeLegacy = new Set(await this.modes.activeLegacyPostIdsIn(tx, org));
       if (posts.some(post => activeLegacy.has(post.id))) reject('LEGACY_CONTENT_DRAIN_REQUIRED');
       if (options.modeHandover) {

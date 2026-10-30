@@ -1,0 +1,592 @@
+{
+  "version": 1,
+  "plan": {
+    "version": 3,
+    "databaseFingerprint": "c80ce99cfa13866d88437b68f1b94179c34bcb6effa148b0f037081d1543c46a",
+    "organizationId": "b4314faf-59f8-48e3-a25c-145221e78239",
+    "actorKey": "dbc6b318e232037bf42f7cdf89c060c8138e3a5ae50e9a597e66ed53afd8bb7e",
+    "reviews": [
+      {
+        "organizationId": "b4314faf-59f8-48e3-a25c-145221e78239",
+        "postId": "cmmx3xtrr0001qm9v1xe367c2",
+        "recoveryRevision": "b62fe570f9655964e7a19e72a80ad274cee241e744884a53a8827a5b19bde305",
+        "canResolve": true,
+        "reasons": [],
+        "action": "QUARANTINE_LEGACY_THREAD",
+        "postIds": [
+          "cmmok8imh0007qmxzq57rdrx2",
+          "cmmx3xtrr0001qm9v1xe367c2",
+          "cmmzzray30009qmkkur8uoniq",
+          "cmn5pipks0001qmes6325ohrm"
+        ],
+        "posts": [
+          {
+            "id": "cmmok8imh0007qmxzq57rdrx2",
+            "state": "QUEUE",
+            "platform": "x",
+            "parentPostId": null,
+            "deleted": true,
+            "claimPresent": false,
+            "publicationEvidencePresent": false,
+            "captured": false
+          },
+          {
+            "id": "cmmx3xtrr0001qm9v1xe367c2",
+            "state": "QUEUE",
+            "platform": "x",
+            "parentPostId": "cmn5pipks0001qmes6325ohrm",
+            "deleted": true,
+            "claimPresent": true,
+            "publicationEvidencePresent": true,
+            "captured": true
+          },
+          {
+            "id": "cmmzzray30009qmkkur8uoniq",
+            "state": "QUEUE",
+            "platform": "x",
+            "parentPostId": "cmmx3xtrr0001qm9v1xe367c2",
+            "deleted": true,
+            "claimPresent": true,
+            "publicationEvidencePresent": true,
+            "captured": true
+          },
+          {
+            "id": "cmn5pipks0001qmes6325ohrm",
+            "state": "QUEUE",
+            "platform": "x",
+            "parentPostId": "cmmok8imh0007qmxzq57rdrx2",
+            "deleted": true,
+            "claimPresent": true,
+            "publicationEvidencePresent": true,
+            "captured": true
+          }
+        ],
+        "receipts": [],
+        "actorKey": "dbc6b318e232037bf42f7cdf89c060c8138e3a5ae50e9a597e66ed53afd8bb7e",
+        "actor": {
+          "kind": "MAINTENANCE",
+          "operator": "tercel",
+          "host": "terceldeMac-mini.local"
+        }
+      },
+      {
+        "organizationId": "b4314faf-59f8-48e3-a25c-145221e78239",
+        "postId": "cmtjwxswz0003qma4zktadhdr",
+        "recoveryRevision": "bf4606277faf3221aa5e8b4268bf9e2af6a4c5389018b50bceec0ed4f5dcfd05",
+        "canResolve": true,
+        "reasons": [],
+        "action": "QUARANTINE_LEGACY_THREAD",
+        "postIds": [
+          "cmtjwxsvs0002qma4vl94xnot",
+          "cmtjwxswz0003qma4zktadhdr",
+          "cmtjwxsxc0004qma4zocjmocn",
+          "cmtjwxsxm0005qma4u2blp07d"
+        ],
+        "posts": [
+          {
+            "id": "cmtjwxsvs0002qma4vl94xnot",
+            "state": "ERROR",
+            "platform": "x",
+            "parentPostId": null,
+            "deleted": true,
+            "claimPresent": false,
+            "publicationEvidencePresent": false,
+            "captured": false
+          },
+          {
+            "id": "cmtjwxswz0003qma4zktadhdr",
+            "state": "DRAFT",
+            "platform": "x",
+            "parentPostId": "cmtjwxsvs0002qma4vl94xnot",
+            "deleted": false,
+            "claimPresent": false,
+            "publicationEvidencePresent": false,
+            "captured": true
+          },
+          {
+            "id": "cmtjwxsxc0004qma4zocjmocn",
+            "state": "DRAFT",
+            "platform": "x",
+            "parentPostId": "cmtjwxswz0003qma4zktadhdr",
+            "deleted": false,
+            "claimPresent": false,
+            "publicationEvidencePresent": false,
+            "captured": true
+          },
+          {
+            "id": "cmtjwxsxm0005qma4u2blp07d",
+            "state": "DRAFT",
+            "platform": "x",
+            "parentPostId": "cmtjwxsxc0004qma4zocjmocn",
+            "deleted": false,
+            "claimPresent": false,
+            "publicationEvidencePresent": false,
+            "captured": true
+          }
+        ],
+        "receipts": [],
+        "actorKey": "dbc6b318e232037bf42f7cdf89c060c8138e3a5ae50e9a597e66ed53afd8bb7e",
+        "actor": {
+          "kind": "MAINTENANCE",
+          "operator": "tercel",
+          "host": "terceldeMac-mini.local"
+        }
+      },
+      {
+        "organizationId": "b4314faf-59f8-48e3-a25c-145221e78239",
+        "postId": "cmtjy4sff0001qmtwdqu3e98x",
+        "recoveryRevision": "c14bac71c938a206073b7de87a7cf53c02ff1c48c9be75fa3c19b7b268cc276f",
+        "canResolve": true,
+        "reasons": [],
+        "action": "QUARANTINE_LEGACY_THREAD",
+        "postIds": [
+          "cmtjy4seu0000qmtwwrarqci0",
+          "cmtjy4sff0001qmtwdqu3e98x",
+          "cmtjy4sft0002qmtwjyh3d7my",
+          "cmtjy4sgb0003qmtwjyggthhz"
+        ],
+        "posts": [
+          {
+            "id": "cmtjy4seu0000qmtwwrarqci0",
+            "state": "DRAFT",
+            "platform": "x",
+            "parentPostId": null,
+            "deleted": true,
+            "claimPresent": false,
+            "publicationEvidencePresent": false,
+            "captured": false
+          },
+          {
+            "id": "cmtjy4sff0001qmtwdqu3e98x",
+            "state": "DRAFT",
+            "platform": "x",
+            "parentPostId": "cmtjy4seu0000qmtwwrarqci0",
+            "deleted": false,
+            "claimPresent": false,
+            "publicationEvidencePresent": false,
+            "captured": true
+          },
+          {
+            "id": "cmtjy4sft0002qmtwjyh3d7my",
+            "state": "DRAFT",
+            "platform": "x",
+            "parentPostId": "cmtjy4sff0001qmtwdqu3e98x",
+            "deleted": false,
+            "claimPresent": false,
+            "publicationEvidencePresent": false,
+            "captured": true
+          },
+          {
+            "id": "cmtjy4sgb0003qmtwjyggthhz",
+            "state": "DRAFT",
+            "platform": "x",
+            "parentPostId": "cmtjy4sft0002qmtwjyh3d7my",
+            "deleted": false,
+            "claimPresent": false,
+            "publicationEvidencePresent": false,
+            "captured": true
+          }
+        ],
+        "receipts": [],
+        "actorKey": "dbc6b318e232037bf42f7cdf89c060c8138e3a5ae50e9a597e66ed53afd8bb7e",
+        "actor": {
+          "kind": "MAINTENANCE",
+          "operator": "tercel",
+          "host": "terceldeMac-mini.local"
+        }
+      },
+      {
+        "organizationId": "b4314faf-59f8-48e3-a25c-145221e78239",
+        "postId": "cmtjy7l8s0005qmtwqgdmyfiv",
+        "recoveryRevision": "f67ec133b6b0e4f8ce302b2e44228111ab59508ce763fedaf8d9c2f7e4726d9f",
+        "canResolve": true,
+        "reasons": [],
+        "action": "QUARANTINE_LEGACY_THREAD",
+        "postIds": [
+          "cmtjy7l8c0004qmtwe31p40sr",
+          "cmtjy7l8s0005qmtwqgdmyfiv",
+          "cmtjy7l910006qmtw40b73y7y",
+          "cmtjy7l9a0007qmtw3pike283",
+          "cmtjy7l9j0008qmtw3n1rfao0"
+        ],
+        "posts": [
+          {
+            "id": "cmtjy7l8c0004qmtwe31p40sr",
+            "state": "DRAFT",
+            "platform": "x",
+            "parentPostId": null,
+            "deleted": true,
+            "claimPresent": false,
+            "publicationEvidencePresent": false,
+            "captured": false
+          },
+          {
+            "id": "cmtjy7l8s0005qmtwqgdmyfiv",
+            "state": "DRAFT",
+            "platform": "x",
+            "parentPostId": "cmtjy7l8c0004qmtwe31p40sr",
+            "deleted": false,
+            "claimPresent": false,
+            "publicationEvidencePresent": false,
+            "captured": true
+          },
+          {
+            "id": "cmtjy7l910006qmtw40b73y7y",
+            "state": "DRAFT",
+            "platform": "x",
+            "parentPostId": "cmtjy7l8s0005qmtwqgdmyfiv",
+            "deleted": false,
+            "claimPresent": false,
+            "publicationEvidencePresent": false,
+            "captured": true
+          },
+          {
+            "id": "cmtjy7l9a0007qmtw3pike283",
+            "state": "DRAFT",
+            "platform": "x",
+            "parentPostId": "cmtjy7l910006qmtw40b73y7y",
+            "deleted": false,
+            "claimPresent": false,
+            "publicationEvidencePresent": false,
+            "captured": true
+          },
+          {
+            "id": "cmtjy7l9j0008qmtw3n1rfao0",
+            "state": "DRAFT",
+            "platform": "x",
+            "parentPostId": "cmtjy7l9a0007qmtw3pike283",
+            "deleted": false,
+            "claimPresent": false,
+            "publicationEvidencePresent": false,
+            "captured": true
+          }
+        ],
+        "receipts": [],
+        "actorKey": "dbc6b318e232037bf42f7cdf89c060c8138e3a5ae50e9a597e66ed53afd8bb7e",
+        "actor": {
+          "kind": "MAINTENANCE",
+          "operator": "tercel",
+          "host": "terceldeMac-mini.local"
+        }
+      },
+      {
+        "organizationId": "b4314faf-59f8-48e3-a25c-145221e78239",
+        "postId": "cmtl6v2ku000uqm38heofs35v",
+        "recoveryRevision": "e5e4fcce04dae2bb10edb499fddf813b69d7f1accf5a4d6605603d66817a1674",
+        "canResolve": true,
+        "reasons": [],
+        "action": "QUARANTINE_LEGACY_THREAD",
+        "postIds": [
+          "cmtl6v2ku000uqm38heofs35v"
+        ],
+        "posts": [
+          {
+            "id": "cmtl6v2ku000uqm38heofs35v",
+            "state": "QUEUE",
+            "platform": "reddit",
+            "parentPostId": null,
+            "deleted": true,
+            "claimPresent": true,
+            "publicationEvidencePresent": false,
+            "captured": true
+          }
+        ],
+        "receipts": [],
+        "actorKey": "dbc6b318e232037bf42f7cdf89c060c8138e3a5ae50e9a597e66ed53afd8bb7e",
+        "actor": {
+          "kind": "MAINTENANCE",
+          "operator": "tercel",
+          "host": "terceldeMac-mini.local"
+        }
+      }
+    ]
+  },
+  "operations": [
+    {
+      "postId": "cmmx3xtrr0001qm9v1xe367c2",
+      "body": {
+        "expectedOrganizationId": "b4314faf-59f8-48e3-a25c-145221e78239",
+        "expectedActorKey": "dbc6b318e232037bf42f7cdf89c060c8138e3a5ae50e9a597e66ed53afd8bb7e",
+        "requestId": "1fe3f720-f74e-4ecb-9f15-da5868a9825f",
+        "expectedRecoveryRevision": "b62fe570f9655964e7a19e72a80ad274cee241e744884a53a8827a5b19bde305",
+        "executorStopped": true,
+        "noPendingSubmit": true,
+        "evidence": "It has been verified that the old actuator has stopped and these five groups of historical threads have been retired"
+      },
+      "result": {
+        "resolved": true,
+        "organizationId": "b4314faf-59f8-48e3-a25c-145221e78239",
+        "actor": {
+          "kind": "MAINTENANCE",
+          "operator": "tercel",
+          "host": "terceldeMac-mini.local"
+        },
+        "actorKey": "dbc6b318e232037bf42f7cdf89c060c8138e3a5ae50e9a597e66ed53afd8bb7e",
+        "postId": "cmmx3xtrr0001qm9v1xe367c2",
+        "quarantinedPostIds": [
+          "cmmok8imh0007qmxzq57rdrx2",
+          "cmmx3xtrr0001qm9v1xe367c2",
+          "cmmzzray30009qmkkur8uoniq",
+          "cmn5pipks0001qmes6325ohrm"
+        ],
+        "recoveryRevision": "b62fe570f9655964e7a19e72a80ad274cee241e744884a53a8827a5b19bde305",
+        "executorStopped": true,
+        "noPendingSubmit": true,
+        "priorStates": [
+          {
+            "postId": "cmmok8imh0007qmxzq57rdrx2",
+            "state": "QUEUE",
+            "deletedAt": "2026-03-26T09:15:55.654Z",
+            "claimFingerprint": "72f9c55e56718f37a30e2188de70b14224c31b80d712dcb58b64007fb8d4d037"
+          },
+          {
+            "postId": "cmmx3xtrr0001qm9v1xe367c2",
+            "state": "QUEUE",
+            "deletedAt": "2026-03-26T09:15:55.654Z",
+            "claimFingerprint": "33cf704c298be7c43cadb77d693cd12bd07f3935651a62c72ad0fe998f257299"
+          },
+          {
+            "postId": "cmmzzray30009qmkkur8uoniq",
+            "state": "QUEUE",
+            "deletedAt": "2026-03-26T09:15:55.654Z",
+            "claimFingerprint": "1adb50f8d07ae1cc820f88d59eba77f06f4ed8186912bc15ced5208a08d02d57"
+          },
+          {
+            "postId": "cmn5pipks0001qmes6325ohrm",
+            "state": "QUEUE",
+            "deletedAt": "2026-03-26T09:15:55.654Z",
+            "claimFingerprint": "6c8f94a4c051a14b10fd668e9de4a7d6ed09aa9c86133785b1c2ade03ee78cf9"
+          }
+        ],
+        "evidence": "It has been verified that the old actuator has stopped and these five groups of historical threads have been retired",
+        "nextAction": "CHECK_SEND_MODE_AND_RETRY_NEW_CONTENT"
+      }
+    },
+    {
+      "postId": "cmtjwxswz0003qma4zktadhdr",
+      "body": {
+        "expectedOrganizationId": "b4314faf-59f8-48e3-a25c-145221e78239",
+        "expectedActorKey": "dbc6b318e232037bf42f7cdf89c060c8138e3a5ae50e9a597e66ed53afd8bb7e",
+        "requestId": "db7bd375-f9dd-4bfb-8d83-d25ffafedb65",
+        "expectedRecoveryRevision": "929b0e0e7e1cf928f74eb668c2f4055f2e4a4c7d533661f91d063f74c29bd933",
+        "executorStopped": true,
+        "noPendingSubmit": true,
+        "evidence": "It has been verified that the old actuator has stopped and these five groups of historical threads have been retired"
+      },
+      "result": {
+        "resolved": true,
+        "organizationId": "b4314faf-59f8-48e3-a25c-145221e78239",
+        "actor": {
+          "kind": "MAINTENANCE",
+          "operator": "tercel",
+          "host": "terceldeMac-mini.local"
+        },
+        "actorKey": "dbc6b318e232037bf42f7cdf89c060c8138e3a5ae50e9a597e66ed53afd8bb7e",
+        "postId": "cmtjwxswz0003qma4zktadhdr",
+        "quarantinedPostIds": [
+          "cmtjwxsvs0002qma4vl94xnot",
+          "cmtjwxswz0003qma4zktadhdr",
+          "cmtjwxsxc0004qma4zocjmocn",
+          "cmtjwxsxm0005qma4u2blp07d"
+        ],
+        "recoveryRevision": "929b0e0e7e1cf928f74eb668c2f4055f2e4a4c7d533661f91d063f74c29bd933",
+        "executorStopped": true,
+        "noPendingSubmit": true,
+        "priorStates": [
+          {
+            "postId": "cmtjwxsvs0002qma4vl94xnot",
+            "state": "ERROR",
+            "deletedAt": "2026-09-03T01:25:30.111Z",
+            "claimFingerprint": "72f9c55e56718f37a30e2188de70b14224c31b80d712dcb58b64007fb8d4d037"
+          },
+          {
+            "postId": "cmtjwxswz0003qma4zktadhdr",
+            "state": "DRAFT",
+            "deletedAt": null,
+            "claimFingerprint": "72f9c55e56718f37a30e2188de70b14224c31b80d712dcb58b64007fb8d4d037"
+          },
+          {
+            "postId": "cmtjwxsxc0004qma4zocjmocn",
+            "state": "DRAFT",
+            "deletedAt": null,
+            "claimFingerprint": "72f9c55e56718f37a30e2188de70b14224c31b80d712dcb58b64007fb8d4d037"
+          },
+          {
+            "postId": "cmtjwxsxm0005qma4u2blp07d",
+            "state": "DRAFT",
+            "deletedAt": null,
+            "claimFingerprint": "72f9c55e56718f37a30e2188de70b14224c31b80d712dcb58b64007fb8d4d037"
+          }
+        ],
+        "evidence": "It has been verified that the old actuator has stopped and these five groups of historical threads have been retired",
+        "nextAction": "CHECK_SEND_MODE_AND_RETRY_NEW_CONTENT"
+      }
+    },
+    {
+      "postId": "cmtjy4sff0001qmtwdqu3e98x",
+      "body": {
+        "expectedOrganizationId": "b4314faf-59f8-48e3-a25c-145221e78239",
+        "expectedActorKey": "dbc6b318e232037bf42f7cdf89c060c8138e3a5ae50e9a597e66ed53afd8bb7e",
+        "requestId": "f2288208-1e57-4c1a-9f64-5b0ab44963ef",
+        "expectedRecoveryRevision": "b54bd92eca6abfe96f203263082b39a3d9e32c899d739f183c60cf8d8c3391c0",
+        "executorStopped": true,
+        "noPendingSubmit": true,
+        "evidence": "It has been verified that the old actuator has stopped and these five groups of historical threads have been retired"
+      },
+      "result": {
+        "resolved": true,
+        "organizationId": "b4314faf-59f8-48e3-a25c-145221e78239",
+        "actor": {
+          "kind": "MAINTENANCE",
+          "operator": "tercel",
+          "host": "terceldeMac-mini.local"
+        },
+        "actorKey": "dbc6b318e232037bf42f7cdf89c060c8138e3a5ae50e9a597e66ed53afd8bb7e",
+        "postId": "cmtjy4sff0001qmtwdqu3e98x",
+        "quarantinedPostIds": [
+          "cmtjy4seu0000qmtwwrarqci0",
+          "cmtjy4sff0001qmtwdqu3e98x",
+          "cmtjy4sft0002qmtwjyh3d7my",
+          "cmtjy4sgb0003qmtwjyggthhz"
+        ],
+        "recoveryRevision": "b54bd92eca6abfe96f203263082b39a3d9e32c899d739f183c60cf8d8c3391c0",
+        "executorStopped": true,
+        "noPendingSubmit": true,
+        "priorStates": [
+          {
+            "postId": "cmtjy4seu0000qmtwwrarqci0",
+            "state": "DRAFT",
+            "deletedAt": "2026-09-03T01:25:35.169Z",
+            "claimFingerprint": "72f9c55e56718f37a30e2188de70b14224c31b80d712dcb58b64007fb8d4d037"
+          },
+          {
+            "postId": "cmtjy4sff0001qmtwdqu3e98x",
+            "state": "DRAFT",
+            "deletedAt": null,
+            "claimFingerprint": "72f9c55e56718f37a30e2188de70b14224c31b80d712dcb58b64007fb8d4d037"
+          },
+          {
+            "postId": "cmtjy4sft0002qmtwjyh3d7my",
+            "state": "DRAFT",
+            "deletedAt": null,
+            "claimFingerprint": "72f9c55e56718f37a30e2188de70b14224c31b80d712dcb58b64007fb8d4d037"
+          },
+          {
+            "postId": "cmtjy4sgb0003qmtwjyggthhz",
+            "state": "DRAFT",
+            "deletedAt": null,
+            "claimFingerprint": "72f9c55e56718f37a30e2188de70b14224c31b80d712dcb58b64007fb8d4d037"
+          }
+        ],
+        "evidence": "It has been verified that the old actuator has stopped and these five groups of historical threads have been retired",
+        "nextAction": "CHECK_SEND_MODE_AND_RETRY_NEW_CONTENT"
+      }
+    },
+    {
+      "postId": "cmtjy7l8s0005qmtwqgdmyfiv",
+      "body": {
+        "expectedOrganizationId": "b4314faf-59f8-48e3-a25c-145221e78239",
+        "expectedActorKey": "dbc6b318e232037bf42f7cdf89c060c8138e3a5ae50e9a597e66ed53afd8bb7e",
+        "requestId": "c39bec8d-3f7e-41ad-8415-72900bfd4b9b",
+        "expectedRecoveryRevision": "82246350513794c5428291c7a615e210aa536ac36dfcf9557b0a0882372713ae",
+        "executorStopped": true,
+        "noPendingSubmit": true,
+        "evidence": "It has been verified that the old actuator has stopped and these five groups of historical threads have been retired"
+      },
+      "result": {
+        "resolved": true,
+        "organizationId": "b4314faf-59f8-48e3-a25c-145221e78239",
+        "actor": {
+          "kind": "MAINTENANCE",
+          "operator": "tercel",
+          "host": "terceldeMac-mini.local"
+        },
+        "actorKey": "dbc6b318e232037bf42f7cdf89c060c8138e3a5ae50e9a597e66ed53afd8bb7e",
+        "postId": "cmtjy7l8s0005qmtwqgdmyfiv",
+        "quarantinedPostIds": [
+          "cmtjy7l8c0004qmtwe31p40sr",
+          "cmtjy7l8s0005qmtwqgdmyfiv",
+          "cmtjy7l910006qmtw40b73y7y",
+          "cmtjy7l9a0007qmtw3pike283",
+          "cmtjy7l9j0008qmtw3n1rfao0"
+        ],
+        "recoveryRevision": "82246350513794c5428291c7a615e210aa536ac36dfcf9557b0a0882372713ae",
+        "executorStopped": true,
+        "noPendingSubmit": true,
+        "priorStates": [
+          {
+            "postId": "cmtjy7l8c0004qmtwe31p40sr",
+            "state": "DRAFT",
+            "deletedAt": "2026-09-03T01:25:57.566Z",
+            "claimFingerprint": "72f9c55e56718f37a30e2188de70b14224c31b80d712dcb58b64007fb8d4d037"
+          },
+          {
+            "postId": "cmtjy7l8s0005qmtwqgdmyfiv",
+            "state": "DRAFT",
+            "deletedAt": null,
+            "claimFingerprint": "72f9c55e56718f37a30e2188de70b14224c31b80d712dcb58b64007fb8d4d037"
+          },
+          {
+            "postId": "cmtjy7l910006qmtw40b73y7y",
+            "state": "DRAFT",
+            "deletedAt": null,
+            "claimFingerprint": "72f9c55e56718f37a30e2188de70b14224c31b80d712dcb58b64007fb8d4d037"
+          },
+          {
+            "postId": "cmtjy7l9a0007qmtw3pike283",
+            "state": "DRAFT",
+            "deletedAt": null,
+            "claimFingerprint": "72f9c55e56718f37a30e2188de70b14224c31b80d712dcb58b64007fb8d4d037"
+          },
+          {
+            "postId": "cmtjy7l9j0008qmtw3n1rfao0",
+            "state": "DRAFT",
+            "deletedAt": null,
+            "claimFingerprint": "72f9c55e56718f37a30e2188de70b14224c31b80d712dcb58b64007fb8d4d037"
+          }
+        ],
+        "evidence": "It has been verified that the old actuator has stopped and these five groups of historical threads have been retired",
+        "nextAction": "CHECK_SEND_MODE_AND_RETRY_NEW_CONTENT"
+      }
+    },
+    {
+      "postId": "cmtl6v2ku000uqm38heofs35v",
+      "body": {
+        "expectedOrganizationId": "b4314faf-59f8-48e3-a25c-145221e78239",
+        "expectedActorKey": "dbc6b318e232037bf42f7cdf89c060c8138e3a5ae50e9a597e66ed53afd8bb7e",
+        "requestId": "96157f98-6976-42ca-a4ce-f0676eec0222",
+        "expectedRecoveryRevision": "dbee686e712d88e78cc07018b4146b94296dc162d25eec292e7eba50580fde1d",
+        "executorStopped": true,
+        "noPendingSubmit": true,
+        "evidence": "It has been verified that the old actuator has stopped and these five groups of historical threads have been retired"
+      },
+      "result": {
+        "resolved": true,
+        "organizationId": "b4314faf-59f8-48e3-a25c-145221e78239",
+        "actor": {
+          "kind": "MAINTENANCE",
+          "operator": "tercel",
+          "host": "terceldeMac-mini.local"
+        },
+        "actorKey": "dbc6b318e232037bf42f7cdf89c060c8138e3a5ae50e9a597e66ed53afd8bb7e",
+        "postId": "cmtl6v2ku000uqm38heofs35v",
+        "quarantinedPostIds": [
+          "cmtl6v2ku000uqm38heofs35v"
+        ],
+        "recoveryRevision": "dbee686e712d88e78cc07018b4146b94296dc162d25eec292e7eba50580fde1d",
+        "executorStopped": true,
+        "noPendingSubmit": true,
+        "priorStates": [
+          {
+            "postId": "cmtl6v2ku000uqm38heofs35v",
+            "state": "QUEUE",
+            "deletedAt": "2026-09-03T07:15:23.745Z",
+            "claimFingerprint": "43677b5e8a067c4517b94d94ec616d6adfdb516d1c30fc8c8195d4a64afd71e2"
+          }
+        ],
+        "evidence": "It has been verified that the old actuator has stopped and these five groups of historical threads have been retired",
+        "nextAction": "CHECK_SEND_MODE_AND_RETRY_NEW_CONTENT"
+      }
+    }
+  ]
+}

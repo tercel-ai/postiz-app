@@ -4,6 +4,9 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { SendModeController } from '../../../../../apps/backend/src/api/routes/send-mode.controller';
 import { AdminSettingsController } from '../../../../../apps/backend/src/admin-api/routes/admin-settings.controller';
+import { AdminSendRecoveryController } from '../../../../../apps/backend/src/admin-api/routes/admin-send-recovery.controller';
+import { SuperAdminGuard } from '../../../../../apps/backend/src/services/auth/admin/super-admin.guard';
+import { Reflector } from '@nestjs/core';
 import { SettingsService } from '../../database/prisma/settings/settings.service';
 import {
   BeginBrowserWriteDto,
@@ -16,10 +19,30 @@ import {
 } from '../send-mode.dto';
 import {
   SEND_MODE_SYSTEM_KEY,
+  SEND_MAINTENANCE_RECOVERY_PREFIX,
   organizationSendModeKey,
 } from '../send-mode.service';
 
 describe('sending mode API and Settings isolation', () => {
+  it('exposes calendar recovery only on platform administrator routes with an explicit target organization', () => {
+    const modes = { getAdminRecoveryState: vi.fn(), getLegacyPostRecovery: vi.fn(), resolveLegacyPostRecovery: vi.fn() };
+    const controller = new AdminSendRecoveryController(modes as any);
+    expect(Reflect.getMetadata('path', AdminSendRecoveryController)).toBe('/admin/organizations/:organizationId/sending-mode');
+    expect((SendModeController.prototype as any).getLegacyPostRecovery).toBeUndefined();
+    const user = { id: 'platform-admin', isSuperAdmin: true };
+    controller.get('target-org', user as any);
+    controller.getLegacyPostRecovery('target-org', user as any, 'post');
+    const body = {} as any;
+    controller.resolveLegacyPostRecovery('target-org', user as any, 'post', body);
+    expect(modes.getAdminRecoveryState).toHaveBeenCalledWith('target-org', 'platform-admin');
+    expect(modes.getLegacyPostRecovery).toHaveBeenCalledWith('target-org', 'platform-admin', 'post');
+    expect(modes.resolveLegacyPostRecovery).toHaveBeenCalledWith('target-org', 'platform-admin', 'post', body);
+    const guard = new SuperAdminGuard(new Reflector());
+    const context = (isSuperAdmin: boolean) => ({ getHandler: () => controller.getLegacyPostRecovery,
+      getClass: () => AdminSendRecoveryController, switchToHttp: () => ({ getRequest: () => ({ user: { isSuperAdmin } }) }) });
+    expect(() => guard.canActivate(context(false) as any)).toThrow('superadmin required');
+    expect(guard.canActivate(context(true) as any)).toBe(true);
+  });
   it('routes receipt-proven owner recovery separately from administrator overrides', async () => {
     const modes = { getBrowserReplyRecovery: vi.fn(), resolveBrowserReplyRecovery: vi.fn() };
     const controller = new SendModeController(modes as any);
@@ -272,7 +295,7 @@ describe('sending mode API and Settings isolation', () => {
     expect(Reflect.getMetadata('method', controller.get)).toBe(0);
     expect(Reflect.getMetadata('method', controller.save)).toBe(1);
   });
-  it.each([SEND_MODE_SYSTEM_KEY, organizationSendModeKey('org')])(
+  it.each([SEND_MODE_SYSTEM_KEY, organizationSendModeKey('org'), `${SEND_MAINTENANCE_RECOVERY_PREFIX}org:request`])(
     'blocks generic Settings service mutations for %s',
     async (key) => {
       const repository = { set: vi.fn(), delete: vi.fn() };
@@ -325,6 +348,8 @@ describe('sending mode API and Settings isolation', () => {
     await expect(
       controller.deleteSetting(organizationSendModeKey('org'))
     ).rejects.toMatchObject({ status: 400 });
+    await expect(controller.upsertSetting(`${SEND_MAINTENANCE_RECOVERY_PREFIX}org:request`, { value: {} } as any)).rejects.toMatchObject({ status: 400 });
+    await expect(controller.deleteSetting(`${SEND_MAINTENANCE_RECOVERY_PREFIX}org:request`)).rejects.toMatchObject({ status: 400 });
   });
   it('opens account-selection policy administration when capability is enabled by Settings', async () => {
     vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', undefined);
