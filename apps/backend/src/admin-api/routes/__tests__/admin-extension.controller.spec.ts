@@ -68,17 +68,40 @@ describe('AdminExtensionController', () => {
 
   it('stores a dev Firefox upload under the standard Firefox setting', async () => {
     await controller.uploadChrome(file(DEV));
-    await controller.uploadFirefox(file(DEV));
+    await controller.uploadFirefox({ ...file(DEV), originalname: 'signed.xpi' });
 
     expect(uploadBuffer).toHaveBeenCalledWith(
-      'extensions/aisee-extension-firefox-dev-1.20.2.zip',
+      'extensions/aisee-extension-firefox-dev-1.20.2.xpi',
       expect.anything(),
-      'application/zip'
+      'application/x-xpinstall'
     );
     expect(Object.keys(settings).sort()).toEqual([
       'extension.chrome',
       'extension.firefox',
     ]);
+  });
+
+  it('preserves the original signed XPI bytes for a production Firefox release', async () => {
+    const zip = new AdmZip(buildZip(PROD));
+    zip.addFile('META-INF/mozilla.rsa', Buffer.from('signature'));
+    const buffer = zip.toBuffer();
+    const result = await controller.uploadFirefox({ originalname: 'signed.XPI', buffer } as any);
+    expect(uploadBuffer).toHaveBeenCalledWith(
+      'extensions/aisee-extension-firefox-1.20.2.xpi', buffer, 'application/x-xpinstall'
+    );
+    expect(settings['extension.firefox']).toMatchObject({ version: PROD.version, downloadUrl: result.downloadUrl });
+  });
+
+  it('rejects ZIP uploads for Firefox and XPI uploads for Chrome before storing anything', async () => {
+    await expect(controller.uploadFirefox(file(PROD))).rejects.toThrow('Only .xpi files are accepted');
+    await expect(controller.uploadChrome({ ...file(PROD), originalname: 'signed.xpi' })).rejects.toThrow('Only .zip files are accepted');
+    expect(uploadBuffer).not.toHaveBeenCalled();
+    expect(settings).toEqual({});
+  });
+
+  it('rejects an invalid XPI archive', async () => {
+    await expect(controller.uploadFirefox({ originalname: 'broken.xpi', buffer: Buffer.from('invalid') } as any)).rejects.toThrow();
+    expect(uploadBuffer).not.toHaveBeenCalled();
   });
 
   it('reports only the standard browser fields', async () => {

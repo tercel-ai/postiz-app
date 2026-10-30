@@ -15,6 +15,10 @@ import AdmZip from 'adm-zip';
 
 type Platform = 'chrome' | 'firefox';
 const PLATFORMS: Platform[] = ['chrome', 'firefox'];
+const PACKAGE_FORMATS = {
+  chrome: { extension: '.zip', contentType: 'application/zip' },
+  firefox: { extension: '.xpi', contentType: 'application/x-xpinstall' },
+} as const;
 
 type Channel = 'prod' | 'dev';
 
@@ -48,7 +52,7 @@ function extensionFilename(
   channel: Channel = 'prod'
 ) {
   const suffix = channel === 'dev' ? '-dev' : '';
-  return `aisee-extension-${platform}${suffix}-${version}.zip`;
+  return `aisee-extension-${platform}${suffix}-${version}${PACKAGE_FORMATS[platform].extension}`;
 }
 
 @ApiTags('Admin')
@@ -86,8 +90,9 @@ export class AdminExtensionController {
     if (!file) {
       throw new BadRequestException('No file uploaded');
     }
-    if (!file.originalname.endsWith('.zip')) {
-      throw new BadRequestException('Only .zip files are accepted');
+    const format = PACKAGE_FORMATS[platform];
+    if (!file.originalname.toLowerCase().endsWith(format.extension)) {
+      throw new BadRequestException(`Only ${format.extension} files are accepted`);
     }
 
     const { version, name } = this._readManifestFromZip(file.buffer);
@@ -98,7 +103,7 @@ export class AdminExtensionController {
     const downloadUrl = await storage.uploadBuffer(
       `extensions/${filename}`,
       file.buffer,
-      'application/zip'
+      format.contentType
     );
     const meta = { version, downloadUrl, releasedAt: new Date().toISOString() };
 
@@ -111,6 +116,9 @@ export class AdminExtensionController {
   }
 
   /**
+   * XPI packages use the ZIP container format too. Read without repacking so
+   * Firefox signatures remain intact when the original buffer is uploaded.
+   *
    * Reads the zip's OWN manifest — not the filename, which the uploader
    * chooses and which therefore cannot be trusted to say which build this is.
    *

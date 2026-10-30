@@ -507,6 +507,12 @@ Ordinary web clients use business creation/enqueue APIs and do not obtain node c
 | POST | `/admin/extension/upload/chrome` |
 | POST | `/admin/extension/upload/firefox` |
 
+Uploads use a multipart `file` field: Chrome accepts `.zip`, and Firefox accepts
+`.xpi`. Firefox downloads retain the `.xpi` filename and use
+`application/x-xpinstall`; signed package bytes are preserved. Both platforms
+read `manifest.json` from the archive root and return the existing version and
+download URL metadata.
+
 ### [admin-integrations.controller.ts](../apps/backend/src/admin-api/routes/admin-integrations.controller.ts) — `/admin/integrations`
 📝 No dedicated API reference yet.
 | Method | Path |
