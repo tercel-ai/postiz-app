@@ -183,9 +183,11 @@ export class SocialAccountIdentityService {
       (!account || options.extensionRecovery.integrationId !== account.id)
     )
       return { blockCode: 'ACCOUNT_RECOVERY_CHANGED' };
-    if (account?.deletedAt && !confirmed)
+    const canRestore = confirmed || (options.source === 'EXTENSION' &&
+      account?.identityNamespace === identity.namespace && account?.internalId === identity.id);
+    if (account?.deletedAt && !canRestore)
       return { blockCode: 'ACCOUNT_DELETED', recovery };
-    if (account?.deletedAt && confirmed) {
+    if (account?.deletedAt && canRestore) {
       if (!options.canCreate || options.maxChannels === undefined)
         return { blockCode: 'ACCOUNT_CREATION_NOT_ALLOWED', recovery };
       if (
@@ -250,7 +252,7 @@ export class SocialAccountIdentityService {
         data: {
           identityNamespace: identity.namespace,
           internalId: identity.id,
-          ...(confirmed && account.deletedAt ? { deletedAt: null } : {}),
+          ...(canRestore && account.deletedAt ? { deletedAt: null } : {}),
           ...(options.handle?.trim() ? { profile: options.handle.trim() } : {}),
           metadata: {
             ...metadata,

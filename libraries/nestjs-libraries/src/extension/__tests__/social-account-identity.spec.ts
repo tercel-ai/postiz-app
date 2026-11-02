@@ -240,7 +240,7 @@ describe('shared stable social actor identity', () => {
     ).toBe('ACCOUNT_IDENTITY_IN_USE');
     expect(f.db.rows('integration')[0].identityNamespace).toBe('legacy');
   });
-  it('keeps organizations and providers isolated and does not revive deleted actors', async () => {
+  it('keeps organizations isolated and restores the same deleted actor on extension reports', async () => {
     const f = fixture();
     f.db.seed('integration', {
       id: 'other',
@@ -252,7 +252,12 @@ describe('shared stable social actor identity', () => {
     expect((await f.resolve()).account?.id).not.toBe('other');
     f.db.rows('integration').find((r) => r.organizationId === 'org').deletedAt =
       new Date();
-    expect((await f.resolve()).blockCode).toBe('ACCOUNT_DELETED');
+    const account = f.db.rows('integration').find((r) => r.organizationId === 'org');
+    account.disabled = true;
+    const restored = await f.resolve();
+    expect(restored.account?.id).toBe(account.id);
+    expect(restored.account?.deletedAt).toBeNull();
+    expect(restored.account?.disabled).toBe(true);
   });
   it.each(['', 'alice', '1e9', '00123'])(
     'rejects an invalid X platform ID: %s',
