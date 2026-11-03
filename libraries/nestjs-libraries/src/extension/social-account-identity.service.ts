@@ -11,37 +11,51 @@ export interface StableSocialIdentity {
   namespace: string;
   id: string;
 }
+interface SocialIdentityContract {
+  namespace: string;
+  pattern: RegExp;
+  normalize?: (id: string) => string;
+  // Historical reports omitted namespaces and may contain either OAuth or browser IDs.
+  mixedLegacyNamespaces?: boolean;
+}
+const SOCIAL_IDENTITIES: Record<string, SocialIdentityContract> = {
+  x: { namespace: 'x.rest_id', pattern: /^[1-9][0-9]*$/ },
+  reddit: { namespace: 'reddit.user_id', pattern: /^[a-z0-9]+$/,
+    normalize: id => id.replace(/^t2_/i, '').toLowerCase() },
+  linkedin: { namespace: 'linkedin.fs_miniProfile', pattern: /^[A-Za-z0-9_-]+$/,
+    mixedLegacyNamespaces: true },
+  'linkedin-page': { namespace: 'linkedin.organization_id', pattern: /^[1-9][0-9]*$/ },
+  medium: { namespace: 'medium.handle', pattern: /^[A-Za-z0-9_.-]+$/ },
+  quora: { namespace: 'quora.user_id', pattern: /^[1-9][0-9]*$/ },
+  hackernews: { namespace: 'hackernews.handle', pattern: /^[A-Za-z0-9_-]{2,15}$/ },
+  devto: { namespace: 'devto.user_id', pattern: /^[1-9][0-9]*$/ },
+};
 export function stableSocialIdentity(
   platform: string,
   namespace: string,
   raw: string
 ): StableSocialIdentity | null {
-  const id = typeof raw === 'string' ? raw.trim() : '';
-  if (!id) return null;
-  if (platform === 'x' && namespace === 'x.rest_id' && /^[1-9][0-9]*$/.test(id))
-    return { platform, namespace, id };
-  if (platform === 'reddit' && namespace === 'reddit.user_id') {
-    const normalized = id?.replace(/^t2_/i, '').toLowerCase();
-    if (/^[a-z0-9]+$/.test(normalized))
-      return { platform, namespace, id: normalized };
+  const contract = SOCIAL_IDENTITIES[platform];
+  const trimmed = typeof raw === 'string' ? raw.trim() : '';
+  if (!trimmed || !contract || contract.namespace !== namespace) return null;
+  const id = contract.normalize?.(trimmed) ?? trimmed;
+  return contract.pattern.test(id) ? { platform, namespace, id } : null;
+}
+
+/** A recovery candidate is not proof; known conflicting browser identities stay protected. */
+function legacyProfileCanBeRecovered(account: Integration, identity: StableSocialIdentity, handle: string): boolean {
+  const metadata = account.metadata && typeof account.metadata === 'object' && !Array.isArray(account.metadata)
+    ? account.metadata : {};
+  const recorded = metadata.stableIdentity;
+  if (recorded && typeof recorded === 'object' && !Array.isArray(recorded) &&
+      recorded.namespace === identity.namespace && typeof recorded.id === 'string') {
+    const known = stableSocialIdentity(identity.platform, identity.namespace, recorded.id);
+    if (known && known.id !== identity.id) return false;
   }
-  if (
-    platform === 'linkedin-page' &&
-    namespace === 'linkedin.organization_id' &&
-    /^[1-9][0-9]*$/.test(id)
-  )
-    return { platform, namespace, id };
-  const rules: Record<string, [string, RegExp]> = {
-    linkedin: ['linkedin.fs_miniProfile', /^[A-Za-z0-9_-]+$/],
-    medium: ['medium.handle', /^[A-Za-z0-9_.-]+$/],
-    quora: ['quora.user_id', /^[1-9][0-9]*$/],
-    hackernews: ['hackernews.handle', /^[A-Za-z0-9_-]{2,15}$/],
-    devto: ['devto.user_id', /^[1-9][0-9]*$/],
-  };
-  const rule = rules[platform];
-  if (rule?.[0] === namespace && rule[1].test(id))
-    return { platform, namespace, id };
-  return null;
+  const previous = stableSocialIdentity(identity.platform, identity.namespace, account.internalId);
+  if (metadata.credentialSource === 'SESSION_ONLY' && previous && previous.id !== identity.id) return false;
+  return normalizeHandle(account.internalId) === handle || !previous ||
+    SOCIAL_IDENTITIES[identity.platform].mixedLegacyNamespaces === true;
 }
 export function oauthSocialIdentity(
   platform: string,
@@ -144,7 +158,7 @@ export class SocialAccountIdentityService {
     const legacyProfiles = !account && options.source === 'EXTENSION' && reportedHandle
       ? rows.filter(row => row.identityNamespace === 'legacy' && !row.deletedAt &&
         row.type === 'social' && normalizeHandle(row.profile ?? '') === reportedHandle &&
-        normalizeHandle(row.internalId) === reportedHandle)
+        legacyProfileCanBeRecovered(row, identity, reportedHandle))
       : [];
     const legacyProfile = legacyProfiles.length === 1 ? legacyProfiles[0] : undefined;
     if (!account && options.extensionRecovery) {

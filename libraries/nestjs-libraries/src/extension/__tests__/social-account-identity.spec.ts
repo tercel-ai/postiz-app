@@ -156,13 +156,14 @@ describe('shared stable social actor identity', () => {
     expect(f.db.rows('integration')[0].id).toBe(first.account?.id);
     expect(f.db.rows('integration')[0].internalId).toBe('123');
   });
-  it('blocks a normalized profile collision with an unresolved old account', async () => {
+  it('blocks automatic registration and offers explicit recovery for an unresolved old account', async () => {
     const f = fixture();
     f.db.seed('integration', {
       id: 'old', organizationId: 'org', providerIdentifier: 'x', type: 'social',
       identityNamespace: 'legacy', internalId: 'unknown', profile: ' @ALICE ',
     });
-    expect(await f.resolve()).toEqual({ blockCode: 'ACCOUNT_PROFILE_CONFLICT' });
+    expect(await f.resolve()).toEqual({ blockCode: 'ACCOUNT_PROFILE_CONFLICT',
+      recovery: { integrationId: 'old', action: 'VERIFY_LEGACY', name: ' @ALICE ' } });
     expect(f.db.rows('integration')).toHaveLength(1);
     expect(f.db.rows('integration')[0].identityNamespace).toBe('legacy');
   });
