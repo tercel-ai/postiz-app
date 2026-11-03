@@ -18,8 +18,9 @@ it('uses the existing ledger instead of recounting history', async () => {
   quota.resolve.mockResolvedValue({ budgets: [{ key: 'bucket', limit: 5, units: 1 }] });
   const db = { sendExecution: { findUnique: vi.fn(async () => ({ organizationId: 'org', intent: {}, createdAt: new Date() })) },
     accountWriteState: { findUnique: vi.fn(async () => ({})) }, sendQuotaBucket: { findUnique: vi.fn(async () => ({ id: 'bucket', confirmedUnits: 2, heldUnits: 3 })) },
-    sendQuotaReservation: { findMany: vi.fn(async () => [{ executionId: 'held', segmentIndex: 0, units: 1, execution: { status: 'RECONCILING', segments: [{ segmentIndex: 0, status: 'UNKNOWN' }] } }]) } };
+    sendQuotaReservation: { findMany: vi.fn(async () => [{ executionId: 'held', segmentIndex: 0, units: 1, execution: { status: 'RECONCILING', segments: [{ segmentIndex: 0, status: 'UNKNOWN', result: { evidence: 'Phase: SUBMITTING; code: SEND_RESULT_UNCONFIRMED. private data', private: 'secret' } }] } }]) } };
   expect((await diagnoseSendQuota(db as any, 'attempt')).budgets[0]).toMatchObject({ source: 'LEDGER', exhausted: true });
   expect(quota.baseline).not.toHaveBeenCalled();
-  expect((await diagnoseSendQuota(db as any, 'attempt')).budgets[0].holds[0]).toMatchObject({ executionId: 'held', segment: { status: 'UNKNOWN' } });
+  expect(JSON.stringify((await diagnoseSendQuota(db as any, 'attempt')).budgets[0].holds)).not.toContain('private');
+  expect((await diagnoseSendQuota(db as any, 'attempt')).budgets[0].holds[0]).toMatchObject({ executionId: 'held', segment: { status: 'UNKNOWN', phase: 'SUBMITTING', code: 'SEND_RESULT_UNCONFIRMED' } });
 });

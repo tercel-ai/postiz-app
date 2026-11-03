@@ -621,3 +621,17 @@ describe('autonomous side-effect quota baseline', () => {
     expect(db.rows('sendQuotaReservation')).toHaveLength(0);
   });
 });
+
+
+it('returns the exhausted quota and reset window without exposing ledger keys', async () => {
+  const db = memorySendDatabase();
+  const q = new SendQuotaService();
+  db.seed('sendQuotaBucket', { ...budget(), id: 'budget', organizationId: 'org', confirmedUnits: 0, heldUnits: 1 });
+  const error = await db.$transaction((tx: any) => q.reserve(tx, 'org', 'next', 0, [budget()], now)).catch(error => error);
+  expect(error.getResponse()).toMatchObject({ message: 'SEND_QUOTA_EXHAUSTED', error: 'Forbidden', statusCode: 403, quota: {
+    scope: 'PROJECT', dimension: 'REPLY_ROOTS_AUTO', limit: 1, confirmedUnits: 0, heldUnits: 1,
+    requestedUnits: 1, resetAt: '2026-10-16T00:00:00.000Z', timezone: 'UTC',
+  } });
+  expect(JSON.stringify(error.getResponse())).not.toContain('budget');
+  expect(db.rows('sendQuotaReservation')).toHaveLength(0);
+});

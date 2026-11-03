@@ -606,7 +606,11 @@ export class SendQuotaService {
         budget.enforce !== false &&
         bucket.confirmedUnits + bucket.heldUnits + budget.units > budget.limit
       )
-        throw new ForbiddenException('SEND_QUOTA_EXHAUSTED');
+        throw new ForbiddenException({ message: 'SEND_QUOTA_EXHAUSTED', error: 'Forbidden', statusCode: 403, quota: {
+          scope: budget.scope, dimension: budget.dimension, limit: budget.limit,
+          confirmedUnits: bucket.confirmedUnits, heldUnits: bucket.heldUnits, requestedUnits: budget.units,
+          resetAt: budget.windowEnd.toISOString(), timezone: budget.timezone,
+        } });
       const saved = await tx.sendQuotaBucket.updateMany({
         where: {
           id: bucket.id,

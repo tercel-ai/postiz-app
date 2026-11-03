@@ -28,12 +28,20 @@ export async function diagnoseSendQuota(db: PrismaClient, attemptId: string) {
       where: { bucketId: bucket.id, organizationId: execution.organizationId, state: 'HELD' },
       take: 100, orderBy: { createdAt: 'asc' },
       select: { executionId: true, segmentIndex: true, units: true, createdAt: true,
-        execution: { select: { status: true, segments: { select: { segmentIndex: true, status: true, authorizedAt: true, submitBefore: true } } } } },
+        execution: { select: { status: true, segments: { select: { segmentIndex: true, status: true, authorizedAt: true, submitBefore: true, result: true } } } } },
     }) : [];
     budgets.push({
       holds: held.map(row => ({ executionId: row.executionId, segmentIndex: row.segmentIndex, units: row.units,
         createdAt: row.createdAt, executionStatus: row.execution.status,
-        segment: row.execution.segments.find(segment => segment.segmentIndex === row.segmentIndex) })),
+        segment: (() => {
+          const segment = row.execution.segments.find(segment => segment.segmentIndex === row.segmentIndex);
+          if (!segment) return null;
+          const { result, ...state } = segment;
+          const evidence = (result as { evidence?: unknown } | null)?.evidence;
+          const phase = typeof evidence === 'string' ? evidence.match(/Phase: ([A-Z_]+)/)?.[1] : undefined;
+          const code = typeof evidence === 'string' ? evidence.match(/code: ([A-Z_0-9]+)/)?.[1] : undefined;
+          return { ...state, phase, code };
+        })() })),
       scope: budget.scope, dimension: budget.dimension, limit: budget.limit,
       enforced: budget.enforce !== false, confirmedUnits: usage.confirmedUnits, heldUnits: usage.heldUnits,
       requestedUnits: budget.units, exhausted: budget.enforce !== false && usage.confirmedUnits + usage.heldUnits + budget.units > budget.limit,
