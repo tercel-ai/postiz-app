@@ -1,7 +1,7 @@
 {
   "feature": "organization-sending-modes",
   "created": "2026-10-20T02:39:20Z",
-  "updated": "2026-10-27T10:11:29.026275Z",
+  "updated": "2026-11-03T01:58:11Z",
   "status": "completed",
   "execution_order": [
     "mode-configuration",
@@ -75,6 +75,28 @@
     }
   ],
   "fixes": [
+    {
+      "bug": "Engage sent list returns SEND_ROOT_NOT_FOUND when a soft-deleted reply Post is included",
+      "root_cause_level": 1,
+      "root_cause": "List/detail summary enrichment introduced in aef818a7 requires live Posts, but sent repository reads did not exclude soft-deleted Posts. A rejected summary aborts the page while stats still succeed.",
+      "fixed_files": [
+        "libraries/nestjs-libraries/src/engage/engage.repository.ts",
+        "libraries/nestjs-libraries/src/engage/__tests__/engage-repository.spec.ts"
+      ],
+      "commits": [],
+      "doc_updates": [],
+      "regression_tests_added": 7,
+      "tests": { "passed": 5105, "failed": 0, "skipped": 96 },
+      "verification": {
+        "red": "7 failed, 238 passed before the fix",
+        "focused": "359 passed, 0 failed",
+        "full": "312 test files passed; frozen apps/extension excluded; external database and Redis disabled",
+        "typescript": "Backend build configuration passed; development configuration reports existing errors outside changed files",
+        "database": "No live queries or mutations; reported project data condition remains unverified",
+        "deployment": "Local only"
+      },
+      "fixed_at": "2026-11-03T01:58:11Z"
+    },
     {
       "bug": "Settled historical browser reply retains platform writer occupancy and blocks independent controlled sends",
       "root_cause_level": 1,

@@ -810,6 +810,35 @@ describe('EngageRepository — two-table reads', () => {
   });
 
   describe('listSentReplies', () => {
+    it.each(['listSentReplies', 'getSentStats', 'countSentReplies', 'getSentCountsSummary', 'locateSentReply'] as const)(
+      '%s excludes soft-deleted posts from every query and aggregate', async method => {
+        const { repo, sentFindMany, sentFindFirst, sentCount, postAggregate } = buildRepo();
+        sentFindMany.mockResolvedValue([]);
+        sentFindFirst.mockResolvedValue(null);
+        sentCount.mockResolvedValue(0);
+        postAggregate.mockResolvedValue({ _sum: { impressions: 0, trafficScore: 0 } });
+
+        await (repo[method] as any)('org1', { projectId: 'project1', sentReplyId: 'sent1' });
+
+        const queries = [sentFindMany, sentFindFirst, sentCount, postAggregate]
+          .flatMap(mock => mock.mock.calls.map(([args]) => args));
+        expect(queries.length).toBeGreaterThan(0);
+        for (const args of queries) {
+          const postFilter = args.where.post ?? args.where;
+          expect(postFilter.deletedAt).toBeNull();
+        }
+      }
+    );
+
+    it.each(['getSentReplyItemById', 'getSentReplyStatus'] as const)(
+      '%s treats a reply with a soft-deleted post as unavailable', async method => {
+        const { repo, sentFindFirst } = buildRepo();
+        sentFindFirst.mockResolvedValue(null);
+        await expect(repo[method]('org1', 'sent1')).rejects.toThrow('Sent reply not found');
+        expect(sentFindFirst.mock.calls[0][0].where.post).toEqual({ deletedAt: null });
+      }
+    );
+
     // The feed is "most recently SENT first". Post.publishDate is re-stamped to
     // the real send time on every publish-success commit, so a reply drafted days
     // ago and sent today belongs at the top — ordering on the row's own createdAt
@@ -1445,6 +1474,7 @@ describe('EngageRepository — two-table reads', () => {
       expect(sentFindFirst.mock.calls[0][0].where).toEqual({
         id: 'sent1',
         organizationId: 'org1',
+        post: { deletedAt: null },
       });
       expect(stateFindFirst.mock.calls[0][0].where).toEqual({
         organizationId: 'org1',
@@ -2168,6 +2198,7 @@ describe('EngageRepository — two-table reads', () => {
       // All-time: engage source, no date window, and unsent drafts excluded.
       expect(sentCount.mock.calls[0][0].where.post).toEqual({
         source: 'engage',
+        deletedAt: null,
         state: { not: 'DRAFT' },
       });
       expect(sentCount.mock.calls[0][0].where.post.publishDate).toBeUndefined();
@@ -4887,7 +4918,7 @@ describe('EngageRepository.getOrgScanStatus', () => {
       const where = sentFindMany.mock.calls[0][0].where;
       // The list passes includeDrafts:true, so the "All" view applies NO state
       // filter — every engage item (incl. DRAFT working-copies) is returned.
-      expect(where.post).toEqual({ source: 'engage' });
+      expect(where.post).toEqual({ source: 'engage', deletedAt: null });
     });
 
     it('no status filter ("All") STATS still excludes DRAFT (sent-reply performance only)', async () => {
@@ -4904,6 +4935,7 @@ describe('EngageRepository.getOrgScanStatus', () => {
       // "发出回复" / response-rate / impression cards.
       expect(sentCount.mock.calls[0][0].where.post).toEqual({
         source: 'engage',
+        deletedAt: null,
         state: { not: 'DRAFT' },
       });
     });

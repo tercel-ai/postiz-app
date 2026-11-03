@@ -4944,6 +4944,9 @@ export class EngageRepository {
     // bounds, which override a preset.
     const postWhere: Prisma.PostWhereInput = {
       source: 'engage',
+      // Sending summaries require a live Post; keep list, stats and badges in
+      // that same scope so a deleted reply cannot invalidate an entire page.
+      deletedAt: null,
       ...engageDateWindow(dto),
     };
 
@@ -6605,7 +6608,7 @@ export class EngageRepository {
 
   async getSentReplyItemById(organizationId: string, id: string) {
     const reply = await this._sentReply.model.engageSentReply.findFirst({
-      where: { id, organizationId },
+      where: { id, organizationId, post: { deletedAt: null } },
       include: {
         post: {
           select: {
@@ -7128,7 +7131,7 @@ export class EngageRepository {
   // already PUBLISHED at creation time, so state alone can't be the signal.
   async getSentReplyStatus(organizationId: string, sentReplyId: string) {
     const reply = await this._sentReply.model.engageSentReply.findFirst({
-      where: { id: sentReplyId, organizationId },
+      where: { id: sentReplyId, organizationId, post: { deletedAt: null } },
       select: {
         id: true,
         // `error`: why the LAST attempt did not go out. Only meaningful together
