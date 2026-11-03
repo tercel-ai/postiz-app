@@ -1,5 +1,40 @@
 # Scripts
 
+## diagnose-linkedin-profile.ts
+
+Read-only diagnosis of a reported LinkedIn miniProfile ID and public profile.
+The script and its tests live in this backend repository.
+
+```bash
+pnpm exec ts-node --project scripts/tsconfig.json scripts/diagnose-linkedin-profile.ts \
+  --id ACoAAA07H24BGZjYnfpiSuwbLgBaajh84HUelEc \
+  --handle kyd-feng-92640b62
+
+# Limit diagnosis to the organization used by the failing request
+pnpm exec ts-node --project scripts/tsconfig.json scripts/diagnose-linkedin-profile.ts \
+  --id <miniProfile-id> --handle <public-profile> --org <organization-id>
+```
+
+It reads `DATABASE_URL` from the environment, then this repository's `.env` as
+fallback, independent of the working directory. `--backend-dir` or
+`AISEE_BACKEND_DIR` may explicitly select another backend checkout. It refuses
+any database except `aisee_postiz_dev`, uses paginated Prisma `findMany` reads,
+and selects no tokens, credentials or metadata. It never changes accounts,
+verifies identities, or submits session reports. `--help` does not connect.
+
+Without `--org`, it scans LinkedIn member accounts and reports only organizations
+related to the supplied ID or normalized profile. The JSON includes matching
+and conflicting Integration IDs, identity namespaces and deleted/disabled state.
+Recovery candidates are profile-only suggestions with eligibility marked
+`NOT_CHECKED`; the backend may reject them based on stored identity provenance,
+coordinated references or other recovery guards. This is a diagnostic tool,
+not a migration script.
+
+Exit codes: `0` means no initial identity/profile gate block was found; `2` means
+a block was found; `1` means diagnosis failed. A zero exit code does not prove
+that session registration or recovery will succeed. Run the regression tests
+with `pnpm exec vitest run scripts/diagnose-linkedin-profile.spec.ts`.
+
 ## audit-integration-profiles.ts
 
 Read-only audit of social-account profile uniqueness within each organization
