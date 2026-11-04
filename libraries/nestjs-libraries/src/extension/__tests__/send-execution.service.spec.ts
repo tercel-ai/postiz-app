@@ -288,3 +288,116 @@ it('allows a revoked original terminal to read status and stop but never start n
  await expect(executions.start(auth, item.executionId, 0, item.leaseToken)).rejects.toThrow('NODE_AUTHENTICATION_REQUIRED');
  await expect(executions.stop(auth, item.executionId, 0, item.leaseToken, { eventId: 'revoked-stop', journalDigest: sendHash('stopped original'), permitHash: '', lastPhase: 'PREPARED', noPendingSubmit: true, executorStoppedAt: now.toISOString() })).resolves.toBeDefined();
 });
+
+describe('durable X draft exposure before a submit permit', () => {
+  it('fences an offline exposed draft, while allowing its live owner to obtain a permit', async () => {
+    const { claim, executions, proof, db } = fixture();
+    const item = await claim();
+    await expect((executions as any).draftExposure(auth, item.executionId, 0, item.leaseToken)).resolves.toMatchObject({ exposed: true });
+    expect(db.rows('sendSegment')[0]).toMatchObject({ status: 'PENDING', result: { status: 'draft_exposed' } });
+    expect(db.rows('sendExecution')[0].status).toBe('SENDING');
+    expect(db.rows('sendQuotaReservation')).toHaveLength(0);
+    await proof(item);
+    expect((await executions.start(auth, item.executionId, 0, item.leaseToken)).granted).toBe(true);
+  });
+  it('does not automatically reclaim an exposed draft after the browser goes offline', async () => {
+    const { claim, executions, service, db } = fixture(); const item = await claim();
+    await (executions as any).draftExposure(auth, item.executionId, 0, item.leaseToken);
+    vi.setSystemTime(new Date(now.getTime() + 180000));
+    await expect(service.reserveApi('org', 'root', 'other', new Date())).rejects.toThrow();
+    await expect(executions.preflight(auth,item.executionId,0,item.leaseToken)).rejects.toThrow('SEND_LEASE_EXPIRED');
+    expect(db.rows('sendIntent')[0].activeExecutionId).toBe(item.executionId);
+    expect(db.rows('sendQuotaReservation')).toHaveLength(0);
+  });
+  it('records pre-permit uncertainty and requires attended absence review before retry', async () => {
+    const { claim, executions, service, db } = fixture(); const item = await claim();
+    await (executions as any).draftExposure(auth,item.executionId,0,item.leaseToken);
+    await executions.outcome(auth,item.executionId,0,item.leaseToken,{status:'unknown',eventId:'exposed-error'});
+    expect(db.rows('sendSegment')[0].status).toBe('UNKNOWN');
+    vi.setSystemTime(new Date(now.getTime()+180000));
+    db.rows('extensionNode')[0].registeredByUserId='user';
+    await service.reviewPostNotSent('org','user',item.executionId,'root',{eventId:'review',expectedResolutionRevision:0,reviewedNotSent:true,draftsClosed:true});
+    expect(db.rows('sendSegment')[0].status).toBe('NOT_SUBMITTED');
+    expect(db.rows('sendQuotaReservation')).toHaveLength(0);
+  });
+  it('allows attended absence review after an exposed browser crashes without reporting an outcome', async () => {
+    const { claim, executions, service, db } = fixture(); const item = await claim();
+    await (executions as any).draftExposure(auth,item.executionId,0,item.leaseToken);
+    db.rows('extensionNode')[0].registeredByUserId='user';
+    await expect(service.postReview('org','user',item.executionId,'root')).rejects.toThrow();
+    vi.setSystemTime(new Date(now.getTime()+180000));
+    expect(await service.postReview('org','user',item.executionId,'root')).toMatchObject({canReviewNotSent:true});
+    await service.reviewPostNotSent('org','user',item.executionId,'root',{eventId:'closed',expectedResolutionRevision:0,reviewedNotSent:true,draftsClosed:true});
+    expect(db.rows('sendExecution')[0].status).toBe('FAILED_FINAL');
+  });
+  it.each(['lease','token','tenant','writer'])('fails closed for a wrong %s before exposing a draft', async reason => {
+    const { claim, executions, db }=fixture(); const item=await claim();
+    if(reason==='writer')db.rows('accountWriteState')[0].activeExecutionId='other';
+    await expect((executions as any).draftExposure({...auth,...(reason==='token'?{token:'wrong'}:{}),...(reason==='tenant'?{org:'other'}:{})},item.executionId,0,reason==='lease'?'wrong':item.leaseToken)).rejects.toThrow();
+    expect(db.rows('sendExecution')[0].status).toBe('RESERVED');
+  });
+});
+
+it('requires attended review instead of a no-permit stop proof after draft exposure', async () => {
+ const { claim, executions }=fixture(); const item=await claim();
+ await executions.draftExposure(auth,item.executionId,0,item.leaseToken);
+ await expect(executions.stop(auth,item.executionId,0,item.leaseToken,{eventId:'unsafe-stop',journalDigest:sendHash('stopped'),permitHash:'',lastPhase:'PREPARED',noPendingSubmit:true,executorStoppedAt:now.toISOString()})).rejects.toThrow('EXPOSED_DRAFT_REQUIRES_REVIEW');
+});
+it('exposes replies and later thread segments only after prior confirmation and account spacing', async () => {
+ const { claim, executions, db }=fixture(); const item=await claim();
+ db.rows('sendExecution')[0].action='REPLY'; db.rows('sendIntent')[0].action='REPLY';
+ await executions.draftExposure(auth,item.executionId,0,item.leaseToken);
+ const segment=db.rows('sendSegment')[0];
+ db.seed('sendSegment',{...segment,id:'later',segmentIndex:1,postId:'child',result:null});
+ await expect(executions.draftExposure(auth,item.executionId,1,item.leaseToken)).rejects.toThrow('PREVIOUS_SEGMENT_NOT_CONFIRMED');
+ db.rows('sendSegment')[0].status='CONFIRMED'; db.rows('sendSegment')[0].result={status:'confirmed',platformId:'first'};
+ db.rows('accountWriteState')[0].nextWriteNotBefore=new Date(now.getTime()+1000);
+ await expect(executions.draftExposure(auth,item.executionId,1,item.leaseToken)).rejects.toThrow('ACCOUNT_SEND_INTERVAL_REQUIRED');
+ vi.setSystemTime(new Date(now.getTime()+1000));
+ await expect(executions.draftExposure(auth,item.executionId,1,item.leaseToken)).resolves.toMatchObject({exposed:true});
+});
+it('quarantines a later writer when an old no-permit draft reports uncertainty', async () => {
+ const { claim, executions, db }=fixture(); const item=await claim();
+ db.seed('sendExecution',{...db.rows('sendExecution')[0],id:'newer',fencingVersion:2,status:'RESERVED'});
+ db.rows('sendIntent')[0].activeExecutionId='newer'; db.rows('sendIntent')[0].fencingVersion=2;
+ await expect(executions.outcome(auth,item.executionId,0,item.leaseToken,{status:'unknown',eventId:'late-exposure'})).rejects.toThrow('SEND_OUTCOME_CONFLICT_REQUIRES_RECONCILIATION');
+ expect(db.rows('sendSegment')[0].status).toBe('UNKNOWN');
+ expect(db.rows('sendExecution').every(e=>e.status==='RECONCILING')).toBe(true);
+ expect(db.rows('accountWriteState')[0].rolloutReady).toBe(false);
+ expect(db.rows('sendQuotaReservation')).toHaveLength(0);
+});
+
+
+describe('retained X thread preparation lease', () => {
+ it('renews an expired retained writer between confirmed segments before exposing the next draft', async () => {
+  const { claim, executions, db }=fixture(); const item=await claim();
+  await executions.draftExposure(auth,item.executionId,0,item.leaseToken);
+  const first=db.rows('sendSegment')[0];
+  db.seed('sendSegment',{...first,id:'next',segmentIndex:1,postId:'child',result:null});
+  first.status='CONFIRMED'; first.result={status:'confirmed',platformId:'first'};
+  vi.setSystemTime(new Date(now.getTime()+180000));
+  await expect(executions.draftExposure(auth,item.executionId,1,item.leaseToken)).rejects.toThrow('SEND_DRAFT_EXPOSURE_UNSAFE');
+  await expect(executions.renew(auth,item.executionId,item.leaseToken)).resolves.toMatchObject({leaseExpiresAt:new Date(now.getTime()+300000).toISOString()});
+  await expect(executions.draftExposure(auth,item.executionId,1,item.leaseToken)).resolves.toMatchObject({exposed:true});
+ });
+ it('never renews an expired exposed draft or extends the thirty-minute preparation deadline', async () => {
+  const { claim, executions, db }=fixture(); const item=await claim();
+  await executions.draftExposure(auth,item.executionId,0,item.leaseToken);
+  vi.setSystemTime(new Date(now.getTime()+180000));
+  await expect(executions.renew(auth,item.executionId,item.leaseToken)).rejects.toThrow('SEND_LEASE_NOT_RENEWABLE');
+  const first=db.rows('sendSegment')[0];
+  db.seed('sendSegment',{...first,id:'next',segmentIndex:1,postId:'child',result:null});
+  first.status='CONFIRMED'; first.result={status:'confirmed',platformId:'first'};
+  vi.setSystemTime(new Date(now.getTime()+1800001));
+  await expect(executions.renew(auth,item.executionId,item.leaseToken)).rejects.toThrow('SEND_PREPARATION_DEADLINE');
+ });
+ it('refuses renewal when a preceding segment is still uncertain', async () => {
+  const { claim, executions, db }=fixture(); const item=await claim();
+  await executions.draftExposure(auth,item.executionId,0,item.leaseToken);
+  const first=db.rows('sendSegment')[0];
+  db.seed('sendSegment',{...first,id:'next',segmentIndex:1,postId:'child',result:null});
+  first.status='UNKNOWN'; first.result={status:'unknown'};
+  vi.setSystemTime(new Date(now.getTime()+180000));
+  await expect(executions.renew(auth,item.executionId,item.leaseToken)).rejects.toThrow('SEND_LEASE_NOT_RENEWABLE');
+ });
+});

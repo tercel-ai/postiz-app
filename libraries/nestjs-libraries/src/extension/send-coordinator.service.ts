@@ -377,6 +377,43 @@ export class SendCoordinatorService {
     return issues;
   }
 
+  /** Explicit scheduling is separate from idempotent enqueue; an idle intent keeps its identity. */
+  async rescheduleQueuedPost(org: string, rootId: string, user: string, publishDate: Date,
+    expectedRouteRevision?: number, expectedContentRevision?: number) {
+    if (!Number.isFinite(publishDate.getTime())) throw new BadRequestException('INVALID_PUBLISH_DATE');
+    await this.enabled(org);
+    await this.assertMember(this.db, org, user);
+    const scope = await this.db.post.findFirst({ where: { id: rootId, organizationId: org, deletedAt: null, parentPostId: null } });
+    if (!scope?.projectId) reject('SEND_PROJECT_REQUIRED');
+    await this.projects.assertProjectActive(org, scope.projectId!);
+    return sendTransaction(this.db, async tx => {
+      await this.assertControlledIn(tx, org);
+      await this.assertMember(tx, org, user);
+      const posts = await this.chain(tx, org, rootId), root = posts[0];
+      const intent = root.sendIntentId ? await tx.sendIntent.findFirst({ where: { id: root.sendIntentId, organizationId: org, rootPostId: rootId, projectId: scope.projectId! } }) : null;
+      if (!intent || root.state !== 'QUEUE' || root.publishMethod !== 'EXTENSION' || intent.action !== 'POST' ||
+          root.projectId !== scope.projectId || root.integrationId !== intent.integrationId ||
+          canonicalControlledPlatform(root.providerIdentifier!) !== intent.platform ||
+          intent.status !== 'QUEUED' || intent.activeExecutionId || intent.hasConfirmedSegments ||
+          posts.some(post => post.state !== 'QUEUE' || post.sendIntentId !== intent.id || post.releaseId || post.releaseURL || post.claimedAt))
+        reject('SEND_RESCHEDULE_UNSAFE');
+      if (!Number.isSafeInteger(expectedRouteRevision) || !Number.isSafeInteger(expectedContentRevision) ||
+          root.routeRevision !== expectedRouteRevision || root.contentRevision !== expectedContentRevision ||
+          intent.routeRevision !== expectedRouteRevision || intent.contentRevision !== expectedContentRevision)
+        reject('SEND_CONTENT_REVISION_CONFLICT');
+      if (await tx.sendExecution.count({ where: { organizationId: org, sendIntentId: intent.id,
+        status: { notIn: ['FAILED_FINAL', 'CANCELLED', 'EXPIRED'] } } }) ||
+          await tx.sendSegment.count({ where: { organizationId: org, execution: { sendIntentId: intent.id }, status: { not: 'NOT_SUBMITTED' } } }))
+        reject('SEND_RESCHEDULE_UNSAFE');
+      const protectedIds = new Set(await this.modes.activeLegacyPostIdsIn(tx, org));
+      if (posts.some(post => protectedIds.has(post.id))) reject('LEGACY_CONTENT_DRAIN_REQUIRED');
+      await tx.sendIntent.update({ where: { id: intent.id }, data: { revision: { increment: 1 } } });
+      const updated = await tx.post.updateMany({ where: { organizationId: org, id: { in: posts.map(post => post.id) }, state: 'QUEUE', sendIntentId: intent.id, releaseId: null }, data: { publishDate } });
+      if (updated.count !== posts.length) reject('SEND_RESCHEDULE_UNSAFE');
+      return tx.post.findUniqueOrThrow({ where: { id: rootId } });
+    });
+  }
+
   async enqueue(org: string, rootId: string, options: EnqueueSend) {
     await this.enabled(org);
     const now = options.now ?? new Date();
@@ -1176,7 +1213,7 @@ export class SendCoordinatorService {
       execution.status === 'RECONCILING'
     )
       reject('STALE_SEND_EXECUTION');
-    if (execution.status === 'RESERVED' && execution.leaseExpiresAt <= now)
+    if ((execution.status === 'RESERVED' || (segment.result as { status?: string } | null)?.status === 'draft_exposed') && execution.leaseExpiresAt <= now)
       reject('SEND_LEASE_EXPIRED');
     if (
       intent.routeRevision !== execution.routeRevision ||
@@ -1422,20 +1459,26 @@ export class SendCoordinatorService {
       } });
       return result;
     }
+    const unpermittedUnknown = segment.status === 'PENDING' && outcome.status === 'unknown' &&
+      execution.kind === 'EXTENSION' && execution.platform === 'x' &&
+      !segment.authorizedAt && !segment.permitHash && !segment.submitBefore;
     let conflict =
       segment.status === 'CONFIRMED' &&
       outcome.status === 'confirmed' &&
       previousResult?.platformId !== outcome.platformId;
+    if (unpermittedUnknown && (intent.activeExecutionId !== execution.id || intent.fencingVersion !== execution.fencingVersion ||
+        (account.activeExecutionId && account.activeExecutionId !== execution.id) || !['RESERVED', 'SENDING', 'RECONCILING'].includes(execution.status))) conflict = true;
     if (segment.status === 'NOT_SUBMITTED' && outcome.status === 'confirmed' && !verifiedReply)
       conflict = true;
     if (
-      segment.status === 'PENDING' &&
+      segment.status === 'PENDING' && !unpermittedUnknown &&
       (outcome.status !== 'definitely_not_submitted' ||
         intent.activeExecutionId !== execution.id ||
         !['RESERVED', 'SENDING'].includes(execution.status))
     )
       reject('SEND_NOT_AUTHORIZED');
     if (conflict) {
+      if (unpermittedUnknown) await tx.sendSegment.update({ where: { id: segment.id }, data: { status: 'UNKNOWN', result: sendJson(outcome) } });
       // Persist conflicting evidence and freeze the current owner; never roll this back by throwing inside the transaction.
       await tx.sendIntent.update({
         where: { id: intent.id },
@@ -1546,6 +1589,7 @@ export class SendCoordinatorService {
           data: { state: 'ERROR', error: 'SEND_DEFINITELY_NOT_SUBMITTED' },
         });
       } else if (outcome.status === 'unknown') {
+        if (unpermittedUnknown) await tx.accountWriteState.update({ where: { id: account.id }, data: { activeExecutionId: execution.id } });
         await tx.sendSegment.update({
           where: { id: segment.id },
           data: { status: 'UNKNOWN', result: sendJson(outcome) },
@@ -1811,6 +1855,94 @@ export class SendCoordinatorService {
         reject('SEND_RETRY_UNSAFE');
       await tx.sendExecution.update({ where: { id: executionId }, data: { resolutionRevision: { increment: 1 } } });
       return body.status === 'confirmed' ? { status: 'confirmed' as const, url: body.url! } : { status: 'retryable' as const };
+    });
+  }
+
+  /** Resolve only the original single-post scope; never grant general execution access. */
+  private async postReviewScope(tx: Prisma.TransactionClient, org: string, user: string, executionId: string, rootPostId: string) {
+    await this.assertMember(tx, org, user);
+    const execution = await this.execution(tx, org, executionId);
+    const intent = await tx.sendIntent.findFirst({ where: { id: execution.sendIntentId, organizationId: org } });
+    const post = await tx.post.findFirst({ where: { id: rootPostId, organizationId: org, deletedAt: null, parentPostId: null } });
+    const node = execution.extensionNodeId ? await tx.extensionNode.findFirst({ where: { id: execution.extensionNodeId, organizationId: org } }) : null;
+    const owner = (intent?.policySnapshot as { policyOwnerUserId?: string } | null)?.policyOwnerUserId;
+    if (owner !== user && node?.registeredByUserId !== user)
+      throw new ForbiddenException('SEND_POST_REVIEW_PERMISSION_REQUIRED');
+    if (!intent || !post || execution.kind !== 'EXTENSION' || execution.action !== 'POST' || intent.action !== 'POST' ||
+        intent.rootPostId !== rootPostId || post.sendIntentId !== intent.id || post.projectId !== execution.projectId ||
+        intent.projectId !== execution.projectId || intent.platform !== execution.platform ||
+        canonicalControlledPlatform(post.providerIdentifier!) !== execution.platform ||
+        post.integrationId !== execution.integrationId || intent.integrationId !== execution.integrationId ||
+        post.routeRevision !== execution.routeRevision || post.contentRevision !== execution.contentRevision ||
+        intent.routeRevision !== execution.routeRevision || intent.contentRevision !== execution.contentRevision ||
+        intent.fencingVersion !== execution.fencingVersion || post.releaseId || intent.hasConfirmedSegments)
+      reject('SEND_POST_REVIEW_NOT_SETTLED');
+    await this.projects.assertProjectAccess(org, execution.projectId);
+    const payload = execution.payload as Array<{ id?: string }>;
+    const segments = await tx.sendSegment.findMany({ where: { executionId, organizationId: org }, take: 2 });
+    const segment = segments[0];
+    if (!Array.isArray(payload) || payload.length !== 1 || payload[0]?.id !== rootPostId || segments.length !== 1 ||
+        segment.segmentIndex !== 0 || segment.postId !== rootPostId ||
+        await tx.sendSegment.count({ where: { organizationId: org, status: 'CONFIRMED', execution: { sendIntentId: intent.id } } }))
+      reject('SEND_POST_REVIEW_NOT_SETTLED');
+    return { execution, intent, segment };
+  }
+
+  private async assertPostReviewStopped(tx: Prisma.TransactionClient, execution: SendExecution, intent: SendIntent,
+    segment: { status: string; submitBefore: Date | null; authorizedAt: Date | null; permitHash: string | null; result: unknown }, now: Date) {
+    const account = await tx.accountWriteState.findUniqueOrThrow({ where: { organizationId_canonicalAccountKey: {
+      organizationId: execution.organizationId, canonicalAccountKey: execution.canonicalAccountKey,
+    } } });
+    const result = segment.result as { status?: string } | null;
+    const unpermitted = !segment.submitBefore && !segment.authorizedAt && !segment.permitHash;
+    const exposed = unpermitted && segment.status === 'PENDING' && result?.status === 'draft_exposed' &&
+      execution.status === 'SENDING' && intent.status === 'SENDING';
+    const uncertain = segment.status === 'UNKNOWN' && execution.status === 'RECONCILING' && intent.status === 'RECONCILING' &&
+      (segment.submitBefore ? segment.submitBefore <= now : unpermitted && result?.status === 'unknown');
+    if ((!exposed && !uncertain) || intent.activeExecutionId !== execution.id || execution.leaseExpiresAt > now ||
+        (account.activeExecutionId && account.activeExecutionId !== execution.id))
+      reject('SEND_POST_REVIEW_NOT_SETTLED');
+  }
+
+  async postReview(org: string, user: string, executionId: string, rootPostId: string) {
+    return sendTransaction(this.db, async tx => {
+      const { execution, intent, segment } = await this.postReviewScope(tx, org, user, executionId, rootPostId);
+      await this.assertPostReviewStopped(tx, execution, intent, segment, new Date());
+      const target = execution.target as { id: string; idNamespace: string; handle?: string };
+      return { canReviewNotSent: true as const, expectedResolutionRevision: execution.resolutionRevision,
+        targetAccount: { id: target.id, idNamespace: target.idNamespace, ...(target.handle ? { handle: target.handle } : {}) } };
+    });
+  }
+
+  /** An attended review records non-submission; retry remains a separate policy-checked action. */
+  async reviewPostNotSent(org: string, user: string, executionId: string, rootPostId: string,
+    body: { eventId: string; expectedResolutionRevision: number; reviewedNotSent: boolean; draftsClosed: boolean }) {
+    if (body.reviewedNotSent !== true || body.draftsClosed !== true)
+      reject('SEND_POST_ABSENCE_REVIEW_REQUIRED');
+    if (!body.eventId?.trim() || body.eventId.length > 128) throw new BadRequestException('INVALID_SEND_OUTCOME');
+    return sendTransaction(this.db, async tx => {
+      const { execution, intent, segment } = await this.postReviewScope(tx, org, user, executionId, rootPostId);
+      const event: SendOutcome = {
+        eventId: `post-review:${user}:${sendHash(body.eventId)}`, status: 'definitely_not_submitted', stopped: true,
+        evidence: `Post reviewer ${user} verified the target account has no published post and closed all original drafts.`,
+      };
+      const prior = await tx.sendOutcomeEvent.findUnique({ where: { executionId_segmentIndex_eventId: {
+        executionId, segmentIndex: 0, eventId: event.eventId,
+      } } });
+      if (prior) {
+        if (prior.requestHash !== sendHash(event)) reject('SEND_OUTCOME_EVENT_CONFLICT');
+        // Replaying a review cannot revoke or reset a subsequent retry.
+        if (execution.status !== 'FAILED_FINAL' || intent.status !== 'FAILED_FINAL' || intent.activeExecutionId || segment.status !== 'NOT_SUBMITTED')
+          reject('SEND_POST_REVIEW_NOT_SETTLED');
+        return { status: 'retryable' as const };
+      }
+      if (!Number.isSafeInteger(body.expectedResolutionRevision) || body.expectedResolutionRevision !== execution.resolutionRevision)
+        reject('SEND_RESOLUTION_REVISION_CONFLICT');
+      await this.assertPostReviewStopped(tx, execution, intent, segment, new Date());
+      const result = await this.outcomeIn(tx, execution, 0, event, new Date());
+      if (result.conflict) reject('SEND_OUTCOME_CONFLICT_REQUIRES_RECONCILIATION');
+      await tx.sendExecution.update({ where: { id: executionId }, data: { resolutionRevision: { increment: 1 } } });
+      return { status: 'retryable' as const };
     });
   }
 

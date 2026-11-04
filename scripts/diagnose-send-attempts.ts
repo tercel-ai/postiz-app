@@ -1,5 +1,5 @@
 /**
- * Read-only diagnosis of extension attempts that never acquired a send permit.
+ * Read-only diagnosis of extension attempts, including uncertain publish outcomes.
  * Run from postiz-app:
  *   node --experimental-strip-types scripts/diagnose-send-attempts.ts --help
  * No tokens, content, or raw platform evidence are printed. No repair is performed.
@@ -13,26 +13,43 @@ export interface DiagnosisOptions {
   organization?: string;
   cursor?: string;
   limit: number;
+  details?: boolean;
 }
 
 export function parseOptions(args: string[]): DiagnosisOptions {
   const values: Record<string, string> = {};
-  for (let index = 0; index < args.length; index += 2) {
+  let details = false;
+  for (let index = 0; index < args.length; index += 1) {
     const key = args[index];
-    const value = args[index + 1];
+    if (key === '--details') { details = true; continue; }
+    const value = args[++index];
     if (!['--attempt', '--organization', '--cursor', '--limit'].includes(key) || !value || value.startsWith('--'))
-      throw new Error('Expected --attempt ID, --organization ID, --cursor ID, or --limit NUMBER');
+      throw new Error('Expected --attempt ID, --organization ID, --cursor ID, or --limit NUMBER; --details enables outcome diagnostics');
     values[key] = value;
   }
   const limit = Number(values['--limit'] ?? 100);
   if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error('Limit must be an integer from 1 to 1000');
-  return { attempt: values['--attempt'], organization: values['--organization'], cursor: values['--cursor'], limit };
+  return { attempt: values['--attempt'], organization: values['--organization'], cursor: values['--cursor'], limit, ...(details ? { details } : {}) };
 }
 
 export function assertDiagnosisDatabase(databaseUrl: string | undefined) {
   if (!databaseUrl) throw new Error('DATABASE_URL is required');
   const database = decodeURIComponent(new URL(databaseUrl).pathname.slice(1));
   if (database !== 'aisee_postiz_dev') throw new Error('Diagnosis requires database aisee_postiz_dev; check DATABASE_URL');
+}
+
+/** Extract only the credential-free stage and code written by the extension. */
+export function summarizeSendEvidence(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const record = value as Record<string, unknown>;
+  const evidence = typeof record.evidence === 'string' ? record.evidence : '';
+  const phase = evidence.match(/\bPhase: (PREPARED|AUTHORIZING|AUTHORIZED|SUBMITTING|CONFIRMED|UNKNOWN|NOT_SUBMITTED)\b/)?.[1];
+  const code = evidence.match(/\bcode: ([A-Z][A-Z0-9_]{0,95})\b/)?.[1];
+  return {
+    ...(['confirmed', 'unknown', 'definitely_not_submitted'].includes(String(record.status)) ? { status: record.status } : {}),
+    ...(phase ? { phase } : {}), ...(code ? { code } : {}),
+    workerRestarted: evidence.includes('Worker restarted; no platform submission will be replayed.'),
+  };
 }
 
 export async function diagnoseSendAttempts(db: PrismaClient, options: DiagnosisOptions) {
@@ -49,9 +66,11 @@ export async function diagnoseSendAttempts(db: PrismaClient, options: DiagnosisO
     select: {
       id: true, organizationId: true, extensionNodeId: true, integrationId: true,
       platform: true, action: true, status: true, createdAt: true, leaseExpiresAt: true,
+      startedAt: true, lastProgressAt: true, sessionRevision: true, nodeCredentialVersion: true,
       intent: { select: { rootPostId: true, status: true, activeExecutionId: true } },
       segments: { orderBy: { segmentIndex: 'asc' }, select: {
         segmentIndex: true, status: true, authorizedAt: true, submitBefore: true,
+        ...(options.details ? { result: true, confirmedAt: true, evidenceObservedAt: true, evidenceSessionRevision: true } : {}),
       } },
     },
   });
@@ -63,11 +82,33 @@ export async function diagnoseSendAttempts(db: PrismaClient, options: DiagnosisO
     where: { id: { in: [...new Set(attempts.map(attempt => attempt.intent.rootPostId))] } },
     select: { id: true, deletedAt: true, state: true },
   });
+  const ids = attempts.map(attempt => attempt.id);
+  const events = options.details && ids.length ? await db.sendOutcomeEvent.findMany({
+    where: { executionId: { in: ids } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: 1001,
+    select: { executionId: true, segmentIndex: true, eventId: true, createdAt: true, evidence: true },
+  }) : [];
+  const nodes = options.details && ids.length ? await db.extensionNode.findMany({
+    where: { id: { in: [...new Set(attempts.flatMap(attempt => attempt.extensionNodeId ? [attempt.extensionNodeId] : []))] } },
+    select: { id: true, status: true, browser: true, extensionVersion: true, lastSeenAt: true,
+      credentialVersion: true, sessions: { select: { platform: true, integrationId: true,
+        verificationStatus: true, sessionRevision: true, verifiedAt: true, verificationExpiresAt: true } } },
+  }) : [];
   return {
+    ...(options.details ? { eventsTruncated: events.length > 1000,
+      contextNote: 'Node sessions are current snapshots, not proof of the session at send time. A submit permit does not prove a native click occurred.' } : {}),
     note: 'Database state only. Compare with the original node journal before confirming a stop. No records were changed.',
     nextCursor: attempts.length === options.limit ? attempts.at(-1)!.id : null,
     attempts: attempts.map(attempt => ({
       ...attempt,
+      ...(options.details ? {
+        segments: attempt.segments?.map(segment => ({ ...segment, result: summarizeSendEvidence(segment.result) })),
+        diagnostics: {
+          node: nodes.find(node => node.id === attempt.extensionNodeId) ?? null,
+          events: events.slice(0, 1000).filter(event => event.executionId === attempt.id).map(({ evidence, ...event }) => ({
+            ...event, ...summarizeSendEvidence(evidence),
+          })),
+        },
+      } : {}),
       account: accounts.find(account => account.id === attempt.integrationId) ?? null,
       root: roots.find(root => root.id === attempt.intent.rootPostId) ?? null,
     })),
@@ -76,7 +117,7 @@ export async function diagnoseSendAttempts(db: PrismaClient, options: DiagnosisO
 
 async function main() {
   if (process.argv.includes('--help')) {
-    console.log('Usage: node --experimental-strip-types scripts/diagnose-send-attempts.ts [--attempt ID] [--organization ID] [--cursor ID] [--limit 100]');
+    console.log('Usage: node --experimental-strip-types scripts/diagnose-send-attempts.ts [--attempt ID] [--organization ID] [--cursor ID] [--limit 100] [--details]');
     return;
   }
   const options = parseOptions(process.argv.slice(2));

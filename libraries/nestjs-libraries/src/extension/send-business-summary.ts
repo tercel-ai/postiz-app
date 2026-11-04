@@ -2,9 +2,9 @@ import { isAccountBoundSendingEnabled } from './account-bound-sending.config';
 import { Post, SendIntent, SendExecution, SendSegment } from '@prisma/client';
 
 type PublicPost = Partial<Pick<Post, 'id' | 'executionProtocol' | 'releaseId' | 'state' | 'integrationId' |
-  'accountSelectionMode' | 'routeRevision' | 'contentRevision' | 'publishDate' | 'sendIntentId'>>;
+  'accountSelectionMode' | 'routeRevision' | 'contentRevision' | 'publishDate' | 'sendIntentId' | 'publishMethod'>>;
 type PublicIntent = Partial<Pick<SendIntent, 'id' | 'status' | 'activeExecutionId' | 'hasConfirmedSegments' |
-  'target' | 'integrationId' | 'revision'>>;
+  'target' | 'integrationId' | 'revision' | 'action'>>;
 type PublicExecution = Partial<Pick<SendExecution, 'id' | 'status' | 'resolutionRevision'>>;
 type PublicSegment = Partial<Pick<SendSegment, 'executionId' | 'status' | 'result' | 'segmentIndex' | 'postId' | 'confirmedAt'>>;
 
@@ -22,6 +22,10 @@ export function sendBusinessSummary(post: PublicPost, intent: PublicIntent | nul
   const retrySafe = !!intent && intent.status === 'FAILED_FINAL' && !intent.activeExecutionId && !confirmed &&
     !uncertain && !segments.some(s => s.status === 'AUTHORIZED') &&
     !executions.some(e => ['RESERVED', 'SENDING', 'RECONCILING'].includes(e.status));
+  const rescheduleSafe = !!intent?.id && intent.action === 'POST' && post.publishMethod === 'EXTENSION' && post.state === 'QUEUE' && post.sendIntentId === intent.id &&
+    intent.status === 'QUEUED' && !intent.activeExecutionId && !confirmed && !uncertain &&
+    executions.every(execution => ['FAILED_FINAL', 'CANCELLED', 'EXPIRED'].includes(execution.status ?? '')) &&
+    segments.every(segment => segment.status === 'NOT_SUBMITTED');
   const frozen = !!intent || !!post.releaseId || post.state !== 'DRAFT';
   // Enqueueing an unclaimed saved reply is not editing its frozen account selection.
   const enqueueable = !intent && !post.sendIntentId && !post.releaseId &&
@@ -53,7 +57,7 @@ export function sendBusinessSummary(post: PublicPost, intent: PublicIntent | nul
     allowedActions: {
       enqueue: decision(actionable && enqueueable, operationBlockCode ?? (intent ? 'SEND_INTENT_IMMUTABLE' : !enabled ? 'ACCOUNT_BINDINGS_NOT_ENABLED' : queuedReplyEnqueue?.reason ?? 'CONTENT_NOT_ENQUEUEABLE')),
       selectAccount: decision(actionable && !frozen, operationBlockCode ?? (intent ? 'SEND_INTENT_IMMUTABLE' : !enabled ? 'ACCOUNT_BINDINGS_NOT_ENABLED' : 'CONTENT_NOT_ENQUEUEABLE')),
-      reschedule: decision(false, intent ? 'SEND_INTENT_REQUIRES_CONTROLLED_RESCHEDULE' : 'CONTROLLED_RESCHEDULE_NOT_SUPPORTED'),
+      reschedule: decision(actionable && rescheduleSafe, operationBlockCode ?? (intent ? 'SEND_INTENT_REQUIRES_CONTROLLED_RESCHEDULE' : 'CONTROLLED_RESCHEDULE_NOT_SUPPORTED')),
       retry: decision(actionable && retrySafe, operationBlockCode ?? (!enabled ? 'ACCOUNT_BINDINGS_NOT_ENABLED' : 'SEND_RETRY_UNSAFE')),
     },
   };

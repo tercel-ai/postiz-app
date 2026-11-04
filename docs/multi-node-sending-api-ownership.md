@@ -32,8 +32,8 @@ The two frontend integration documents remain in `aisee-app/docs` and focus on f
 | GET /integrations/list, Project account lists, and reply-accounts queries | Existing account-management and compatibility clients | Preserve their existing uses; new selectors do not need to assemble these GET responses again |
 | Project account association and reply-permission updates | Existing authorization flows | Preserve explicit user authorization; selectors do not grant permissions automatically |
 | /extension/nodes registration, credential verification, and node-session reporting | Extension and its diagnostic/node-management clients | Not part of this frontend integration. Account lists use context terminals; the Web app does not generate node identities or transmit node credentials |
-| /extension/send-attempts claim/renew/preflight/start/outcome and related operations | Extension executor | No. Enqueuing business content from the Web app does not grant permission to write to a platform |
-| /sending/executions queries and reconciliation | Operations tools with the required permissions | Not used by ordinary Post/Reply pages; those pages read business summaries without execution credentials |
+| /extension/send-attempts claim/renew/draft-exposure/preflight/start/outcome and related operations | Extension executor | No. Enqueuing business content from the Web app does not grant permission to write to a platform |
+| General /sending/executions queries and reconciliation | Operations tools with the required permissions | General execution inspection remains privileged. The scoped attended post-review exception below exposes no execution credentials |
 | /sending/mode/autonomous-effects and resolve | Organization-admin exception-handling tools | Outside the current frontend scope; mode settings do not implicitly add a manual reconciliation UI |
 
 “Not part of this integration” does not remove existing functionality or change permissions. The table classifies integration responsibilities; controllers and services remain authoritative for authorization.
@@ -49,3 +49,43 @@ Requirements differ by API. Enqueuing a saved Reply needs only `sentReplyId` and
 - Keep system configuration, node registration, execution, and reconciliation outside aisee-app development responsibilities.
 - Preserve organization-admin mode settings and existing account authorization, manual-send confirmation, automation, and autonomous sending. Consolidating documentation does not change functionality.
 - Treat legacy `planId` adaptation in existing plan submissions as business compatibility, not as a dependency of the new multi-node protocol.
+
+
+## Attended recovery of an unsent post
+
+The standalone extension can offer **Review result** for an original uncertain single-post attempt. `GET /sending/executions/:id/posts/:rootPostId/review` returns only eligibility, the current resolution revision, and the target account. `POST /sending/executions/:id/posts/:rootPostId/review-not-sent` accepts an `eventId`, that revision, and explicit `reviewedNotSent: true` and `draftsClosed: true` acknowledgments. The reviewer must inspect the target account and close all original platform drafts before confirming non-submission. A filled composer or an expired lease alone is not proof of non-submission.
+
+This is a narrow attended exception to general execution reconciliation. Only an active organization member who originally owned the intent policy or registered its executor node may use it, with project ownership checked. Both endpoints require the original EXTENSION POST, exactly one matching root payload and segment, matching intent/execution/content/route/fencing scope, no confirmed segment in the intent history, an expired execution lease and either expired submit permission or a persisted pre-permit exposed/unknown draft with no permit fields, and no newer account writer. Unsupported threads and partial publications retain administrator review. The general execution inspection and reconciliation endpoints retain their superadministrator requirement.
+
+The write rechecks all conditions in the existing serializable send transaction, records an audited `definitely_not_submitted` outcome in the original ledger, settles held quota, and increments the resolution revision. Stable event receipts make acknowledgment retries idempotent while preventing them from resetting a later retry. No platform write or requeue occurs. Only the existing, separately checked `POST /posts/:rootPostId/retry` queues another attempt.
+
+Design scope: this addresses a user who verified that an older filled composer was never submitted. It reuses SendOutcomeEvent, the existing quota/account settlement, and the existing retry endpoint, with bounded single-attempt reads and an indexed confirmed-history count. It adds no schema, independent recovery queue, expiry-based permission, or change to existing API contracts. Existing clients remain compatible; the new optional extension flow requires a backend with these routes. A future change to thread recovery requires separate evidence for each segment.
+
+
+## Explicit Post now on an idle controlled queue
+
+`POST /posts/schedule` accepts an explicit per-post `date` together with `expectedRouteRevision` and `expectedContentRevision` when an original controlled EXTENSION POST is already QUEUED. This updates the original root/thread schedule under the existing serializable send transaction. It does not edit content, replace the intent, claim work, allocate quota, or bypass pacing. Only an idle QUEUED intent with no active writer, uncertain or confirmed history, or legacy occupancy can be rescheduled. Reserved, sending, reconciling, or published work is rejected. The business summary exposes `allowedActions.reschedule` only for that idle queue; plain enqueue replays continue to retain their original date.
+
+After a successful explicit Post now or retry, the aisee-app page wakes the standalone extension with the existing `aisee:post-publish` event and optional accepted `postIds`. These identifiers allow the extension to display the backend queue before an execution receipt exists. They provide no content or sending authority; claims still use the backend's original frozen task, target, schedule, and normal authorization.
+
+
+## Durable X draft exposure
+
+Before opening any controlled X post or reply composer, the standalone executor
+records local draft exposure and obtains
+`POST /extension/send-attempts/:id/segments/:index/draft-exposure`. The authenticated
+original node and lease are required. The acknowledgment persists the existing
+PENDING segment result as `draft_exposed`, keeps the execution and intent SENDING,
+and retains account occupancy without allocating a submit permit or quota. An
+expired exposed draft cannot be reclaimed or renewed into another sender. A
+missing acknowledgment prevents the browser from opening the draft. Deploy this
+backend endpoint before loading a new executor that requires it.
+
+A later X thread segment renews the original execution before exposing its next
+draft. Retained ownership, prior confirmation, account spacing, and the original
+thirty-minute preparation cap remain enforced. An already exposed draft with an
+expired lease requires attended review instead of renewal. Original-node
+pre-permit UNKNOWN reports retain reconciliation; stale-owner reports preserve
+their evidence and quarantine competing owners. Single original posts can use
+attended absence review after the lease expires, including a browser crash before
+any outcome report. Replies and partial threads retain administrator resolution.

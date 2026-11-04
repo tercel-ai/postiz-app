@@ -3365,6 +3365,7 @@ export class PostsRepository {
         state: true,
         integrationId: true,
         executionProtocol: true,
+        sendIntentId: true,
         settings: true,
         providerIdentifier: true,
         operationPlanId: true,

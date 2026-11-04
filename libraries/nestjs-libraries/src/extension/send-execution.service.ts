@@ -99,9 +99,21 @@ export class SendExecutionService {
       const intent = await tx.sendIntent.findUniqueOrThrow({
         where: { id: execution.sendIntentId },
       });
+      const pending = await tx.sendSegment.findFirst({ where: { executionId: id, status: 'PENDING' }, orderBy: { segmentIndex: 'asc' } });
+      const exposed = (pending?.result as { status?: string } | null)?.status === 'draft_exposed';
+      const preparingExposure = execution.status === 'SENDING' && exposed;
+      const account = await tx.accountWriteState.findUnique({ where: { organizationId_canonicalAccountKey: {
+        organizationId: auth.org, canonicalAccountKey: execution.canonicalAccountKey,
+      } } });
+      // A retained thread may renew between confirmed segments; an exposed draft
+      // with an expired lease must instead remain available for attended review.
+      const retainedThread = execution.status === 'SENDING' && execution.platform === 'x' && pending && !exposed &&
+        pending.segmentIndex > 0 && account?.activeExecutionId === id &&
+        !await tx.sendSegment.count({ where: { executionId: id, segmentIndex: { lt: pending.segmentIndex }, status: { not: 'CONFIRMED' } } }) &&
+        !await tx.sendSegment.count({ where: { executionId: id, status: { in: ['AUTHORIZED', 'UNKNOWN'] } } });
       if (
-        execution.status !== 'RESERVED' ||
-        execution.leaseExpiresAt <= now ||
+        (execution.status !== 'RESERVED' && !preparingExposure && !retainedThread) ||
+        (execution.leaseExpiresAt <= now && !retainedThread) ||
         intent.activeExecutionId !== id ||
         intent.fencingVersion !== execution.fencingVersion
       )
@@ -125,6 +137,41 @@ export class SendExecutionService {
     });
   }
 
+  /** Persist the external draft boundary before the browser can expose a submit control. */
+  async draftExposure(auth: NodeAuthentication, id: string, index: number, lease: string) {
+    await this.sends.enabled(auth.org);
+    await this.sends.assertProjectSendActive(auth.org, id);
+    return sendTransaction(this.db, async tx => {
+      await this.sends.assertControlledIn(tx, auth.org, { executionId: id });
+      const { execution } = await this.authenticate(tx, auth, id, lease);
+      const now = new Date();
+      const account = await tx.accountWriteState.findUniqueOrThrow({ where: {
+        organizationId_canonicalAccountKey: { organizationId: auth.org, canonicalAccountKey: execution.canonicalAccountKey },
+      } });
+      const locked = await tx.accountWriteState.updateMany({ where: { id: account.id, revision: account.revision }, data: { revision: { increment: 1 } } });
+      if (locked.count !== 1) throw new ConflictException('ACCOUNT_WRITE_STATE_CHANGED');
+      const intent = await tx.sendIntent.findUniqueOrThrow({ where: { id: execution.sendIntentId } });
+      const segment = await tx.sendSegment.findUniqueOrThrow({ where: { executionId_segmentIndex: { executionId: id, segmentIndex: index } } });
+      if (execution.platform !== 'x' || !['POST', 'REPLY'].includes(execution.action) ||
+          !['RESERVED', 'SENDING'].includes(execution.status) || execution.leaseExpiresAt <= now ||
+          intent.activeExecutionId !== id || intent.fencingVersion !== execution.fencingVersion ||
+          !['RESERVED', 'SENDING'].includes(intent.status) || segment.status !== 'PENDING' ||
+          segment.authorizedAt || segment.permitHash || segment.submitBefore ||
+          !account.rolloutReady ||
+          (account.activeExecutionId && account.activeExecutionId !== id))
+        throw new ConflictException('SEND_DRAFT_EXPOSURE_UNSAFE');
+      if (await tx.sendSegment.count({ where: { executionId: id, segmentIndex: { lt: index }, status: { not: 'CONFIRMED' } } }))
+        throw new ConflictException('PREVIOUS_SEGMENT_NOT_CONFIRMED');
+      if (account.nextWriteNotBefore && account.nextWriteNotBefore > now)
+        throw new ConflictException('ACCOUNT_SEND_INTERVAL_REQUIRED');
+      await tx.sendSegment.update({ where: { id: segment.id }, data: { result: { status: 'draft_exposed' } } });
+      await tx.sendExecution.update({ where: { id }, data: { status: 'SENDING', lastProgressAt: now } });
+      await tx.sendIntent.update({ where: { id: intent.id }, data: { status: 'SENDING', revision: { increment: 1 } } });
+      await tx.accountWriteState.update({ where: { id: account.id }, data: { activeExecutionId: id } });
+      return { exposed: true as const, serverNow: now.toISOString() };
+    });
+  }
+
   async preflight(
     auth: NodeAuthentication,
     id: string,
@@ -143,7 +190,7 @@ export class SendExecutionService {
       if (!segment || segment.status !== 'PENDING')
         throw new ConflictException('SEGMENT_NOT_PENDING');
       if (
-        execution.status === 'RESERVED' &&
+        (execution.status === 'RESERVED' || (segment.result as { status?: string } | null)?.status === 'draft_exposed') &&
         execution.leaseExpiresAt <= new Date()
       )
         throw new ConflictException('SEND_LEASE_EXPIRED');
@@ -294,6 +341,8 @@ export class SendExecutionService {
           executionId_segmentIndex: { executionId: id, segmentIndex: index },
         },
       });
+      if (!segment.permitHash && (segment.result as { status?: string } | null)?.status === 'draft_exposed')
+        throw new ConflictException('EXPOSED_DRAFT_REQUIRES_REVIEW');
       const at = new Date(body.executorStoppedAt);
       const now = new Date();
       const permitted = segment.permitHash

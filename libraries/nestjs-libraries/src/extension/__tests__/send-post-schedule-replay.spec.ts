@@ -1,0 +1,24 @@
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { setupSend, sendNow } from './support/send-fixture';
+import { PostsService } from '../../database/prisma/posts/posts.service';
+beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(sendNow); vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true'); });
+afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
+it('keeps dated schedule replays idempotent while explicit rescheduling requires revisions', async () => {
+ const f = setupSend(); await f.create('root', 'EXTENSION');
+ const post = f.db.rows('post')[0]; post.state = 'DRAFT'; post.sendIntentId = null; f.db.rows('sendIntent').splice(0);
+ const service = Object.create(PostsService.prototype);
+ Object.assign(service, { _sendCoordinator: f.service, _postRepository: { getSchedulablePostsByIds: async () => [structuredClone(f.db.rows('post')[0])] }, isControlled: async () => true });
+ const context = { userId: 'user', origin: 'MANUAL' as const };
+ const payload = [{ id: 'root', date: '2026-11-22T10:00:00Z' }];
+ expect((await service.schedulePosts('org', payload, context)).scheduled).toHaveLength(1);
+ const revision = f.db.rows('sendIntent')[0].revision;
+ expect((await service.schedulePosts('org', payload, context)).failed).toEqual([]);
+ expect(f.db.rows('sendIntent')[0].revision).toBe(revision);
+ expect((await service.schedulePosts('org', [{ id: 'root', date: sendNow.toISOString() }], context)).failed).toEqual([]);
+ expect(f.db.rows('post')[0].publishDate).toEqual(new Date(payload[0].date));
+ const partial = await service.schedulePosts('org', [{ id: 'root', date: sendNow.toISOString(), expectedRouteRevision: 0 }], context);
+ expect(partial.failed[0].message).toBe('SEND_CONTENT_REVISION_CONFLICT');
+ expect((await service.schedulePosts('org', [{ id: 'root', date: sendNow.toISOString(), expectedRouteRevision: 0, expectedContentRevision: 1 }], context)).failed).toEqual([]);
+ expect(f.db.rows('post')[0].publishDate).toEqual(sendNow);
+ expect(f.db.rows('sendIntent')).toHaveLength(1);
+});

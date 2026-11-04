@@ -2877,7 +2877,7 @@ export class PostsService {
    */
   async schedulePosts(
     orgId: string,
-    items: Array<{ id: string; publishMethod?: PublishMethod; date?: string }>,
+    items: Array<{ id: string; publishMethod?: PublishMethod; date?: string; expectedRouteRevision?: number; expectedContentRevision?: number }>,
     sendContext?: { userId: string; origin: 'MANUAL' | 'AUTOMATION' }
   ) {
     const ids = [...new Set(items.map((i) => i.id))];
@@ -2899,7 +2899,9 @@ export class PostsService {
           if (!this._sendCoordinator || !sendContext) throw new BadRequestException('SEND_POLICY_OWNER_REQUIRED');
           const item = itemById.get(id)!;
           const choice = item.publishMethod ?? (post.publishMethod === 'API' ? 'api' : 'extension');
-          const queued = await this._sendCoordinator.enqueue(orgId, id, { ...sendContext, publishMethod: choice === 'api' ? 'API' : 'EXTENSION', ...(item.date ? { publishDate: new Date(item.date) } : {}) });
+          const queued = post.sendIntentId && item.date && (item.expectedRouteRevision !== undefined || item.expectedContentRevision !== undefined)
+            ? await this._sendCoordinator.rescheduleQueuedPost(orgId, id, sendContext.userId, new Date(item.date), item.expectedRouteRevision, item.expectedContentRevision)
+            : await this._sendCoordinator.enqueue(orgId, id, { ...sendContext, publishMethod: choice === 'api' ? 'API' : 'EXTENSION', ...(item.date ? { publishDate: new Date(item.date) } : {}) });
           if (queued.publishMethod === 'API') await this.startWorkflow(getSocialTaskQueue(queued.providerIdentifier!), id, orgId);
           scheduled.push({ id, publishMethod: queued.publishMethod === 'API' ? 'api' : 'extension' });
         } catch (error) {

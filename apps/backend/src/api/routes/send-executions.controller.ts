@@ -27,6 +27,7 @@ import {
   StopSendDto,
   ReconcileSendDto,
   VerifySavedReplyDto,
+  ReviewPostNotSentDto,
 } from '@gitroom/nestjs-libraries/extension/send-execution.dto';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 
@@ -73,6 +74,11 @@ export class SendExecutionsController {
   @Post('/:id/renew')
   renew(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User, @Headers() headers: Record<string, string>, @Param('id') id: string) {
     return this.sends.renew(this.auth(org, user, headers), id, headers['x-send-lease-token']);
+  }
+  @Post('/:id/segments/:index/draft-exposure')
+  draftExposure(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User,
+    @Headers() headers: Record<string, string>, @Param('id') id: string, @Param('index', ParseIntPipe) index: number) {
+    return this.sends.draftExposure(this.auth(org, user, headers), id, index, headers['x-send-lease-token']);
   }
   @Post('/:id/segments/:index/preflight')
   preflight(
@@ -165,6 +171,16 @@ export class SendReconciliationController {
     @Body() body: VerifySavedReplyDto
   ) {
     return this.sends.verifySavedReply(org.id, user.id, id, sentReplyId, body);
+  }
+  @Get('/:id/posts/:rootPostId/review')
+  postReview(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User,
+    @Param('id') id: string, @Param('rootPostId') rootPostId: string) {
+    return this.sends.postReview(org.id, user.id, id, rootPostId);
+  }
+  @Post('/:id/posts/:rootPostId/review-not-sent')
+  reviewPostNotSent(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User,
+    @Param('id') id: string, @Param('rootPostId') rootPostId: string, @Body() body: ReviewPostNotSentDto) {
+    return this.sends.reviewPostNotSent(org.id, user.id, id, rootPostId, body);
   }
   @Get('/:id')
   get(

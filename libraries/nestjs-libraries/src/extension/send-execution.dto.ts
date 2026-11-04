@@ -58,3 +58,11 @@ export class VerifySavedReplyDto extends ReconcileSendDto {
   @IsString() @MaxLength(2048) targetUrl: string;
   @IsOptional() @IsBoolean() reviewedNotSent?: boolean;
 }
+
+/** Explicit attendance acknowledgments for the original single-post attempt only. */
+export class ReviewPostNotSentDto {
+  @IsString() @Matches(/\S/) @MaxLength(128) eventId: string;
+  @IsInt() @Min(0) expectedResolutionRevision: number;
+  @IsIn([true]) reviewedNotSent: true;
+  @IsIn([true]) draftsClosed: true;
+}

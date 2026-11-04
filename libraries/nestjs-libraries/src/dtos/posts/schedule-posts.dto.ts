@@ -4,6 +4,8 @@ import {
   IsArray,
   IsDateString,
   IsIn,
+  IsInt,
+  Min,
   IsOptional,
   IsString,
   ValidateNested,
@@ -32,6 +34,9 @@ export class SchedulePostItemDto {
   @IsOptional()
   @IsDateString()
   date?: string;
+
+  @IsOptional() @IsInt() @Min(0) expectedRouteRevision?: number;
+  @IsOptional() @IsInt() @Min(1) expectedContentRevision?: number;
 }
 
 /**
