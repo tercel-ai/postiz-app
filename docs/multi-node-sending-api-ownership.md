@@ -89,3 +89,36 @@ pre-permit UNKNOWN reports retain reconciliation; stale-owner reports preserve
 their evidence and quarantine competing owners. Single original posts can use
 attended absence review after the lease expires, including a browser crash before
 any outcome report. Replies and partial threads retain administrator resolution.
+
+
+## Explicit owner-requested retry of an uncertain post
+
+The extension can offer one-click **Retry** for an expired original single-post
+attempt. The scoped `GET /sending/executions/:id/posts/:rootPostId/review` adds
+`canRetryUnconfirmed` alongside `expectedResolutionRevision`. This admission flag
+requires controlled sending, an active project, a ready account, the original
+owner scope, settled execution and submit deadlines, and no confirmed or newer
+writer. It does not assert that the first attempt was unsent.
+
+`POST /sending/executions/:id/posts/:rootPostId/retry` accepts only a stable
+`requestId` and `expectedResolutionRevision`. It returns
+`{sendIntentId,status:"QUEUED"}`. The serializable transaction retains the original
+segment evidence and any HELD quota, archives its executor as `RETRY_REQUESTED`,
+advances fencing and resolution revisions, releases only its account ownership,
+and queues the same original intent. A SendMutationReceipt audits the requesting
+member and makes transport retries idempotent, including after a newer claim.
+No absence acknowledgments, negative outcome, content copy, or quota release are
+implied. New authorization still enforces all ordinary account and quota checks.
+
+Business status follows the current attempt; explicitly superseded uncertainty
+remains in history and quota accounting. Any new late positive or uncertain
+receipt from the superseded executor preserves its evidence and quarantines the
+old and current writers. A confirmed late receipt commits the original held
+quota. A stale negative receipt cannot reset a newer intent. Existing general
+administrator reconciliation permissions remain unchanged.
+
+Backend fencing blocks further automated authorization for the old executor.
+It cannot disable a submit button already rendered by X or prevent a human from
+submitting an old draft on another device. The extension should close original
+local compose tabs before requesting another attempt when they are available;
+late evidence remains a reconciliation event rather than proof of non-submission.

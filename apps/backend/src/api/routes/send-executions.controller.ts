@@ -28,6 +28,7 @@ import {
   ReconcileSendDto,
   VerifySavedReplyDto,
   ReviewPostNotSentDto,
+  RetryUnconfirmedPostDto,
 } from '@gitroom/nestjs-libraries/extension/send-execution.dto';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 
@@ -176,6 +177,11 @@ export class SendReconciliationController {
   postReview(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User,
     @Param('id') id: string, @Param('rootPostId') rootPostId: string) {
     return this.sends.postReview(org.id, user.id, id, rootPostId);
+  }
+  @Post('/:id/posts/:rootPostId/retry')
+  retryUnconfirmedPost(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User,
+    @Param('id') id: string, @Param('rootPostId') rootPostId: string, @Body() body: RetryUnconfirmedPostDto) {
+    return this.sends.retryUnconfirmedPost(org.id, user.id, id, rootPostId, body);
   }
   @Post('/:id/posts/:rootPostId/review-not-sent')
   reviewPostNotSent(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User,

@@ -66,3 +66,9 @@ export class ReviewPostNotSentDto {
   @IsIn([true]) reviewedNotSent: true;
   @IsIn([true]) draftsClosed: true;
 }
+
+/** An owner asks for another attempt without asserting the original was unsent. */
+export class RetryUnconfirmedPostDto {
+  @IsString() @Matches(/\S/) @MaxLength(128) requestId: string;
+  @IsInt() @Min(0) expectedResolutionRevision: number;
+}

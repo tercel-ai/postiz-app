@@ -19,7 +19,7 @@ const review = () => ({ eventId: 'review-one', expectedResolutionRevision: 0, re
 describe('attended review of an original unsent post', () => {
   it('returns only the original review identity and target without execution secrets', async () => {
     const { service, execution, projects } = await unknownPost();
-    expect(await service.postReview('org', 'user', execution.id, 'root')).toEqual({ canReviewNotSent: true, expectedResolutionRevision: 0, targetAccount: { id: '123', idNamespace: 'x.rest_id', handle: 'alice' } });
+    expect(await service.postReview('org', 'user', execution.id, 'root')).toEqual({ canReviewNotSent: true, canRetryUnconfirmed: true, expectedResolutionRevision: 0, targetAccount: { id: '123', idNamespace: 'x.rest_id', handle: 'alice' } });
     expect(projects.assertProjectAccess).toHaveBeenCalledWith('org', 'project');
   });
   it('settles non-submission once, releases held quota, and permits a separate original-intent retry', async () => {

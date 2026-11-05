@@ -16,11 +16,14 @@ export type SendActionDecision = { allowed: boolean; reason: string | null };
 /** Public projection only: execution credentials and raw evidence must never escape. */
 export function sendBusinessSummary(post: PublicPost, intent: PublicIntent | null, executions: PublicExecution[], segments: PublicSegment[], operationBlockCode: string | null = null, enabled = isAccountBoundSendingEnabled(), continuingExecution = false, queuedReplyEnqueue?: SendActionDecision) {
   const controlled = !!intent || post.executionProtocol === 'ACCOUNT_BOUND_V1';
-  const latest = executions.find(e => e.id === intent?.activeExecutionId) ?? executions[0];
+  const currentExecutions = executions.filter(e => e.status !== 'RETRY_REQUESTED');
+  const supersededIds = new Set(executions.filter(e => e.status === 'RETRY_REQUESTED').map(e => e.id));
+  const currentSegments = segments.filter(s => !supersededIds.has(s.executionId));
+  const latest = currentExecutions.find(e => e.id === intent?.activeExecutionId) ?? currentExecutions[0];
   const confirmed = intent?.hasConfirmedSegments === true || segments.some(s => s.status === 'CONFIRMED');
-  const uncertain = segments.some(s => s.status === 'UNKNOWN') || intent?.status === 'RECONCILING';
+  const uncertain = currentSegments.some(s => s.status === 'UNKNOWN') || intent?.status === 'RECONCILING';
   const retrySafe = !!intent && intent.status === 'FAILED_FINAL' && !intent.activeExecutionId && !confirmed &&
-    !uncertain && !segments.some(s => s.status === 'AUTHORIZED') &&
+    !uncertain && !currentSegments.some(s => s.status === 'AUTHORIZED') &&
     !executions.some(e => ['RESERVED', 'SENDING', 'RECONCILING'].includes(e.status));
   const rescheduleSafe = !!intent?.id && intent.action === 'POST' && post.publishMethod === 'EXTENSION' && post.state === 'QUEUE' && post.sendIntentId === intent.id &&
     intent.status === 'QUEUED' && !intent.activeExecutionId && !confirmed && !uncertain &&

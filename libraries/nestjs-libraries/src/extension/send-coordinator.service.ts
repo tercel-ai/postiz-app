@@ -1459,10 +1459,15 @@ export class SendCoordinatorService {
       } });
       return result;
     }
+    const superseded = execution.status === 'RETRY_REQUESTED' || !!await tx.sendMutationReceipt.findFirst({
+      where: { organizationId: org, operation: `owner-send-retry:${execution.id}` },
+    });
+    if (superseded && outcome.status === 'definitely_not_submitted')
+      reject('SUPERSEDED_SEND_REQUIRES_RECONCILIATION');
     const unpermittedUnknown = segment.status === 'PENDING' && outcome.status === 'unknown' &&
       execution.kind === 'EXTENSION' && execution.platform === 'x' &&
       !segment.authorizedAt && !segment.permitHash && !segment.submitBefore;
-    let conflict =
+    let conflict = superseded ||
       segment.status === 'CONFIRMED' &&
       outcome.status === 'confirmed' &&
       previousResult?.platformId !== outcome.platformId;
@@ -1471,14 +1476,14 @@ export class SendCoordinatorService {
     if (segment.status === 'NOT_SUBMITTED' && outcome.status === 'confirmed' && !verifiedReply)
       conflict = true;
     if (
-      segment.status === 'PENDING' && !unpermittedUnknown &&
+      segment.status === 'PENDING' && !unpermittedUnknown && !superseded &&
       (outcome.status !== 'definitely_not_submitted' ||
         intent.activeExecutionId !== execution.id ||
         !['RESERVED', 'SENDING'].includes(execution.status))
     )
       reject('SEND_NOT_AUTHORIZED');
     if (conflict) {
-      if (unpermittedUnknown) await tx.sendSegment.update({ where: { id: segment.id }, data: { status: 'UNKNOWN', result: sendJson(outcome) } });
+      if (unpermittedUnknown || (superseded && outcome.status === 'unknown' && segment.status !== 'CONFIRMED')) await tx.sendSegment.update({ where: { id: segment.id }, data: { status: 'UNKNOWN', result: sendJson(outcome) } });
       // Persist conflicting evidence and freeze the current owner; never roll this back by throwing inside the transaction.
       await tx.sendIntent.update({
         where: { id: intent.id },
@@ -1502,14 +1507,15 @@ export class SendCoordinatorService {
         // A later receipt may clear an owner, but only a fresh deployment audit can lift quarantine.
         data: { activeExecutionId: owner, rolloutReady: false },
       });
-      if (segment.status === 'NOT_SUBMITTED') {
-        await this.quotas.correctLateConfirmation(
+      if (outcome.status === 'confirmed' && (segment.status === 'NOT_SUBMITTED' || (superseded && segment.status !== 'CONFIRMED'))) {
+        if (segment.status === 'NOT_SUBMITTED') await this.quotas.correctLateConfirmation(
           tx,
           org,
           execution.id,
           index,
           now
         );
+        else await this.quotas.settle(tx, org, execution.id, index, true, now);
         await tx.sendSegment.update({
           where: { id: segment.id },
           data: {
@@ -1908,9 +1914,62 @@ export class SendCoordinatorService {
     return sendTransaction(this.db, async tx => {
       const { execution, intent, segment } = await this.postReviewScope(tx, org, user, executionId, rootPostId);
       await this.assertPostReviewStopped(tx, execution, intent, segment, new Date());
+      const mode = await this.modes.stateIn(tx, org);
+      const account = await tx.accountWriteState.findUnique({ where: { organizationId_canonicalAccountKey: {
+        organizationId: org, canonicalAccountKey: execution.canonicalAccountKey,
+      } } });
+      const canRetryUnconfirmed = mode.mode === 'CONTROLLED' && !!account?.rolloutReady &&
+        await this.claimProjectActive(org, execution.projectId);
       const target = execution.target as { id: string; idNamespace: string; handle?: string };
-      return { canReviewNotSent: true as const, expectedResolutionRevision: execution.resolutionRevision,
+      return { canReviewNotSent: true as const, canRetryUnconfirmed, expectedResolutionRevision: execution.resolutionRevision,
         targetAccount: { id: target.id, idNamespace: target.idNamespace, ...(target.handle ? { handle: target.handle } : {}) } };
+    });
+  }
+
+  /** An explicit owner request supersedes uncertainty without claiming non-submission. */
+  async retryUnconfirmedPost(org: string, user: string, executionId: string, rootPostId: string,
+    body: { requestId: string; expectedResolutionRevision: number }) {
+    if (!body.requestId?.trim() || body.requestId.length > 128 || !Number.isSafeInteger(body.expectedResolutionRevision) || body.expectedResolutionRevision < 0)
+      throw new BadRequestException('INVALID_SEND_RETRY_REQUEST');
+    await this.enabled(org);
+    return sendTransaction(this.db, async tx => {
+      await this.assertMember(tx, org, user);
+      const original = await this.execution(tx, org, executionId);
+      const originalIntent = await tx.sendIntent.findUniqueOrThrow({ where: { id: original.sendIntentId } });
+      const node = original.extensionNodeId ? await tx.extensionNode.findFirst({ where: { id: original.extensionNodeId, organizationId: org } }) : null;
+      if ((originalIntent.policySnapshot as { policyOwnerUserId?: string } | null)?.policyOwnerUserId !== user && node?.registeredByUserId !== user)
+        throw new ForbiddenException('SEND_POST_REVIEW_PERMISSION_REQUIRED');
+      await this.projects.assertProjectAccess(org, original.projectId);
+      const key = { organizationId: org, userId: user, operation: `owner-send-retry:${executionId}`, requestId: body.requestId };
+      const requestHash = sendHash({ rootPostId, expectedResolutionRevision: body.expectedResolutionRevision });
+      const prior = await tx.sendMutationReceipt.findUnique({ where: { organizationId_userId_operation_requestId: key } });
+      if (prior) {
+        if (prior.requestHash !== requestHash) reject('SEND_RETRY_REQUEST_CONFLICT');
+        return prior.result as { sendIntentId: string; status: 'QUEUED' };
+      }
+      await this.assertControlledIn(tx, org);
+      await this.projects.assertProjectActive(org, original.projectId);
+      const account = await tx.accountWriteState.findUniqueOrThrow({ where: { organizationId_canonicalAccountKey: {
+        organizationId: org, canonicalAccountKey: original.canonicalAccountKey,
+      } } });
+      if (!account.rolloutReady) reject('ACCOUNT_COORDINATION_AUDIT_REQUIRED');
+      const locked = await tx.accountWriteState.updateMany({ where: { id: account.id, revision: account.revision }, data: { revision: { increment: 1 } } });
+      if (locked.count !== 1) reject('ACCOUNT_WRITE_STATE_CHANGED');
+      const { execution, intent, segment } = await this.postReviewScope(tx, org, user, executionId, rootPostId);
+      if (execution.resolutionRevision !== body.expectedResolutionRevision) reject('SEND_RESOLUTION_REVISION_CONFLICT');
+      const now = new Date();
+      await this.assertPostReviewStopped(tx, execution, intent, segment, now);
+      await tx.sendExecution.update({ where: { id: executionId }, data: {
+        status: 'RETRY_REQUESTED', resolutionRevision: { increment: 1 }, lastProgressAt: now,
+      } });
+      await tx.sendIntent.update({ where: { id: intent.id }, data: {
+        status: 'QUEUED', activeExecutionId: null, fencingVersion: { increment: 1 }, revision: { increment: 1 },
+      } });
+      await tx.accountWriteState.updateMany({ where: { id: account.id, activeExecutionId: executionId }, data: { activeExecutionId: null } });
+      await tx.post.updateMany({ where: { organizationId: org, sendIntentId: intent.id }, data: { state: 'QUEUE', error: null, publishDate: now } });
+      const result = { sendIntentId: intent.id, status: 'QUEUED' as const };
+      await tx.sendMutationReceipt.create({ data: { ...key, requestHash, result } });
+      return result;
     });
   }
 
