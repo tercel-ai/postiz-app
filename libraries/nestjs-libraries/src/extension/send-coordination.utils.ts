@@ -157,3 +157,15 @@ export async function releaseExpiredAccountWriterIn(
   });
   return { ...account, activeExecutionId: null, revision: account.revision + 1 };
 }
+
+/** Both the persisted prior-write clock and the current operation floor must elapse. */
+export function accountWriteNotBefore(
+  account: { nextWriteNotBefore?: Date | null; lastConfirmedAt?: Date | null },
+  gapMs: number
+): Date | null {
+  const next = Math.max(
+    account.nextWriteNotBefore?.getTime() ?? 0,
+    account.lastConfirmedAt ? account.lastConfirmedAt.getTime() + gapMs : 0
+  );
+  return next > 0 ? new Date(next) : null;
+}

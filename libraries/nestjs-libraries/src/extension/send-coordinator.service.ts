@@ -14,7 +14,7 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { Prisma, SendExecution, SendIntent } from '@prisma/client';
+import { AccountWriteState, Prisma, SendExecution, SendIntent } from '@prisma/client';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { PrismaService } from '../database/prisma/prisma.service';
 import { ProjectValidationService } from '../projects/project-validation.service';
@@ -22,6 +22,7 @@ import { SendBindingService } from './send-binding.service';
 import { SendPolicyService } from './send-policy.service';
 import { SendQuotaService } from './send-quota.service';
 import {
+  accountWriteNotBefore,
   canonicalSendAccount,
   releaseExpiredAccountWriterIn,
   matchesSendActor,
@@ -186,7 +187,6 @@ export class SendCoordinatorService {
       if (!reason && root.state === 'QUEUE' && intent?.status === 'QUEUED') {
         const account = intent.canonicalAccountKey ? await tx.accountWriteState.findUnique({
           where: { organizationId_canonicalAccountKey: { organizationId: org, canonicalAccountKey: intent.canonicalAccountKey } },
-          select: { nextWriteNotBefore: true, activeExecutionId: true, rolloutReady: true },
         }) : null;
         if (!account) reason = 'ACCOUNT_BINDING_REQUIRED';
         else if (!account.rolloutReady) reason = 'ACCOUNT_COORDINATION_AUDIT_REQUIRED';
@@ -196,10 +196,16 @@ export class SendCoordinatorService {
             nextSendNotBefore = root.publishDate;
             reason = 'SEND_NOT_DUE';
           }
-          if (account.nextWriteNotBefore && account.nextWriteNotBefore > serverNow &&
-              (!nextSendNotBefore || account.nextWriteNotBefore > nextSendNotBefore)) {
-            nextSendNotBefore = account.nextWriteNotBefore;
-            reason = 'ACCOUNT_WRITE_INTERVAL';
+          try {
+            const next = await this.accountWriteNotBeforeIn(tx, intent, account, 0, serverNow);
+            if (next && next > serverNow && (!nextSendNotBefore || next > nextSendNotBefore)) {
+              nextSendNotBefore = next;
+              reason = 'ACCOUNT_WRITE_INTERVAL';
+            }
+          } catch (error) {
+            if (!(error instanceof ForbiddenException || error instanceof BadRequestException)) throw error;
+            reason = /^[A-Z][A-Z0-9_]*$/.test(error.message) ? error.message : 'SEND_POLICY_BLOCKED';
+            nextSendNotBefore = null;
           }
         }
       }
@@ -236,6 +242,12 @@ export class SendCoordinatorService {
     console.log('[sending-account] enrollment result', { organizationId, integrationId,
       rolloutReady: account.rolloutReady, revision: account.revision });
     return account;
+  }
+
+  async accountWriteNotBeforeIn(tx: Prisma.TransactionClient, intent: SendIntent,
+    account: AccountWriteState, index: number, now: Date) {
+    const plan = await this.quotas.resolve(tx, intent, account, index, now);
+    return accountWriteNotBefore(account, plan.gapMs);
   }
 
   async claimabilityReasonIn(
@@ -289,13 +301,13 @@ export class SendCoordinatorService {
       const previous = await tx.sendExecution.findUnique({ where: { id: intent.activeExecutionId } });
       if (!previous || previous.status !== 'RESERVED' || previous.leaseExpiresAt > now) return 'INTENT_EXECUTION_UNAVAILABLE';
     }
-    if (intent.sendOrigin === 'AUTOMATION') {
-      try { await this.quotas.resolve(tx, intent, account, 0, now); }
-      catch (error) {
-        if (error instanceof ForbiddenException || error instanceof BadRequestException)
-          return /^[A-Z][A-Z0-9_]*$/.test(error.message) ? error.message : 'AUTOMATION_POLICY_BLOCKED';
-        throw error;
-      }
+    try {
+      const next = await this.accountWriteNotBeforeIn(tx, intent, account, 0, now);
+      if (next && next > now) return 'ACCOUNT_COOLDOWN_ACTIVE';
+    } catch (error) {
+      if (error instanceof ForbiddenException || error instanceof BadRequestException)
+        return /^[A-Z][A-Z0-9_]*$/.test(error.message) ? error.message : 'SEND_POLICY_BLOCKED';
+      throw error;
     }
     return null;
   }
@@ -1288,13 +1300,8 @@ export class SendCoordinatorService {
         reject('PREVIOUS_SEGMENT_NOT_CONFIRMED');
     }
     const plan = await this.quotas.resolve(tx, intent, account, index, now);
-    const next = Math.max(
-      account.nextWriteNotBefore?.getTime() ?? 0,
-      account.lastConfirmedAt
-        ? account.lastConfirmedAt.getTime() + plan.gapMs
-        : 0
-    );
-    if (next > now.getTime()) reject('ACCOUNT_WRITE_INTERVAL');
+    const next = accountWriteNotBefore(account, plan.gapMs);
+    if (next && next > now) reject('ACCOUNT_WRITE_INTERVAL');
     const submitBefore = new Date(
       Math.min(
         now.getTime() + 30_000,

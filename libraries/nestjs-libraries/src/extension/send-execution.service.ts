@@ -162,7 +162,8 @@ export class SendExecutionService {
         throw new ConflictException('SEND_DRAFT_EXPOSURE_UNSAFE');
       if (await tx.sendSegment.count({ where: { executionId: id, segmentIndex: { lt: index }, status: { not: 'CONFIRMED' } } }))
         throw new ConflictException('PREVIOUS_SEGMENT_NOT_CONFIRMED');
-      if (account.nextWriteNotBefore && account.nextWriteNotBefore > now)
+      const next = await this.sends.accountWriteNotBeforeIn(tx, intent, account, index, now);
+      if (next && next > now)
         throw new ConflictException('ACCOUNT_SEND_INTERVAL_REQUIRED');
       await tx.sendSegment.update({ where: { id: segment.id }, data: { result: { status: 'draft_exposed' } } });
       await tx.sendExecution.update({ where: { id }, data: { status: 'SENDING', lastProgressAt: now } });

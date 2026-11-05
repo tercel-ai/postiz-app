@@ -122,3 +122,21 @@ It cannot disable a submit button already rendered by X or prevent a human from
 submitting an old draft on another device. The extension should close original
 local compose tabs before requesting another attempt when they are available;
 late evidence remains a reconciliation event rather than proof of non-submission.
+
+
+## Shared account pacing admission
+
+Controlled claim discovery, X draft exposure, queued business timing, and final
+submit authorization use the same account lower bound: the later of persisted
+`nextWriteNotBefore` and `lastConfirmedAt + current operation gap`. The existing
+POST minimum from `extension_publish.min_gap` and platform write floor remain
+unchanged. The backend resolves deterministic minimums; it does not redraw a
+random gap at authorization.
+
+For example, a previous REPLY can persist a three-minute interval while the
+following POST requires thirty minutes. Expiry of the previous three-minute
+clock alone does not make that POST eligible. Claim stays queued and the public
+timing projection reports the thirty-minute bound before a composer opens. A
+policy increase after reservation is rechecked at draft exposure, and the final
+permit still rechecks policy, quotas, identity, account ownership, and deadlines
+atomically. Timing projections allocate no quota and are not send permits.
