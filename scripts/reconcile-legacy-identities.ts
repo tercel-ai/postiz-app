@@ -14,6 +14,7 @@
  *     scripts/reconcile-legacy-identities.ts --users <id,id> --apply
  */
 import dotenv from 'dotenv';
+import { databaseNameFromUrl } from './lib/database-url';
 import { PrismaClient } from '@prisma/client';
 import {
   planLegacyIdentity,
@@ -22,7 +23,6 @@ import {
 
 dotenv.config();
 
-const DEFAULT_EXPECTED_DATABASE = 'aisee_postiz_dev';
 
 export interface CliOptions {
   apply: boolean;
@@ -31,7 +31,7 @@ export interface CliOptions {
   integrationIds: string[];
   organizationId?: string;
   baseUrl?: string;
-  expectedDatabase: string;
+  expectedDatabase?: string;
 }
 
 export interface PreviewCandidate {
@@ -116,7 +116,7 @@ export function parseOptions(argv: string[]): CliOptions {
     baseUrl:
       inputs.get('--base-url')?.[0] ?? process.env.NEXT_PUBLIC_BACKEND_URL,
     expectedDatabase:
-      inputs.get('--expected-database')?.[0] ?? DEFAULT_EXPECTED_DATABASE,
+      inputs.get('--expected-database')?.[0] ?? databaseName(process.env.DATABASE_URL) ?? undefined,
   };
 }
 
@@ -257,9 +257,8 @@ export async function collectCandidates(
 }
 
 export function databaseName(databaseUrl: string | undefined): string | null {
-  if (!databaseUrl) return null;
   try {
-    return decodeURIComponent(new URL(databaseUrl).pathname.replace(/^\//, ''));
+    return databaseNameFromUrl(databaseUrl);
   } catch {
     return null;
   }
@@ -282,7 +281,7 @@ function usage(): void {
   --org <id>                  Limit any selection to one organization
   --apply                     Call the verification API (default: preview only)
   --base-url <url>            Backend URL (default: NEXT_PUBLIC_BACKEND_URL)
-  --expected-database <name>  Required database name (default: ${DEFAULT_EXPECTED_DATABASE})
+  --expected-database <name>  Additional target check (default: parsed from DATABASE_URL)
   --help                      Show this help
 
 Apply mode reads AISEE_AUTH_TOKEN from the environment. For users outside the
@@ -336,8 +335,8 @@ async function main(): Promise<void> {
     usage();
     return;
   }
-  const configuredDatabase = databaseName(process.env.DATABASE_URL);
-  if (configuredDatabase !== options.expectedDatabase) {
+  const configuredDatabase = databaseNameFromUrl(process.env.DATABASE_URL);
+  if (options.expectedDatabase && configuredDatabase !== options.expectedDatabase) {
     throw new Error(
       `Refusing to run: expected database ${options.expectedDatabase}, got ${
         configuredDatabase ?? 'unknown'

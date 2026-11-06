@@ -2,6 +2,7 @@
 import { createRequire } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { databaseNameFromUrl } from './lib/database-url';
 
 const NAMESPACE = 'linkedin.fs_miniProfile';
 const normalize = (value: string) => value.trim().toLowerCase().replace(/^@/, '').replace(/^u\//, '');
@@ -42,10 +43,8 @@ export function parseOptions(argv: string[]) {
 }
 
 export function validateDatabaseUrl(raw: string | undefined): string {
-  let url: URL;
-  try { url = new URL(raw ?? ''); } catch { throw new Error('DATABASE_MUST_BE_AISEE_POSTIZ_DEV'); }
-  if (!['postgres:', 'postgresql:'].includes(url.protocol) || url.pathname !== '/aisee_postiz_dev')
-    throw new Error('DATABASE_MUST_BE_AISEE_POSTIZ_DEV');
+  databaseNameFromUrl(raw);
+  const url = new URL(raw!);
   url.searchParams.set('connect_timeout', '5');
   url.searchParams.set('socket_timeout', '15');
   return url.href;
@@ -110,7 +109,7 @@ async function main() {
   [--backend-dir <postiz-app-directory>]
 
 Reads DATABASE_URL from the environment, then postiz-app/.env as fallback.
-Only aisee_postiz_dev is allowed. Uses the backend's installed Prisma client.
+The database name is parsed from DATABASE_URL. Uses the backend's installed Prisma client.
 Without --org, scans LinkedIn member accounts but reports only related organizations.
 Outputs JSON without credentials. No recovery, deletion, or session-report requests.
 Exit codes: 0 = no initial gate block found, 2 = gate block found, 1 = diagnosis failed.
@@ -145,7 +144,7 @@ No matching organization is not evidence that the API request should succeed.`);
     }
     const reports = analyzeLinkedinAccounts(rows, options, options.org);
     console.log(JSON.stringify({ observedAt: new Date().toISOString(), readOnly: true,
-      database: 'aisee_postiz_dev', databaseHost: url.hostname, databasePort: url.port || '5432',
+      database: databaseNameFromUrl(databaseUrl), databaseHost: url.hostname, databasePort: url.port || '5432',
       target: { id: options.id, handle: options.handle, identityNamespace: NAMESPACE },
       organizationFilter: options.org ?? null, scannedAccounts: rows.length, reports,
       scope: 'Initial identity/profile gates only; no session, permission, channel-limit or controlled-recovery checks. Compare the reported database host with the API deployment.',
@@ -153,7 +152,9 @@ No matching organization is not evidence that the API request should succeed.`);
     if (reports.some(report => report.profileGate !== 'NO_PROFILE_CONFLICT')) process.exitCode = 2;
   } catch (error) {
     const known = ['DUPLICATE_OPTION', 'UNKNOWN_OPTION', 'OPTION_VALUE_REQUIRED', 'VALID_ID_AND_HANDLE_REQUIRED',
-      'DATABASE_MUST_BE_AISEE_POSTIZ_DEV', 'SCAN_LIMIT_EXCEEDED_USE_ORG'];
+      'DATABASE_URL is required',
+      'DATABASE_URL must be a valid PostgreSQL URL with an explicit database name',
+      'SCAN_LIMIT_EXCEEDED_USE_ORG'];
     const message = error instanceof Error && known.includes(error.message) ? error.message : 'DIAGNOSIS_FAILED';
     // Database errors may embed connection strings or credentials; never print the raw error.
     console.log(JSON.stringify({ error: message, stage,

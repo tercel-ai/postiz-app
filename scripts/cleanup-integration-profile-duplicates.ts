@@ -186,7 +186,7 @@ Default: preview only. --apply soft-deletes and disables only the explicit remov
 No tokens are read. No history is deleted, reassigned or merged. No bindings are cleared.
 Any defaults, live sends, unresolved autonomous effects, held quota or active account writers block application.
 Project assignments and terminal sessions remain attached to the deleted record.
-DATABASE_URL must point to aisee_postiz_dev. Stop publishing while performing maintenance.
+The PostgreSQL database name is parsed from DATABASE_URL. Verify the intended target and stop publishing while performing maintenance.
 Run the preview first and confirm the retained account and references before --apply.
 Exit codes: 0 = preview allowed/applied/already deleted; 2 = blocked; 1 = failure.`);
     return;

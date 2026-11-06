@@ -1,4 +1,4 @@
--- Prepared only. Apply through the deployment migration pipeline after validating aisee_postiz_dev.
+-- Prepared only. Apply through the deployment migration pipeline after validating the intended DATABASE_URL target.
 -- Global policy values stay in Settings; mutations preserve a durable revision barrier.
 CREATE TABLE "UserSendPreference" (
     "userId" TEXT NOT NULL,

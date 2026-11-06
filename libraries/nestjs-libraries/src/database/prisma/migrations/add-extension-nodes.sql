@@ -1,5 +1,5 @@
 -- Preparation only: apply through the project's reviewed deployment pipeline.
--- Confirm the target database is aisee_postiz_dev before applying this file.
+-- Confirm the target database is the intended DATABASE_URL target before applying this file.
 -- This expansion keeps the legacy account identity constraint unchanged.
 -- Account namespace auditing and the replacement unique key are a later migration.
 -- AlterTable

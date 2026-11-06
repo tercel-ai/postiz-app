@@ -433,7 +433,7 @@ Prisma client and SendModeService, not a full Nest application, so background
 workers/timers are not started. It calls the same service and transaction logic as
 the admin routes. No HTTP token, deployed backend, raw SQL, or schema migration is
 needed. It uses the local DATABASE_URL (environment overrides the repository .env)
-and refuses databases other than aisee_postiz_dev. Before any invocation, verify
+and derives its database name from the validated DATABASE_URL. Before any invocation, verify
 the actual connection target, then supply --database-verified.
 
 The operator must be trusted to run maintenance using local database credentials.

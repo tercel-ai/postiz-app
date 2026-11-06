@@ -1,4 +1,4 @@
--- Prepared only. Apply through the deployment migration pipeline after validating aisee_postiz_dev.
+-- Prepared only. Apply through the deployment migration pipeline after validating the intended DATABASE_URL target.
 -- Requires add-extension-nodes.sql, add-project-send-bindings.sql and add-plan-execution-routes.sql.
 CREATE TABLE "OrganizationSendBinding" (
     "id" TEXT NOT NULL,

@@ -104,10 +104,11 @@ describe('diagnostic CLI guards', () => {
     expect(() => parseOptions(args as string[])).toThrow();
   });
 
-  it('allows only the intended database and never echoes credentials on rejection', () => {
+  it('parses the configured database and never echoes credentials on rejection', () => {
+    expect(validateDatabaseUrl('postgresql://user:secret@localhost/aisee_postiz')).toContain('/aisee_postiz?');
     expect(validateDatabaseUrl('postgresql://user:secret@localhost/aisee_postiz_dev')).toContain('connect_timeout=5');
-    for (const url of ['bad', 'postgresql://user:secret@localhost/aisee_dev', 'https://host/aisee_postiz_dev']) {
-      expect(() => validateDatabaseUrl(url)).toThrow('DATABASE_MUST_BE_AISEE_POSTIZ_DEV');
+    for (const url of ['bad', 'postgresql://user:secret@localhost/', 'https://host/aisee_postiz_dev']) {
+      expect(() => validateDatabaseUrl(url)).toThrow('DATABASE_URL');
       try { validateDatabaseUrl(url); } catch (error) { expect(String(error)).not.toContain('secret'); }
     }
   });

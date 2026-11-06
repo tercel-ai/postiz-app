@@ -5,9 +5,9 @@
  * pnpm exec ts-node --project scripts/tsconfig.json scripts/audit-integration-profiles.ts
  */
 import type { PrismaClient } from '@prisma/client';
+import { databaseNameFromUrl } from './lib/database-url';
 import { normalizeHandle } from '../libraries/nestjs-libraries/src/database/prisma/integrations/extension-session.utils';
 
-const EXPECTED_DATABASE = 'aisee_postiz_dev';
 const BATCH_SIZE = 500;
 
 export interface ProfileAccount {
@@ -50,17 +50,7 @@ export function parseOptions(argv: string[]): Options {
 }
 
 export function assertAuditDatabase(databaseUrl: string | undefined): string {
-  let url: URL;
-  try {
-    url = new URL(databaseUrl ?? '');
-  } catch {
-    throw new Error('A valid PostgreSQL DATABASE_URL is required.');
-  }
-  if (!['postgres:', 'postgresql:'].includes(url.protocol) ||
-    url.pathname !== `/${EXPECTED_DATABASE}`) {
-    throw new Error(`DATABASE_URL must point to ${EXPECTED_DATABASE}; refusing to connect.`);
-  }
-  return EXPECTED_DATABASE;
+  return databaseNameFromUrl(databaseUrl);
 }
 
 function unresolved(account: ProfileAccount): boolean {
@@ -196,7 +186,7 @@ async function main() {
   --json             Print a JSON report instead of tables
   --help             Show this help without connecting to a database
 
-DATABASE_URL must target ${EXPECTED_DATABASE}. Deleted rows are included.
+The database name is parsed from the PostgreSQL DATABASE_URL. Verify the intended target before running. Deleted rows are included.
 Exit codes: 0 = no duplicates; 2 = duplicates found; 1 = invalid input or audit failure.
 Missing profiles and missing/legacy identity fields are informational.
 Only Prisma findMany reads are performed. No write or repair mode exists.`);

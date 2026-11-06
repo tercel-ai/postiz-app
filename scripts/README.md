@@ -1,5 +1,11 @@
 # Scripts
 
+Database utilities validate PostgreSQL URLs and derive the database name from
+`DATABASE_URL`; they do not require a development-only database name. Existing
+environment variables take precedence over `.env`. Verify that the configured
+host, database, and schema belong to this deployment before using a utility:
+parsing a URL cannot detect that the URL points at the wrong service.
+
 ## diagnose-linkedin-profile.ts
 
 Read-only diagnosis of a reported LinkedIn miniProfile ID and public profile.
@@ -17,8 +23,8 @@ pnpm exec ts-node --project scripts/tsconfig.json scripts/diagnose-linkedin-prof
 
 It reads `DATABASE_URL` from the environment, then this repository's `.env` as
 fallback, independent of the working directory. `--backend-dir` or
-`AISEE_BACKEND_DIR` may explicitly select another backend checkout. It refuses
-any database except `aisee_postiz_dev`, uses paginated Prisma `findMany` reads,
+`AISEE_BACKEND_DIR` may explicitly select another backend checkout. It validates
+the configured PostgreSQL target, uses paginated Prisma `findMany` reads,
 and selects no tokens, credentials or metadata. It never changes accounts,
 verifies identities, or submits session reports. `--help` does not connect.
 
@@ -56,8 +62,8 @@ pnpm exec ts-node --project scripts/tsconfig.json \
 ```
 
 The script loads `.env` without overriding existing environment variables and
-refuses to connect unless the PostgreSQL `DATABASE_URL` targets
-`aisee_postiz_dev`. It only performs paginated Prisma `findMany` reads and selects
+derives the database name from the validated PostgreSQL `DATABASE_URL`.
+It only performs paginated Prisma `findMany` reads and selects
 no tokens, credentials, or metadata. There is no write or repair mode.
 
 Reports include duplicate groups with Integration IDs, original profiles,
@@ -92,7 +98,7 @@ pnpm exec ts-node --project scripts/tsconfig.json \
   --keep <retained-integration-id> --remove <duplicate-integration-id> --apply
 ```
 
-The script refuses databases other than `aisee_postiz_dev`, reads no credentials,
+The script validates its configured PostgreSQL target, reads no credentials,
 and defaults to preview. `--apply` sets only `deletedAt` and `disabled` on the
 specified duplicate. Published history, metrics, project assignments, and
 terminal-session references retain their original Integration IDs. Nothing is
@@ -184,13 +190,28 @@ guard, without adding a column. Prisma cannot express this index; the schema
 records its migration location in a comment. The migration checks the database
 name and fails if active duplicates remain. Agents must never execute it.
 
-With `DATABASE_URL` explicitly exported to the intended database, the operator
-can apply the prepared migration using:
+Prepare a deployment-specific SQL file offline. This reads `DATABASE_URL` from
+the environment or `.env`, decodes its database name, and sets a transaction-local
+expected target in the generated SQL. It makes no database connection and refuses
+to overwrite an existing file:
+
+```bash
+pnpm migration:prepare:profile-uniqueness --output /tmp/postiz-profile-uniqueness.sql
+```
+
+Review the generated file and verify the production connection separately.
+The operator or deployment pipeline can then apply the reviewed artifact, with
+`DATABASE_URL` explicitly exported to the intended database:
 
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
-  -f libraries/nestjs-libraries/src/database/prisma/migrations/unique-active-integration-profile.sql
+  -f /tmp/postiz-profile-uniqueness.sql
 ```
+
+The SQL rejects a connection whose actual database name differs from the prepared
+target. Applying the source SQL directly without preparing the expected target
+also fails before DDL. Never use `db push` or rerun all migration files to fill
+missing custom indexes or CHECK constraints after a schema synchronization.
 
 Re-run the audit afterward. `groupsWithMultipleNonDeletedAccounts` must be zero;
 `duplicateGroups` may remain nonzero because the audit intentionally includes
@@ -247,9 +268,9 @@ and identity conflicts. Cross-organization apply requires a super-admin token.
 Each HTTP verification has a 60-second deadline, and an account failure does not
 stop the rest of the batch.
 
-The script refuses to run unless `DATABASE_URL` resolves to
-`aisee_postiz_dev` by default. Use `--expected-database` only when intentionally
-running the same guarded workflow in another deployment. OAuth-verifiable X,
+The expected database defaults to the decoded name in `DATABASE_URL`.
+Use `--expected-database` to add an independent intended-name check; a mismatch
+is rejected before constructing a database client. OAuth-verifiable X,
 Reddit, and LinkedIn Page rows are handled by the API. Session-only rows are
 reported as `WAIT_FOR_SESSION` and are upgraded automatically when an
 organization administrator's registered node submits fresh live identity
@@ -628,8 +649,8 @@ Re-run with --execute to write these changes.
 ## Legacy calendar recovery
 
 Use `recover-legacy-calendar.ts --help` for token-free service-based maintenance.
-Supply `--database-verified` only after verifying the actual database is
-`aisee_postiz_dev`. The script automatically records the OS user and host as its
+Supply `--database-verified` only after verifying the actual connection target
+matches the intended deployment's `DATABASE_URL`. The script automatically records the OS user and host as its
 maintenance actor; no token or user ID is needed.
 The default run only prepares a review plan. Mutations require `--apply`, explicit
 executor-stop/no-pending-submit flags, and an evidence file. Keep the plan and

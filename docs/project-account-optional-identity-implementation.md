@@ -98,7 +98,7 @@ The original eight expand migrations must still first be reviewed and applied by
 
 [contract-integration-identity.sql](../libraries/nestjs-libraries/src/database/prisma/migrations/contract-integration-identity.sql) is still not part of the initial expand. The INTEGRATION_IDENTITY_CONTRACTED manual marker has been removed; when code needs to handle identity key conflicts/changes it only reads the current schema's actual unique indexes to decide whether to keep the old organization/bare-ID collision check. Only when the old key has actually been removed and the new scoped key exists is a different provider allowed to use the same bare ID. The pre-contract audit and legacy-writer exit are still guaranteed by the release process; the program does not execute DDL automatically.
 
-All database operations are performed by the user or the deployment pipeline; the target must be confirmed to be aisee_postiz_dev. **This round did not connect to a database, execute SQL, apply migrations or db push.** All sending feature flags and execution-quarantine checks remain; new account-state rows default to enabled under design §14.18, and passing simulation tests cannot be used to enable real sending directly.
+All database operations are performed by the user or the deployment pipeline; the actual target must be checked against the intended deployment DATABASE_URL. **This round did not connect to a database, execute SQL, apply migrations or db push.** All sending feature flags and execution-quarantine checks remain; new account-state rows default to enabled under design §14.18, and passing simulation tests cannot be used to enable real sending directly.
 
 ## Verification and Remaining Scope
 

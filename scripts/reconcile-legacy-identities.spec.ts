@@ -10,9 +10,18 @@ import {
 describe('reconcile legacy identities CLI', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it('defaults the expected database to the configured production URL and retains an explicit override', () => {
+    vi.stubEnv('DATABASE_URL', 'postgresql://user:secret@production/postiz%20production');
+    expect(parseOptions(['--all']).expectedDatabase).toBe('postiz production');
+    expect(parseOptions(['--all', '--expected-database', 'reviewed-target']).expectedDatabase)
+      .toBe('reviewed-target');
   });
 
   it('is preview-only by default and deduplicates user inputs', () => {
+    vi.stubEnv('DATABASE_URL', 'postgresql://user:secret@localhost/aisee_postiz_dev');
     expect(
       parseOptions(['--user', 'u1', '--users', 'u1,u2', '--org', 'org'])
     ).toMatchObject({

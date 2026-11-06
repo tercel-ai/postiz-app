@@ -1,6 +1,6 @@
 -- Prepared migration only. Never execute from an agent session.
 -- Apply after the six account/node/policy migrations through the deployment pipeline.
--- Confirm the datasource is aisee_postiz_dev before deployment.
+-- Confirm the datasource is the intended DATABASE_URL target before deployment.
 -- AccountWriteState.rolloutReady remains FALSE until actor aliases, legacy in-flight
 -- requests, and every producer sharing the affected project budgets are audited.
 

@@ -1,6 +1,6 @@
 /**
  * Inspect a queued reply without claiming it or writing to the database.
- * Refuses every database except aisee_postiz_dev. Output excludes credentials
+ * Parses the database target from DATABASE_URL. Output excludes credentials
  * and reply content; all collection queries are scoped and bounded.
  *
  * Usage from the repository root:
@@ -11,6 +11,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import dotenv from 'dotenv';
+import { databaseNameFromUrl } from './lib/database-url';
 import { PrismaClient } from '@prisma/client';
 import { sanitizePlatformPacing } from '../libraries/nestjs-libraries/src/engage/platform-pacing-config.service';
 import { resolvePacingRangeMs } from '../libraries/helpers/src/extension/platform-pacing';
@@ -37,14 +38,9 @@ async function main() {
     throw new Error('MISSING_ARGUMENTS');
   const envPath = resolve(__dirname, '../.env');
   const env = existsSync(envPath) ? dotenv.parse(readFileSync(envPath)) : {};
-  const connection = new URL(
-    process.env.DATABASE_URL || env.DATABASE_URL || ''
-  );
-  if (
-    !['postgres:', 'postgresql:'].includes(connection.protocol) ||
-    decodeURIComponent(connection.pathname.slice(1)) !== 'aisee_postiz_dev'
-  )
-    throw new Error('DATABASE_MUST_BE_AISEE_POSTIZ_DEV');
+  const databaseUrl = process.env.DATABASE_URL || env.DATABASE_URL;
+  const database = databaseNameFromUrl(databaseUrl);
+  const connection = new URL(databaseUrl!);
   connection.searchParams.set('connect_timeout', '5');
   connection.searchParams.set('pool_timeout', '5');
   const db = new PrismaClient({
@@ -252,7 +248,7 @@ async function main() {
       JSON.stringify(
         {
           observedAt,
-          database: 'aisee_postiz_dev',
+          database,
           reply,
           post,
           intent: {
@@ -295,7 +291,8 @@ main().catch((error) => {
   // Prisma error messages can contain connection details; expose only a safe code.
   const safeCodes = [
     'MISSING_ARGUMENTS',
-    'DATABASE_MUST_BE_AISEE_POSTIZ_DEV',
+    'DATABASE_URL is required',
+    'DATABASE_URL must be a valid PostgreSQL URL with an explicit database name',
     'SAVED_REPLY_NOT_FOUND',
     'SEND_INTENT_NOT_FOUND',
     'ACCOUNT_BINDING_MISSING',

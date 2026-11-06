@@ -1,12 +1,13 @@
 /**
  * Read-only diagnosis of extension attempts, including uncertain publish outcomes.
  * Run from postiz-app:
- *   node --experimental-strip-types scripts/diagnose-send-attempts.ts --help
+ *   pnpm exec ts-node --project scripts/tsconfig.json scripts/diagnose-send-attempts.ts --help
  * No tokens, content, or raw platform evidence are printed. No repair is performed.
  */
 import { basename } from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import * as dotenv from 'dotenv';
+import { databaseNameFromUrl } from './lib/database-url';
 
 export interface DiagnosisOptions {
   attempt?: string;
@@ -33,9 +34,7 @@ export function parseOptions(args: string[]): DiagnosisOptions {
 }
 
 export function assertDiagnosisDatabase(databaseUrl: string | undefined) {
-  if (!databaseUrl) throw new Error('DATABASE_URL is required');
-  const database = decodeURIComponent(new URL(databaseUrl).pathname.slice(1));
-  if (database !== 'aisee_postiz_dev') throw new Error('Diagnosis requires database aisee_postiz_dev; check DATABASE_URL');
+  databaseNameFromUrl(databaseUrl);
 }
 
 /** Extract only the credential-free stage and code written by the extension. */
@@ -117,7 +116,7 @@ export async function diagnoseSendAttempts(db: PrismaClient, options: DiagnosisO
 
 async function main() {
   if (process.argv.includes('--help')) {
-    console.log('Usage: node --experimental-strip-types scripts/diagnose-send-attempts.ts [--attempt ID] [--organization ID] [--cursor ID] [--limit 100] [--details]');
+    console.log('Usage: pnpm exec ts-node --project scripts/tsconfig.json scripts/diagnose-send-attempts.ts [--attempt ID] [--organization ID] [--cursor ID] [--limit 100] [--details]');
     return;
   }
   const options = parseOptions(process.argv.slice(2));

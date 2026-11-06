@@ -2,8 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { assertDiagnosisDatabase, diagnoseSendAttempts, parseOptions, summarizeSendEvidence } from './diagnose-send-attempts';
 
 describe('send attempt diagnosis', () => {
-  it('requires the expected database without exposing the connection URL', () => {
-    expect(() => assertDiagnosisDatabase('postgresql://user:secret@host/aisee_dev')).toThrow('requires database aisee_postiz_dev');
+  it('accepts a production database from DATABASE_URL', () => {
+    expect(() => assertDiagnosisDatabase('postgresql://user:secret@host/aisee_postiz')).not.toThrow();
+  });
+
+  it('requires a PostgreSQL database name without exposing the connection URL', () => {
+    expect(() => assertDiagnosisDatabase('postgresql://user:secret@host/')).toThrow('DATABASE_URL');
     expect(() => assertDiagnosisDatabase(undefined)).toThrow('DATABASE_URL is required');
     expect(() => assertDiagnosisDatabase('postgresql://user:secret@host/aisee_postiz_dev?schema=public')).not.toThrow();
   });

@@ -2,7 +2,7 @@
  * Diagnose account leakage or unexpected account visibility in sending-context.
  *
  * This script is strictly read-only. It only uses Prisma findMany queries and
- * refuses to run unless DATABASE_URL targets aisee_postiz_dev.
+ * validates and parses the PostgreSQL target from DATABASE_URL.
  *
  * Usage:
  *   pnpm exec ts-node scripts/diagnose-sending-context.ts \
@@ -12,10 +12,10 @@
 import { createHash } from 'node:crypto';
 import dotenv from 'dotenv';
 import { PrismaClient } from '@prisma/client';
+import { databaseNameFromUrl } from './lib/database-url';
 
 dotenv.config();
 
-const EXPECTED_DATABASE = 'aisee_postiz_dev';
 const CONTROLLED_PROVIDERS = [
   'x',
   'reddit',
@@ -31,15 +31,6 @@ type UserTarget = {
   userId: string;
   projectId?: string;
 };
-
-function databaseName(databaseUrl: string | undefined): string | null {
-  if (!databaseUrl) return null;
-  try {
-    return decodeURIComponent(new URL(databaseUrl).pathname.replace(/^\//, ''));
-  } catch {
-    return null;
-  }
-}
 
 function identityFingerprint(provider: string, namespace: string, internalId: string): string {
   return createHash('sha256')
@@ -64,12 +55,7 @@ async function main() {
   const [firstUserId, secondUserId, firstProjectId, secondProjectId] = process.argv.slice(2);
   if (!firstUserId || !secondUserId) usage();
 
-  const configuredDatabase = databaseName(process.env.DATABASE_URL);
-  if (configuredDatabase !== EXPECTED_DATABASE) {
-    throw new Error(
-      `Refusing to run: expected database ${EXPECTED_DATABASE}, got ${configuredDatabase ?? 'unknown'}`
-    );
-  }
+  const configuredDatabase = databaseNameFromUrl(process.env.DATABASE_URL);
 
   const targets: UserTarget[] = [
     { userId: firstUserId, projectId: firstProjectId },

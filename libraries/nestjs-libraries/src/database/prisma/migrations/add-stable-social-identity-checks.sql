@@ -1,5 +1,5 @@
 -- Prepared only. Apply through the deployment pipeline after checking the target
--- is aisee_postiz_dev and completing the eight expand migrations in the design.
+-- is the intended DATABASE_URL target and completing the eight expand migrations in the design.
 -- NOT VALID preserves existing rows for identity audit. New/updated known
 -- identities must already be canonical; legacy identities remain isolated.
 -- This does not infer namespaces, merge rows, rewrite references, or remove data.

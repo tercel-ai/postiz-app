@@ -1,5 +1,5 @@
 -- Prepared migration only. Apply through the project's deployment pipeline.
--- Confirm the datasource is aisee_postiz_dev. Never use prisma db push.
+-- Confirm the datasource is the intended DATABASE_URL target. Never use prisma db push.
 -- Apply after add-send-coordination.sql. Existing automation has no guessed owner;
 -- an authenticated operator must save its settings before automatic generation.
 -- CreateTable

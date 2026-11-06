@@ -1,12 +1,20 @@
 -- Apply through the deployment pipeline or manually after reviewing the
 -- duplicate cleanup preview. Agents must not execute this migration.
 -- This migration does not delete, merge, or reassign any account data.
+-- Prepare with pnpm migration:prepare:profile-uniqueness --output <new.sql>.
+-- The offline preparer derives the expected database from DATABASE_URL.
 BEGIN;
 
 DO $$
+DECLARE
+  expected_database text := current_setting('postiz.expected_database', true);
 BEGIN
-  IF current_database() <> 'aisee_postiz_dev' THEN
-    RAISE EXCEPTION 'Expected aisee_postiz_dev; refusing profile uniqueness migration';
+  IF expected_database IS NULL OR btrim(expected_database) = '' THEN
+    RAISE EXCEPTION 'Expected database is missing; prepare this migration from DATABASE_URL first';
+  END IF;
+  IF current_database() <> expected_database THEN
+    RAISE EXCEPTION 'Expected database %, connected to %; refusing profile uniqueness migration',
+      expected_database, current_database();
   END IF;
 END $$;
 

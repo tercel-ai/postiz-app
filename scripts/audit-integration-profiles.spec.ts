@@ -98,14 +98,19 @@ describe('profile uniqueness audit', () => {
 });
 
 describe('read-only audit execution', () => {
-  it.each([
-    undefined, '', 'invalid', 'postgresql://user:secret@localhost/aisee_dev',
-    'mysql://user:secret@localhost/aisee_postiz_dev',
-  ])('rejects an absent, invalid or wrong database URL before connecting', value => {
-    expect(() => assertAuditDatabase(value)).toThrow(/DATABASE_URL|aisee_postiz_dev/);
+  it.each(['aisee_postiz', 'aisee_posiz', 'postiz_staging'])('derives the configured database instead of requiring the development name: %s', database => {
+    expect(assertAuditDatabase(`postgresql://user:secret@localhost/${database}?schema=public`))
+      .toBe(database);
   });
 
-  it('accepts only the expected Postiz database and never returns credentials', () => {
+  it.each([
+    undefined, '', 'invalid', 'postgresql://user:secret@localhost/',
+    'mysql://user:secret@localhost/aisee_postiz_dev',
+  ])('rejects an absent, invalid or unnamed database URL before connecting', value => {
+    expect(() => assertAuditDatabase(value)).toThrow(/DATABASE_URL/);
+  });
+
+  it('returns only the parsed database name without credentials', () => {
     expect(assertAuditDatabase('postgresql://user:secret@localhost/aisee_postiz_dev?schema=public'))
       .toBe('aisee_postiz_dev');
     expect(assertAuditDatabase('postgres://user:secret@localhost/aisee_postiz_dev'))

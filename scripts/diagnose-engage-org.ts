@@ -18,7 +18,7 @@ async function main() {
     return;
   }
   if (!values['organization-id'] || !values['database-verified']) {
-    throw new Error('Provide --organization-id and verify the actual database is aisee_postiz_dev before passing --database-verified');
+    throw new Error('Provide --organization-id and verify the actual DATABASE_URL target before passing --database-verified');
   }
   const limit = Number(values.limit);
   if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error('Limit must be an integer from 1 to 1000');
