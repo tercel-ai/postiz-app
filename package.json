@@ -37,6 +37,7 @@
     "commands:build:development": "pnpm --filter ./apps/commands run build",
     "prisma-generate": "pnpm dlx prisma@6.5.0 generate --schema ./libraries/nestjs-libraries/src/database/prisma/schema.prisma",
     "migration:prepare:profile-uniqueness": "ts-node --project scripts/tsconfig.json scripts/prepare-profile-uniqueness-migration.ts",
+    "migration:prepare:send-safety": "ts-node --project scripts/tsconfig.json scripts/prepare-sql-migration.ts --migration send-safety",
     "prisma-db-push": "pnpm run prisma-db-indexes && pnpm dlx prisma@6.5.0 db push --accept-data-loss --schema ./libraries/nestjs-libraries/src/database/prisma/schema.prisma",
     "prisma-db-indexes": "pnpm dlx prisma@6.5.0 db execute --file ./libraries/nestjs-libraries/src/database/prisma/engage-indexes.sql --schema ./libraries/nestjs-libraries/src/database/prisma/schema.prisma",
     "prisma-seed": "pnpm dlx ts-node -r tsconfig-paths/register libraries/nestjs-libraries/src/database/prisma/ai-pricing/run-seed-pricing.ts",

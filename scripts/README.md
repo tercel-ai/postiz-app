@@ -218,6 +218,43 @@ Re-run the audit afterward. `groupsWithMultipleNonDeletedAccounts` must be zero;
 soft-deleted history. Profile cleanup does not verify or upgrade `legacy`
 identities; that remains the separate protected identity-verification workflow.
 
+## Repairing missing send guards after db push
+
+For an upgrade where the current Prisma tables and columns already exist, the
+profile uniqueness index has been applied, and the inspected database is missing
+both send indexes and all eighteen sending CHECKs, prepare the dedicated repair:
+
+```bash
+pnpm migration:prepare:send-safety --output /tmp/postiz-send-safety.sql
+cat /tmp/postiz-send-safety.sql
+```
+
+This command only writes SQL. It derives the target from `DATABASE_URL` and uses
+the same offline preparer and connection-name guard as profile uniqueness.
+The existing profile preparation command remains supported.
+
+Keep application writers stopped and retain a backup. Review and run the complete
+generated script in the existing database client or the deployment pipeline.
+Its transaction creates `SendExecution_one_active_content`,
+`Post_controlled_claim_scan_idx`, and eighteen CHECK constraints from the original
+node, identity, coordination, owner, and cursor migrations. Three identity checks
+remain `NOT VALID` as originally designed; validating historical identities is a
+separate audit step. It creates no tables or columns, removes no index, and does
+not modify account identities, posts, leases, or quota data.
+
+The repair targets the inspected all-missing state. Existing objects, conflicting
+active executions, or invalid values cause a transaction failure; do not skip
+errors, delete records, or rerun all base migrations. It does not recreate the old
+bare-ID identity key and does not make an old application rollback safe.
+
+The application URL can contain client-specific options such as
+`sslmode=no-verify` or `schema` that `psql` does not accept. Do not pass that URL
+unchanged to `psql` or alter the application's `.env` solely for the migration.
+An already-working graphical database client can execute the complete generated
+SQL in its verified connection. Exported result rows formatted as
+`INSERT INTO "" (...)` are display/export data, not statements to execute against
+PostgreSQL system catalogs.
+
 ## reconcile-legacy-identities.ts
 
 Safely reconciles historical `Integration.identityNamespace = legacy` rows for

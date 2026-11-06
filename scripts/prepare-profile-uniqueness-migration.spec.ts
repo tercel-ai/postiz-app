@@ -44,6 +44,6 @@ describe('offline profile uniqueness migration preparation', () => {
   it('refuses malformed configuration and a source without its transaction or guard', () => {
     expect(() => prepareProfileUniquenessMigration(source, undefined)).toThrow('DATABASE_URL');
     expect(() => prepareProfileUniquenessMigration('CREATE TABLE x (id INT);', 'postgresql://host/postiz'))
-      .toThrow('PROFILE_MIGRATION_TRANSACTION_OR_TARGET_GUARD_MISSING');
+      .toThrow('MIGRATION_TRANSACTION_OR_TARGET_GUARD_MISSING');
   });
 });
