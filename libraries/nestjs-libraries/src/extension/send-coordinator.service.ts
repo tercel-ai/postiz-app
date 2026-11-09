@@ -1776,7 +1776,7 @@ export class SendCoordinatorService {
     });
   }
 
-  /** An attended owner review settles a single saved Medium reply through its original ledger. */
+  /** An attended review settles a single saved reply through its original ledger. */
   async verifySavedReply(
     org: string,
     user: string,
@@ -1806,14 +1806,29 @@ export class SendCoordinatorService {
       };
       let settings: { replyUrl?: string } = {};
       try { settings = JSON.parse(payload?.[0]?.settings ?? '{}'); } catch { /* Reject malformed original settings below. */ }
-      if (!intent || !reply || !post || post.deletedAt || post.error?.startsWith('Manually marked failed: ') ||
+      const devto = execution.platform === 'devto';
+      const supported = devto
+        ? execution.kind === 'EXTENSION' && body.status === 'definitely_not_submitted' &&
+          target?.idNamespace === 'devto.user_id' && /^\d+$/.test(target.id ?? '') &&
+          typeof settings.replyUrl === 'string' && hasControlledReplyTarget('devto', settings) &&
+          /^\/[a-z0-9_-]+\/[a-z0-9_-]+\/?$/i.test(new URL(settings.replyUrl).pathname) &&
+          body.targetUrl === settings.replyUrl
+        : execution.platform === 'medium' && target?.idNamespace === 'medium.handle' && !!target.id &&
+          !!storyId(settings.replyUrl) && storyId(body.targetUrl) === storyId(settings.replyUrl);
+      if (!supported || !intent || !reply || !post || post.deletedAt || post.error?.startsWith('Manually marked failed: ') ||
           intent.rootPostId !== post.id || intent.projectId !== execution.projectId ||
-          intent.platform !== 'medium' || intent.action !== 'REPLY' || execution.platform !== 'medium' ||
+          intent.platform !== execution.platform || intent.action !== 'REPLY' ||
           execution.action !== 'REPLY' || payload?.length !== 1 || payload[0].id !== post.id ||
-          target.idNamespace !== 'medium.handle' || !target.id ||
-          !storyId(settings.replyUrl) || storyId(body.targetUrl) !== storyId(settings.replyUrl) || !body.text?.trim() ||
-          normalize(body.text) !== normalize(payload[0].text ?? payload[0].content ?? ''))
+          !body.text?.trim() || normalize(body.text) !== normalize(payload[0].text ?? payload[0].content ?? ''))
         reject('SEND_REPLY_VERIFICATION_SCOPE_MISMATCH');
+      if (devto) {
+        const owner = (intent.policySnapshot as { policyOwnerUserId?: string } | null)?.policyOwnerUserId;
+        const node = execution.extensionNodeId && await tx.extensionNode.findFirst({
+          where: { id: execution.extensionNodeId, organizationId: org },
+        });
+        if (owner !== user && (!node || node.registeredByUserId !== user))
+          throw new ForbiddenException('SEND_REPLY_REVIEW_PERMISSION_REQUIRED');
+      }
       if (!['confirmed', 'definitely_not_submitted'].includes(body.status) || !body.evidence?.trim())
         throw new BadRequestException('SEND_RECONCILIATION_EVIDENCE_REQUIRED');
       let platformId: string | undefined;

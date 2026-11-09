@@ -1,12 +1,24 @@
 # Reddit egress hardening — cross-repo rollout
 
-**Status (2026-09-22):** postiz-app and aisee-browser-extension are committed.
-aisee-app is **not started** and is the only thing blocking a user-visible
-regression from having been fully cleaned up.
+## Running without server Reddit access
 
-Three repos changed. They can ship **independently** — every step below is
-backwards compatible on its own — but the ORDER matters for one of them, and
-one repo is currently in a state where the UI is degraded until it ships.
+Set `REDDIT_EGRESS_MODE=extension` in the deployment environment and restart the
+backend and orchestrator so both processes read the new setting. This skips the
+server Reddit reads used by the two flows below. Keep this setting while the
+server has no working Reddit route. The diagnostics later in this document test
+server egress and may still return 403 in this mode.
+
+| Flow | Browser extension handoff | Verification |
+|---|---|---|
+| Operation plan | The server can reuse a monitored subreddit. When a target still needs lookup, it saves the draft with a pending target. The extension's background runner reads `/engage/reddit-targets/pending`, resolves the target with the user's Reddit session, and submits it to `/engage/reddit-targets/resolve`. | Generate a plan that needs a new Reddit target. Verify the pending item becomes a post with a subreddit after the extension runs. |
+| Add a subreddit | The web app sends `version: "v2"` to `/engage/monitored-channels/search`. With `needsExtension: true`, the page asks the extension for results through `aisee:reddit-channel-search`. Selecting a result uses the existing add endpoint. | Search from `/engage/keywords-accounts` with the updated extension installed and a Reddit session available. Verify that the picker shows results and that extension failures appear separately from an empty search. |
+
+Deploy a backend with both endpoint contracts before relying on the extension.
+The browser must have a build that includes the Reddit bridge and target runner.
+
+The sections below retain the original rollout context and record the frontend
+handoff needed for an outage. Verify which build is installed in each environment
+before switching the server to extension mode.
 
 ---
 
@@ -74,14 +86,14 @@ pnpm run build:backend && pnpm run build:orchestrator
 
 | Var | Prod value | Why |
 |---|---|---|
-| `REDDIT_PROXY` | **required**, residential exit | AWS IPs are WAF-blocked even with a loid. |
+| `REDDIT_PROXY` | Residential exit when using server reads | The server needs a working exit in `auto` mode. |
 | `REDDIT_DIRECT_READ` | leave unset | Setting it on this host enables a route that cannot work. |
-| `REDDIT_EGRESS_MODE` | unset (`auto`) | `extension` forces the extension path — useful only to TEST that path. |
+| `REDDIT_EGRESS_MODE` | `auto` with working server egress, `extension` during an outage | `extension` hands these Reddit reads to the browser. |
 | `REDDIT_USER_AGENT` | unset | Defaults to the browser UA. The Reddit-documented format self-identifies as a script and names an account. |
 
 ---
 
-## 2. aisee-browser-extension — DONE (committed, NOT released)
+## 2. aisee-browser-extension — Reddit bridge and target runner
 
 Commit `b75ee68`. 11 files.
 
@@ -97,38 +109,19 @@ Commit `b75ee68`. 11 files.
 The bridge is already injected into aisee-app's origins (`app.aisee.live`,
 `app-dev.aisee.live`, `localhost:3000`) — no manifest change needed.
 
-### Blocking
-
-**Committed but not packed/published.** Until a release ships, any
-`needsExtension` hand-off from aisee-app times out after 30s.
+Install a build containing the bridge and target runner before using extension
+mode. A browser with an older build will not answer a channel-search request.
 
 ---
 
-## 3. aisee-app — NOT STARTED
+## 3. aisee-app — Add a subreddit
 
-### 3a. Nothing is required right now
-
-The breaking change that broke "Add a subreddit" was **reverted**. The search
-endpoint answers a bare array again by default; the richer shape is opt-in via
-`version: "v2"` (commit `9afd52bb`).
-
-**So aisee-app needs no change to keep working.** Do not apply the unwrap patch
-that was circulated before that revert — it is no longer needed.
-
-### 3b. Optional: wire the extension fallback
-
-Only worth doing after the extension is released. Three pieces:
-
-1. New `app/(pages)/engage/_lib/request-reddit-channel-search.ts` — postMessage
-   round-trip to the bridge.
-2. `_lib/api.ts` — add `searchChannelsV2` sending `version: "v2"`. Leave the
-   existing `searchChannels` untouched.
-3. `_components/dialog-add-settings.tsx` — on `needsExtension`, re-run the
-   search through the extension.
-
-Surface the failure rather than swallowing it: "the extension is not installed"
-must not render as "no subreddit found". That conflation is exactly what made
-this incident take as long as it did.
+The search endpoint returns a bare array by default. The dialog opts in to
+`version: "v2"` through `searchChannelsV2` and accepts the legacy array when
+connected to an older backend. `lib/extension/reddit-channel-search.ts` handles
+the same-origin round trip when `needsExtension` is true. An extension error or
+timeout appears as a search failure. A successful empty result uses the existing
+empty state.
 
 ---
 
@@ -160,7 +153,7 @@ REDDIT_EGRESS_MODE=extension   # restart backend
 
 Then channel search returns `{ results: [], needsExtension: true }` for a `v2`
 caller, and parked plan posts appear on `GET /engage/reddit-targets/pending`.
-**Unset it afterwards.**
+Restore `auto` after the test if server egress is healthy.
 
 ---
 

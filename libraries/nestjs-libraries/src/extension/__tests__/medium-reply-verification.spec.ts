@@ -77,3 +77,53 @@ describe('attended Medium reply verification', () => {
     expect(db.rows('post')[0].state).not.toBe('PUBLISHED');
   });
 });
+
+describe('attended Dev.to retry recovery', () => {
+  const article = 'https://dev.to/alice/example-123';
+  const absence = { ...body, eventId: 'devto-absence', targetUrl: article, url: undefined,
+    status: 'definitely_not_submitted' as const, stopped: true, reviewedNotSent: true };
+
+  async function setupDevto(replyUrl = article) {
+    const fixture = await setup();
+    Object.assign(fixture.execution, { kind: 'EXTENSION', platform: 'devto',
+      target: { id: '123', idNamespace: 'devto.user_id' },
+      payload: [{ id: 'root', text: body.text, settings: JSON.stringify({ replyUrl }) }],
+    });
+    Object.assign(fixture.db.rows('sendIntent')[0], { platform: 'devto' });
+    return fixture;
+  }
+
+  it('settles the original send after review and releases the held quota', async () => {
+    const { service, db, execution } = await setupDevto();
+    await expect(service.verifySavedReply('org', 'user', execution.id, 'reply', absence)).resolves.toEqual({ status: 'retryable' });
+    expect(db.rows('sendIntent')[0]).toMatchObject({ status: 'FAILED_FINAL', activeExecutionId: null });
+    expect(db.rows('sendQuotaBucket')[0]).toMatchObject({ heldUnits: 0, confirmedUnits: 0 });
+  });
+
+  it('recovers an original www target and queues that same intent only on explicit retry', async () => {
+    const targetUrl = 'https://www.dev.to/alice/example-123/?source=feed';
+    const { service, db, execution } = await setupDevto(targetUrl);
+    const request = { ...absence, targetUrl };
+    await expect(service.verifySavedReply('org', 'user', execution.id, 'reply', request)).resolves.toEqual({ status: 'retryable' });
+    const intent = db.rows('sendIntent')[0];
+    expect(intent.status).toBe('FAILED_FINAL');
+    expect(db.rows('sendSegment')[0].status).toBe('NOT_SUBMITTED');
+
+    await expect(service.retry('org', 'root', 'user')).resolves.toEqual({ sendIntentId: intent.id, status: 'QUEUED' });
+    expect(db.rows('post')[0]).toMatchObject({ sendIntentId: intent.id, state: 'QUEUE' });
+    expect(db.rows('sendExecution')).toHaveLength(1);
+    await expect(service.verifySavedReply('org', 'user', execution.id, 'reply', request)).rejects.toThrow('SEND_RETRY_UNSAFE');
+  });
+
+  it.each(['owner', 'target', 'review', 'permit', 'replacement'])('preserves the original send when %s validation fails', async fault => {
+    const { service, db, execution } = await setupDevto();
+    const request = { ...absence };
+    if (fault === 'owner') db.rows('sendIntent')[0].policySnapshot = { policyOwnerUserId: 'other' };
+    if (fault === 'target') request.targetUrl = 'https://dev.to/alice/different';
+    if (fault === 'review') request.reviewedNotSent = false;
+    if (fault === 'permit') db.rows('sendSegment')[0].submitBefore = new Date(Date.now() + 30_000);
+    if (fault === 'replacement') db.rows('sendIntent')[0].fencingVersion++;
+    await expect(service.verifySavedReply('org', 'user', execution.id, 'reply', request)).rejects.toThrow();
+    expect(db.rows('sendIntent')[0].status).toBe('RECONCILING');
+  });
+});

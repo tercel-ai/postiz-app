@@ -11,6 +11,8 @@ import { databaseNameFromUrl } from './lib/database-url';
 
 export interface DiagnosisOptions {
   attempt?: string;
+  reply?: string;
+  user?: string;
   organization?: string;
   cursor?: string;
   limit: number;
@@ -24,13 +26,13 @@ export function parseOptions(args: string[]): DiagnosisOptions {
     const key = args[index];
     if (key === '--details') { details = true; continue; }
     const value = args[++index];
-    if (!['--attempt', '--organization', '--cursor', '--limit'].includes(key) || !value || value.startsWith('--'))
-      throw new Error('Expected --attempt ID, --organization ID, --cursor ID, or --limit NUMBER; --details enables outcome diagnostics');
+    if (!['--attempt', '--reply', '--user', '--organization', '--cursor', '--limit'].includes(key) || !value || value.startsWith('--'))
+      throw new Error('Expected --attempt ID, --reply ID, --user ID, --organization ID, --cursor ID, or --limit NUMBER; --details enables outcome diagnostics');
     values[key] = value;
   }
   const limit = Number(values['--limit'] ?? 100);
   if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error('Limit must be an integer from 1 to 1000');
-  return { attempt: values['--attempt'], organization: values['--organization'], cursor: values['--cursor'], limit, ...(details ? { details } : {}) };
+  return { attempt: values['--attempt'], reply: values['--reply'], user: values['--user'], organization: values['--organization'], cursor: values['--cursor'], limit, ...(details ? { details } : {}) };
 }
 
 export function assertDiagnosisDatabase(databaseUrl: string | undefined) {
@@ -52,13 +54,25 @@ export function summarizeSendEvidence(value: unknown) {
 }
 
 export async function diagnoseSendAttempts(db: PrismaClient, options: DiagnosisOptions) {
+  const nodesForUser = options.user ? await db.extensionNode.findMany({
+    where: { registeredByUserId: options.user, organizationId: options.organization },
+    select: { id: true },
+  }) : [];
   const attempts = await db.sendExecution.findMany({
     where: {
       kind: 'EXTENSION',
-      ...(options.attempt ? { id: options.attempt } : { segments: { some: {
+      ...(options.attempt ? { id: options.attempt } : options.reply || options.user ? {} : { segments: { some: {
         status: 'PENDING', permitHash: null, authorizedAt: null, submitBefore: null,
       } } }),
       ...(options.organization ? { organizationId: options.organization } : {}),
+      ...(options.reply ? { action: 'REPLY', intent: { rootPost: { engageSentReply: { id: options.reply } } } } : {}),
+      ...(options.user ? {
+        platform: 'devto', action: 'REPLY',
+        OR: [
+          { extensionNodeId: { in: nodesForUser.map(node => node.id) } },
+          { intent: { policySnapshot: { path: ['policyOwnerUserId'], equals: options.user } } },
+        ],
+      } : {}),
     },
     orderBy: { id: 'asc' }, take: options.limit,
     ...(options.cursor ? { cursor: { id: options.cursor }, skip: 1 } : {}),
@@ -116,7 +130,7 @@ export async function diagnoseSendAttempts(db: PrismaClient, options: DiagnosisO
 
 async function main() {
   if (process.argv.includes('--help')) {
-    console.log('Usage: pnpm exec ts-node --project scripts/tsconfig.json scripts/diagnose-send-attempts.ts [--attempt ID] [--organization ID] [--cursor ID] [--limit 100] [--details]');
+    console.log('Usage: pnpm exec ts-node --project scripts/tsconfig.json scripts/diagnose-send-attempts.ts [--attempt ID] [--reply ID] [--user ID (Dev.to replies)] [--organization ID] [--cursor ID] [--limit 100] [--details]');
     return;
   }
   const options = parseOptions(process.argv.slice(2));
