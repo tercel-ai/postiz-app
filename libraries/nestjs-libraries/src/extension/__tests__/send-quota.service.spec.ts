@@ -236,8 +236,16 @@ describe('existing send policy and quota compatibility', () => {
     expect(automatic.budgets.find(b => b.dimension === 'REPLY_ROOTS_AUTO')).toMatchObject({ limit: 4, enforce: true });
   });
 
-  it('allows a manual reply after account pacing while retaining automatic project spacing', async () => {
+  it('allows a manual reply beyond the plan target after account pacing while retaining automatic project spacing', async () => {
     const { db, service, create, quotas } = await policy();
+    db.seed('operationPlan', {
+      organizationId: 'org',
+      projectId: 'project',
+      status: 'READY',
+      startsAt: new Date('2026-10-01'),
+      endsAt: new Date('2026-11-01'),
+      planPayload: { engagePolicies: [{ platform: 'x', enabled: true, targetRepliesPerDay: 1 }] },
+    });
     Object.assign(db.rows('engageConfig')[0].metadata.replyPolicies.x, {
       dailyReplyLimit: 4, windowStart: '08:00', windowEnd: '18:00', timezone: 'UTC',
     });
@@ -298,7 +306,7 @@ describe('existing send policy and quota compatibility', () => {
         ?.windowStart.toISOString()
     ).toBe('2026-10-14T16:00:00.000Z');
   });
-  it('applies manual plan and keyword limits without turning them into automatic hard caps', async () => {
+  it('keeps operation-plan targets out of manual posting and reply authorization', async () => {
     const { db, quotas, intent, account } = await policy();
     db.seed('operationPlan', {
       organizationId: 'org',
@@ -331,20 +339,17 @@ describe('existing send policy and quota compatibility', () => {
       0,
       now
     );
-    expect(
-      manual.budgets.find(
-        (b) => b.dimension === 'REPLY_ROOTS_PLAN' && b.scope === 'PROJECT'
-      )
-    ).toMatchObject({ limit: 2, enforce: true });
-    expect(
-      manual.budgets.find((b) => b.scope === 'PROJECT_KEYWORD')
-    ).toMatchObject({ limit: 1, keyword: 'keyword' });
-    expect(
-      automatic.budgets.find((b) => b.dimension === 'REPLY_ROOTS_PLAN')
-    ).toMatchObject({ enforce: false });
+    for (const plan of [manual, automatic]) {
+      expect(plan.budgets.some(b => b.dimension === 'REPLY_ROOTS_PLAN')).toBe(false);
+      expect(plan.budgets.some(b => b.scope === 'PROJECT_KEYWORD')).toBe(false);
+      expect(plan.budgets.find(b => b.dimension === 'REPLY_WRITES')).toBeDefined();
+    }
+    expect(manual.budgets.find(b => b.dimension === 'REPLY_ROOTS_AUTO')).toMatchObject({ enforce: false });
     expect(
       automatic.budgets.find((b) => b.dimension === 'REPLY_ROOTS_AUTO')
     ).toMatchObject({ enforce: true });
+    const manualPost = await quotas.resolve(db as any, { ...intent, action: 'POST' }, account, 0, now);
+    expect(manualPost.budgets.map(b => b.dimension)).toEqual(['PLATFORM_WRITES']);
   });
   it('stops new automatic permits when Automation is disabled while allowing manual requests', async () => {
     const { db, quotas, intent, account } = await policy();

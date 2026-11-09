@@ -208,7 +208,7 @@ export class SendQuotaService {
         { accountKey: intent.canonicalAccountKey! }
       );
       const context = (intent as SendIntent & { context?: unknown })
-        .context as { channel?: string; matchedKeywords?: string[] } | null;
+        .context as { channel?: string } | null;
       const channelLimit = resolveChannelDailyLimits(
         values.get(ENGAGE_REPLY_CHANNEL_LIMIT_KEY)
       )[intent.platform];
@@ -218,6 +218,7 @@ export class SendQuotaService {
           channel: context.channel,
         });
       if (intent.action === 'REPLY' && segmentIndex === 0) {
+        // Automation settings govern project reply admission. Operation-plan targets describe planned activity.
         const schedule = resolveReplySchedule(policy, intent.platform, {
           ceilings,
           warmupDays: age,
@@ -297,68 +298,6 @@ export class SendQuotaService {
             now.getTime() < last.confirmedAt.getTime() + projectGapMs
           )
             throw new ForbiddenException('PROJECT_REPLY_INTERVAL');
-        }
-        const utcDay = localDayRange('UTC', now);
-        const plan = await tx.operationPlan.findFirst({
-          where: {
-            organizationId: intent.organizationId,
-            projectId: intent.projectId,
-            status: 'READY',
-            startsAt: { lte: utcDay.since },
-            endsAt: { gte: utcDay.since },
-          },
-          orderBy: { createdAt: 'desc' },
-        });
-        const planPolicy = (
-          (plan?.planPayload as any)?.engagePolicies as any[] | undefined
-        )?.find((p) => p?.platform === intent.platform && p.enabled === true);
-        if (planPolicy) {
-          const target =
-            planPolicy.dailyTargets?.find(
-              (d: any) => d.date === utcDay.since.toISOString().slice(0, 10)
-            )?.target ?? planPolicy.targetRepliesPerDay;
-          const caps = [
-            target,
-            planPolicy.dailyHardCap ?? planPolicy.hardCapRepliesPerDay,
-          ].filter(integer);
-          if (caps.length)
-            add(
-              'PROJECT',
-              'REPLY_ROOTS_PLAN',
-              Math.min(...caps),
-              utcDay,
-              'UTC',
-              {
-                projectId: intent.projectId,
-                platform: intent.platform,
-                enforce: !automatic,
-              }
-            );
-          const raw = planPolicy.keywordTargets ?? {};
-          const keywords = Object.keys(raw).length
-            ? await tx.engageKeyword.findMany({
-                where: {
-                  organizationId: intent.organizationId,
-                  id: { in: Object.keys(raw) },
-                },
-                select: { id: true, keyword: true },
-              })
-            : [];
-          const labels = new Map(keywords.map((k) => [k.id, k.keyword]));
-          for (const [id, limit] of Object.entries(raw)) {
-            const keyword = labels.get(id) ?? id;
-            if (
-              integer(limit) &&
-              limit > 0 &&
-              context?.matchedKeywords?.includes(keyword)
-            )
-              add('PROJECT_KEYWORD', 'REPLY_ROOTS_PLAN', limit, utcDay, 'UTC', {
-                projectId: intent.projectId,
-                platform: intent.platform,
-                keyword,
-                enforce: !automatic,
-              });
-          }
         }
       }
     } else {
