@@ -1,3 +1,4 @@
+import { ForbiddenException } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupSend, sendNow } from './support/send-fixture';
 import { sendBusinessSummary } from '../send-business-summary';
@@ -169,6 +170,58 @@ describe('owner retry of a saved reply', () => {
     expect(await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request())).toEqual(result);
   });
 
+
+
+  it('uses manual admission for user-approved automation retries, including already requeued replies', async () => {
+    const f = await uncertainReply();
+    const intent = f.db.rows('sendIntent')[0];
+    intent.sendOrigin = 'AUTOMATION';
+    const originalContext = f.db.rows('sendExecution')[0].context;
+    const resolve = vi.mocked(f.quotas.resolve);
+    const plan = await f.quotas.resolve(f.db as any, intent, f.db.rows('accountWriteState')[0], 0, new Date());
+    resolve.mockImplementation(async (_tx, effective) => {
+      if (effective.sendOrigin === 'AUTOMATION') throw new ForbiddenException('PROJECT_REPLY_INTERVAL');
+      return { ...plan, budgets: [] };
+    });
+    const reply = f.db.rows('post')[0];
+    const session = { integrationId: 'account', verificationStatus: 'VERIFIED',
+      verificationExpiresAt: new Date(Date.now() + 60000), accountIdentity: { id: '123', namespace: 'x.rest_id' } } as any;
+    await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply',
+      { ...request(), confirmDuplicateRisk: true });
+    // Simulate a request queued before the manual retry marker existed.
+    f.db.rows('sendIntent')[0].context = null;
+    expect(await f.service.claimabilityReasonIn(f.db as any, 'org', reply, session, 'REPLY', new Date())).toBeNull();
+    const next = await f.service.reserveApi('org', 'root', 'manual-retry', new Date());
+    expect(next.context).toMatchObject({ manualReplyRetry: true });
+    expect(f.db.rows('sendIntent')[0].sendOrigin).toBe('AUTOMATION');
+    expect(f.db.rows('sendExecution')[0].context).toEqual(originalContext);
+    expect((await f.service.authorizeApiSegment('org', next.id, 0, { id: '123', idNamespace: 'x.rest_id' }, new Date())).granted)
+      .toBe(true);
+  });
+
+  it('marks an explicit retry of a definitively failed automatic reply as manual', async () => {
+    const f = await uncertainReply();
+    Object.assign(f.db.rows('sendIntent')[0], { sendOrigin: 'AUTOMATION', status: 'FAILED_FINAL',
+      activeExecutionId: null, context: { matchedKeywords: ['agents'] } });
+    f.db.rows('sendExecution')[0].status = 'FAILED_FINAL';
+    f.db.rows('sendSegment')[0].status = 'NOT_SUBMITTED';
+    f.db.rows('post')[0].state = 'ERROR';
+    await f.service.retry('org', 'root', 'user');
+    expect(f.db.rows('sendIntent')[0]).toMatchObject({ status: 'QUEUED', sendOrigin: 'AUTOMATION',
+      context: { manualReplyRetry: true, matchedKeywords: ['agents'] } });
+  });
+
+  it('blocks reserving or authorizing a reply that already has a published receipt', async () => {
+    const f = await uncertainReply(true);
+    await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request());
+    const next = await f.service.reserveApi('org', 'root', 'manual-retry', new Date());
+    f.db.rows('post')[0].releaseURL = 'https://x.com/alice/status/321';
+    await expect(f.service.authorizeApiSegment('org', next.id, 0, { id: '123', idNamespace: 'x.rest_id' }, new Date()))
+      .rejects.toThrow('CONTENT_ALREADY_SUBMITTED');
+    Object.assign(f.db.rows('sendIntent')[0], { status: 'QUEUED', activeExecutionId: null });
+    await expect(f.service.reserveApi('org', 'root', 'another-retry', new Date())).rejects.toThrow('CONTENT_NOT_SENDABLE');
+    expect(f.db.rows('sendExecution')).toHaveLength(2);
+  });
 
   it('returns duplicate-risk review without writing or locking send settings', async () => {
     const f = await uncertainReply();

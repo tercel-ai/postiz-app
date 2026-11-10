@@ -244,9 +244,33 @@ export class SendCoordinatorService {
     return account;
   }
 
+  private manualReplyRetryContext(intent: SendIntent) {
+    if (intent.action !== 'REPLY' || intent.sendOrigin !== 'AUTOMATION') return undefined;
+    return sendJson({ ...(intent.context as Record<string, unknown> | null), manualReplyRetry: true });
+  }
+
+  private async replyAdmissionIntent(tx: Prisma.TransactionClient, intent: SendIntent): Promise<SendIntent> {
+    if (intent.action !== 'REPLY' || intent.sendOrigin !== 'AUTOMATION') return intent;
+    const context = intent.context as { manualReplyRetry?: boolean } | null;
+    // Earlier owner retries recorded the decision by superseding the original execution.
+    const manualRetry = context?.manualReplyRetry === true || await tx.sendExecution.findFirst({
+      where: { organizationId: intent.organizationId, sendIntentId: intent.id, status: 'RETRY_REQUESTED' },
+      select: { id: true },
+    });
+    return manualRetry ? { ...intent, sendOrigin: 'MANUAL' } : intent;
+  }
+
+  private async replyAlreadyPublishedIn(tx: Prisma.TransactionClient, post: import('@prisma/client').Post) {
+    return post.state === 'PUBLISHED' || !!post.releaseId || !!post.releaseURL ||
+      !!await tx.sendSegment.findFirst({
+        where: { organizationId: post.organizationId, postId: post.id, status: 'CONFIRMED' },
+        select: { id: true },
+      });
+  }
+
   async accountWriteNotBeforeIn(tx: Prisma.TransactionClient, intent: SendIntent,
     account: AccountWriteState, index: number, now: Date) {
-    const plan = await this.quotas.resolve(tx, intent, account, index, now);
+    const plan = await this.quotas.resolve(tx, await this.replyAdmissionIntent(tx, intent), account, index, now);
     return accountWriteNotBefore(account, plan.gapMs);
   }
 
@@ -265,6 +289,7 @@ export class SendCoordinatorService {
     if (intent.routeRevision !== post.routeRevision || intent.contentRevision !== post.contentRevision) return 'SEND_INTENT_REVISION_MISMATCH';
     if (!['QUEUED', 'RESERVED'].includes(intent.status)) return 'SEND_INTENT_NOT_QUEUED';
     if (intent.hasConfirmedSegments) return 'SEND_INTENT_ALREADY_PARTIALLY_CONFIRMED';
+    if (action === 'REPLY' && await this.replyAlreadyPublishedIn(tx, post)) return 'CONTENT_ALREADY_SUBMITTED';
     if (!session.integrationId || session.verificationStatus !== 'VERIFIED' || !session.verificationExpiresAt || session.verificationExpiresAt <= now) return 'SESSION_NOT_VERIFIED_OR_EXPIRED';
     const owner = (intent.policySnapshot as { policyOwnerUserId?: string }).policyOwnerUserId;
     const member = owner ? await tx.userOrganization.findUnique({
@@ -1068,6 +1093,7 @@ export class SendCoordinatorService {
       },
     });
     if (prior) return prior;
+    if (intent.action === 'REPLY' && await this.replyAlreadyPublishedIn(tx, root)) reject('CONTENT_NOT_SENDABLE');
     if (intent.activeExecutionId) {
       const previous = await tx.sendExecution.findUniqueOrThrow({
         where: { id: intent.activeExecutionId },
@@ -1101,6 +1127,8 @@ export class SendCoordinatorService {
         contentHash: postSendHash(p),
       }))
     );
+    const admission = await this.replyAdmissionIntent(tx, intent);
+    const context = (admission.sendOrigin !== intent.sendOrigin ? this.manualReplyRetryContext(intent) : undefined) ?? intent.context;
     const execution = await tx.sendExecution.create({
       data: {
         organizationId: org,
@@ -1116,9 +1144,7 @@ export class SendCoordinatorService {
         integrationId: intent.integrationId,
         canonicalAccountKey: intent.canonicalAccountKey,
         target: intent.target as Prisma.InputJsonValue,
-        ...(intent.context
-          ? { context: intent.context as Prisma.InputJsonValue }
-          : {}),
+        ...(context ? { context: context as Prisma.InputJsonValue } : {}),
         fencingVersion: intent.fencingVersion + 1,
         routeRevision: intent.routeRevision,
         contentRevision: intent.contentRevision,
@@ -1286,6 +1312,8 @@ export class SendCoordinatorService {
       postSendHash(post) !== segment.contentHash
     )
       reject('SEND_CONTENT_CHANGED');
+    if (intent.action === 'REPLY' && (intent.hasConfirmedSegments || await this.replyAlreadyPublishedIn(tx, post)))
+      reject('CONTENT_ALREADY_SUBMITTED');
     if (post.publishDate && post.publishDate > now) reject('SEND_NOT_DUE');
     if (index > 0) {
       const parent = await tx.sendSegment.findUnique({
@@ -1299,7 +1327,7 @@ export class SendCoordinatorService {
       if (parent?.status !== 'CONFIRMED')
         reject('PREVIOUS_SEGMENT_NOT_CONFIRMED');
     }
-    const plan = await this.quotas.resolve(tx, intent, account, index, now);
+    const plan = await this.quotas.resolve(tx, await this.replyAdmissionIntent(tx, intent), account, index, now);
     const next = accountWriteNotBefore(account, plan.gapMs);
     if (next && next > now) reject('ACCOUNT_WRITE_INTERVAL');
     const submitBefore = new Date(
@@ -2022,6 +2050,7 @@ export class SendCoordinatorService {
       } });
       await tx.sendIntent.update({ where: { id: intent.id }, data: {
         status: 'QUEUED', activeExecutionId: null, fencingVersion: { increment: 1 }, revision: { increment: 1 },
+        context: this.manualReplyRetryContext(intent),
       } });
       await tx.accountWriteState.updateMany({ where: { id: account.id, activeExecutionId: executionId }, data: { activeExecutionId: null } });
       await tx.post.updateMany({ where: { organizationId: org, sendIntentId: intent.id }, data: { state: 'QUEUE', error: null, publishDate: now } });
@@ -2201,7 +2230,7 @@ export class SendCoordinatorService {
         reject('SEND_RETRY_UNSAFE');
       await tx.sendIntent.update({
         where: { id: intent.id },
-        data: { status: 'QUEUED', revision: { increment: 1 } },
+        data: { status: 'QUEUED', revision: { increment: 1 }, context: this.manualReplyRetryContext(intent) },
       });
       await tx.post.updateMany({
         where: { organizationId: org, sendIntentId: intent.id },
