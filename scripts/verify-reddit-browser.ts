@@ -64,6 +64,11 @@ async function openRedditPage(page: Page, url: URL) {
   if (!response?.ok())
     throw new Error(`Unexpected HTTP status ${status ?? 'unknown'}.`);
   if (
+    /^Reddit\s*[-–—]\s*Prove your humanity$/i.test((await page.title()).trim())
+  ) {
+    throw new Error('Reddit requires human verification.');
+  }
+  if (
     current.origin !== REDDIT ||
     current.pathname.replace(/\/$/, '').toLowerCase() !==
       url.pathname.replace(/\/$/, '').toLowerCase()
