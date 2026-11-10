@@ -3,14 +3,17 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
-import { chromium, type Page } from 'playwright';
+import { chromium, type Page, type Response } from 'playwright';
 
 const REDDIT = 'https://www.reddit.com';
 const TIMEOUT_MS = 15_000;
 const SUBREDDIT_PATH = /^\/r\/([a-z\d_]{2,21})\/?$/i;
-const COMMUNITY_LINK = /^\s*r\/[a-z\d_]{2,21}\b/i;
+const MAIN_CONTENT = 'main, [role="main"], #main-content';
+const COMMUNITY_LINK = 'a[href^="/r/"], a[href^="https://www.reddit.com/r/"]';
 const EMPTY_SEARCH =
-  /^(no (?:search )?results(?: found)?|we couldn.t find any (?:communities|results)(?: for.*)?)[.!]?$/i;
+  /^(no (?:search )?results(?: found)?|we couldn.t find (?:any (?:communities|results)|a match)(?: for.*)?)[.!]?$/i;
+const ACCESS_BLOCK =
+  /^(?:(?:you.ve been|your request has been) blocked (?:due to|by) (?:network security|a network policy)|whoa there, pardner|checking your browser|verify (?:that )?you(?: are|.re) human)/i;
 const USAGE = `Usage: pnpm exec ts-node --project scripts/tsconfig.json scripts/verify-reddit-browser.ts [query] [subreddit] [options]
 
   Defaults: query=aiagents, subreddit=aiagents
@@ -47,6 +50,9 @@ async function openRedditPage(page: Page, url: URL) {
   const response = await page.goto(url.href, { waitUntil: 'domcontentloaded' });
   const status = response?.status();
   const current = new URL(page.url());
+  console.log(
+    `[HTTP] ${status ?? 'unknown'} ${current.origin}${current.pathname}`
+  );
   if (status === 403 || status === 429)
     throw new Error(`Reddit returned HTTP ${status}.`);
   if (
@@ -59,19 +65,13 @@ async function openRedditPage(page: Page, url: URL) {
     throw new Error(`Unexpected HTTP status ${status ?? 'unknown'}.`);
   if (
     current.origin !== REDDIT ||
-    current.pathname.replace(/\/$/, '') !== url.pathname.replace(/\/$/, '')
+    current.pathname.replace(/\/$/, '').toLowerCase() !==
+      url.pathname.replace(/\/$/, '').toLowerCase()
   ) {
     throw new Error('Reddit redirected away from the requested page.');
   }
-  if (
-    await page
-      .getByText(
-        /^(you.ve been blocked by network security|whoa there, pardner!?)/i
-      )
-      .first()
-      .isVisible()
-  ) {
-    throw new Error('Reddit displayed an access block.');
+  if (await page.getByText(ACCESS_BLOCK).filter({ visible: true }).count()) {
+    throw new Error('Reddit displayed an access block or browser challenge.');
   }
 }
 
@@ -86,14 +86,17 @@ async function searchCommunities(page: Page, query: string) {
     throw new Error('Reddit did not open the Communities search tab.');
   }
 
-  const main = page.getByRole('main');
-  const links = main
-    .locator('a[href^="/r/"], a[href^="https://www.reddit.com/r/"]')
-    .filter({ hasText: COMMUNITY_LINK });
-  const empty = main.getByText(EMPTY_SEARCH).first();
+  // Search cards can link a display title such as "Python" to /r/Python/.
+  const links = page
+    .locator(MAIN_CONTENT)
+    .locator(COMMUNITY_LINK)
+    .filter({ visible: true });
+  const empty = page.getByText(EMPTY_SEARCH).filter({ visible: true });
+  const block = page.getByText(ACCESS_BLOCK).filter({ visible: true });
   await links
     .first()
     .or(empty)
+    .or(block)
     .first()
     .waitFor({ state: 'visible' })
     .catch(() => {
@@ -101,6 +104,9 @@ async function searchCommunities(page: Page, query: string) {
         'No community results or recognized empty state appeared.'
       );
     });
+  if (await block.count()) {
+    throw new Error('Reddit displayed an access block or browser challenge.');
+  }
 
   const communities = new Map<string, string>();
   for (const href of await links.evaluateAll((items) =>
@@ -112,7 +118,7 @@ async function searchCommunities(page: Page, query: string) {
   }
   if (!communities.size) {
     throw new Error(
-      (await empty.isVisible())
+      (await empty.count())
         ? 'Reddit showed an empty search result.'
         : 'No valid subreddit links were found.'
     );
@@ -141,6 +147,63 @@ async function verifySubreddit(page: Page, subreddit: string) {
       );
     });
   console.log(`[PASS] Exact community opened: r/${subreddit}`);
+}
+
+async function runCheck(
+  page: Page,
+  pass: string,
+  label: string,
+  check: () => Promise<void>
+) {
+  const started = Date.now();
+  const failedRequests = new Set<string>();
+  const onResponse = (response: Response) => {
+    if (
+      response.status() < 400 ||
+      !['fetch', 'xhr'].includes(response.request().resourceType())
+    )
+      return;
+    const url = new URL(response.url());
+    if (url.origin === REDDIT && failedRequests.size < 5) {
+      failedRequests.add(`${response.status()} ${url.pathname}`);
+    }
+  };
+  page.on('response', onResponse);
+  try {
+    await check();
+    return true;
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message.split('\n')[0] : String(error);
+    console.error(`[FAIL] ${label}: ${message}`);
+    const [title, mainLinks, pageLinks] = await Promise.all([
+      page.title().catch(() => '(unavailable)'),
+      page
+        .locator(MAIN_CONTENT)
+        .locator(COMMUNITY_LINK)
+        .filter({ visible: true })
+        .count()
+        .catch(() => -1),
+      page
+        .locator(COMMUNITY_LINK)
+        .filter({ visible: true })
+        .count()
+        .catch(() => -1),
+    ]);
+    console.log(
+      `[page] title=${JSON.stringify(
+        title.slice(0, 120)
+      )} visibleRedditLinks=${mainLinks} in main, ${pageLinks} total`
+    );
+    if (failedRequests.size)
+      console.log(
+        `[page] Failed Reddit data requests: ${[...failedRequests].join(', ')}`
+      );
+    return false;
+  } finally {
+    page.off('response', onResponse);
+    console.log(`[${pass}] ${label} took ${Date.now() - started} ms`);
+  }
 }
 
 async function main() {
@@ -209,22 +272,21 @@ async function main() {
         }
       }
 
-      for (const [label, check] of [
-        ['Communities search', () => searchCommunities(page, query)],
-        ['Exact community', () => verifySubreddit(page, subreddit)],
-      ] as const) {
-        const started = Date.now();
-        try {
-          await check();
-        } catch (error) {
-          const message =
-            error instanceof Error
-              ? error.message.split('\n')[0]
-              : String(error);
-          throw new Error(`${label}: ${message}`);
-        } finally {
-          console.log(`[${pass}] ${label} took ${Date.now() - started} ms`);
-        }
+      const searchPassed = await runCheck(
+        page,
+        pass,
+        'Communities search',
+        () => searchCommunities(page, query)
+      );
+      const exactPassed = await runCheck(page, pass, 'Exact community', () =>
+        verifySubreddit(page, subreddit)
+      );
+      if (!searchPassed || !exactPassed) {
+        throw new Error(
+          `[${pass}] Search ${
+            searchPassed ? 'passed' : 'failed'
+          }; exact lookup ${exactPassed ? 'passed' : 'failed'}.`
+        );
       }
 
       const userMenu = page
