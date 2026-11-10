@@ -1887,7 +1887,7 @@ export class SendCoordinatorService {
   }
 
   /** Resolve only the original single-post scope; never grant general execution access. */
-  private async postReviewScope(tx: Prisma.TransactionClient, org: string, user: string, executionId: string, rootPostId: string) {
+  private async singleSendReviewScope(tx: Prisma.TransactionClient, org: string, user: string, executionId: string, rootPostId: string, action: 'POST' | 'REPLY' = 'POST') {
     await this.assertMember(tx, org, user);
     const execution = await this.execution(tx, org, executionId);
     const intent = await tx.sendIntent.findFirst({ where: { id: execution.sendIntentId, organizationId: org } });
@@ -1896,7 +1896,7 @@ export class SendCoordinatorService {
     const owner = (intent?.policySnapshot as { policyOwnerUserId?: string } | null)?.policyOwnerUserId;
     if (owner !== user && node?.registeredByUserId !== user)
       throw new ForbiddenException('SEND_POST_REVIEW_PERMISSION_REQUIRED');
-    if (!intent || !post || execution.kind !== 'EXTENSION' || execution.action !== 'POST' || intent.action !== 'POST' ||
+    if (!intent || !post || execution.kind !== 'EXTENSION' || execution.action !== action || intent.action !== action ||
         intent.rootPostId !== rootPostId || post.sendIntentId !== intent.id || post.projectId !== execution.projectId ||
         intent.projectId !== execution.projectId || intent.platform !== execution.platform ||
         canonicalControlledPlatform(post.providerIdentifier!) !== execution.platform ||
@@ -1934,7 +1934,7 @@ export class SendCoordinatorService {
 
   async postReview(org: string, user: string, executionId: string, rootPostId: string) {
     return sendTransaction(this.db, async tx => {
-      const { execution, intent, segment } = await this.postReviewScope(tx, org, user, executionId, rootPostId);
+      const { execution, intent, segment } = await this.singleSendReviewScope(tx, org, user, executionId, rootPostId);
       await this.assertPostReviewStopped(tx, execution, intent, segment, new Date());
       const mode = await this.modes.stateIn(tx, org);
       const account = await tx.accountWriteState.findUnique({ where: { organizationId_canonicalAccountKey: {
@@ -1951,6 +1951,18 @@ export class SendCoordinatorService {
   /** An explicit owner request supersedes uncertainty without claiming non-submission. */
   async retryUnconfirmedPost(org: string, user: string, executionId: string, rootPostId: string,
     body: { requestId: string; expectedResolutionRevision: number }) {
+    return this.requeueUnconfirmedSend(org, user, executionId, { rootPostId }, body);
+  }
+
+  async retryUnconfirmedReply(org: string, user: string, executionId: string, sentReplyId: string,
+    body: { requestId: string; expectedResolutionRevision: number; confirmDuplicateRisk?: boolean }) {
+    const result = await this.requeueUnconfirmedSend(org, user, executionId, { sentReplyId }, body);
+    return result.status === 'QUEUED' ? { status: 'requeued' as const } : result;
+  }
+
+  private async requeueUnconfirmedSend(org: string, user: string, executionId: string,
+    scope: { rootPostId: string; sentReplyId?: never } | { sentReplyId: string; rootPostId?: never },
+    body: { requestId: string; expectedResolutionRevision: number; confirmDuplicateRisk?: boolean }) {
     if (!body.requestId?.trim() || body.requestId.length > 128 || !Number.isSafeInteger(body.expectedResolutionRevision) || body.expectedResolutionRevision < 0)
       throw new BadRequestException('INVALID_SEND_RETRY_REQUEST');
     await this.enabled(org);
@@ -1962,25 +1974,48 @@ export class SendCoordinatorService {
       if ((originalIntent.policySnapshot as { policyOwnerUserId?: string } | null)?.policyOwnerUserId !== user && node?.registeredByUserId !== user)
         throw new ForbiddenException('SEND_POST_REVIEW_PERMISSION_REQUIRED');
       await this.projects.assertProjectAccess(org, original.projectId);
+      const reply = scope.sentReplyId ? await tx.engageSentReply.findFirst({ where: {
+        id: scope.sentReplyId, organizationId: org, projectId: original.projectId, postId: originalIntent.rootPostId,
+      } }) : null;
+      const rootPostId = reply?.postId ?? scope.rootPostId;
+      if (!rootPostId) reject('SEND_REPLY_VERIFICATION_SCOPE_MISMATCH');
+      if (reply) {
+        const post = await tx.post.findFirst({ where: {
+          id: rootPostId, organizationId: org, projectId: original.projectId, sendIntentId: originalIntent.id, deletedAt: null,
+        } });
+        if (!post || post.error?.startsWith('Manually marked failed: ') || original.action !== 'REPLY' || originalIntent.action !== 'REPLY')
+          reject('SEND_REPLY_VERIFICATION_SCOPE_MISMATCH');
+        if (post.state === 'PUBLISHED' || originalIntent.status === 'SUCCEEDED')
+          return { status: 'published' as const, ...(post.releaseURL ? { url: post.releaseURL } : {}) };
+      }
       const key = { organizationId: org, userId: user, operation: `owner-send-retry:${executionId}`, requestId: body.requestId };
-      const requestHash = sendHash({ rootPostId, expectedResolutionRevision: body.expectedResolutionRevision });
+      const requestHash = sendHash({ rootPostId, expectedResolutionRevision: body.expectedResolutionRevision,
+        ...(reply ? { sentReplyId: reply.id, confirmDuplicateRisk: body.confirmDuplicateRisk === true } : {}) });
       const prior = await tx.sendMutationReceipt.findUnique({ where: { organizationId_userId_operation_requestId: key } });
       if (prior) {
         if (prior.requestHash !== requestHash) reject('SEND_RETRY_REQUEST_CONFLICT');
         return prior.result as { sendIntentId: string; status: 'QUEUED' };
       }
+      if (reply && (originalIntent.activeExecutionId !== executionId || original.leaseExpiresAt > new Date() ||
+          ['RESERVED', 'SENDING'].includes(original.status)))
+        return { status: 'waiting' as const };
       await this.assertControlledIn(tx, org);
       await this.projects.assertProjectActive(org, original.projectId);
       const account = await tx.accountWriteState.findUniqueOrThrow({ where: { organizationId_canonicalAccountKey: {
         organizationId: org, canonicalAccountKey: original.canonicalAccountKey,
       } } });
       if (!account.rolloutReady) reject('ACCOUNT_COORDINATION_AUDIT_REQUIRED');
-      const locked = await tx.accountWriteState.updateMany({ where: { id: account.id, revision: account.revision }, data: { revision: { increment: 1 } } });
-      if (locked.count !== 1) reject('ACCOUNT_WRITE_STATE_CHANGED');
-      const { execution, intent, segment } = await this.postReviewScope(tx, org, user, executionId, rootPostId);
+      const { execution, intent, segment } = await this.singleSendReviewScope(tx, org, user, executionId, rootPostId, reply ? 'REPLY' : 'POST');
       if (execution.resolutionRevision !== body.expectedResolutionRevision) reject('SEND_RESOLUTION_REVISION_CONFLICT');
       const now = new Date();
+      if (reply && (segment.submitBefore && segment.submitBefore > now ||
+          account.activeExecutionId && account.activeExecutionId !== executionId))
+        return { status: 'waiting' as const };
       await this.assertPostReviewStopped(tx, execution, intent, segment, now);
+      if (reply && (segment.authorizedAt || segment.submitBefore || segment.permitHash) && body.confirmDuplicateRisk !== true)
+        return { status: 'review-required' as const, reason: 'The previous attempt may already have posted this reply. Retrying could create a duplicate.' };
+      const locked = await tx.accountWriteState.updateMany({ where: { id: account.id, revision: account.revision }, data: { revision: { increment: 1 } } });
+      if (locked.count !== 1) reject('ACCOUNT_WRITE_STATE_CHANGED');
       await tx.sendExecution.update({ where: { id: executionId }, data: {
         status: 'RETRY_REQUESTED', resolutionRevision: { increment: 1 }, lastProgressAt: now,
       } });
@@ -2002,7 +2037,7 @@ export class SendCoordinatorService {
       reject('SEND_POST_ABSENCE_REVIEW_REQUIRED');
     if (!body.eventId?.trim() || body.eventId.length > 128) throw new BadRequestException('INVALID_SEND_OUTCOME');
     return sendTransaction(this.db, async tx => {
-      const { execution, intent, segment } = await this.postReviewScope(tx, org, user, executionId, rootPostId);
+      const { execution, intent, segment } = await this.singleSendReviewScope(tx, org, user, executionId, rootPostId);
       const event: SendOutcome = {
         eventId: `post-review:${user}:${sendHash(body.eventId)}`, status: 'definitely_not_submitted', stopped: true,
         evidence: `Post reviewer ${user} verified the target account has no published post and closed all original drafts.`,

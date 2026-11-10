@@ -148,3 +148,56 @@ it.each([{requestId:'',expectedResolutionRevision:0},{requestId:'x',expectedReso
  const f=await uncertainPost();await expect(retry(f,body)).rejects.toThrow('INVALID_SEND_RETRY_REQUEST');
  expect(f.db.rows('sendIntent')[0].activeExecutionId).toBe(f.execution.id);
 });
+
+describe('owner retry of a saved reply', () => {
+  async function uncertainReply(unpermitted = false) {
+    const f = await uncertainPost();
+    Object.assign(f.db.rows('post')[0], { source: 'engage' });
+    Object.assign(f.db.rows('sendIntent')[0], { action: 'REPLY' });
+    Object.assign(f.db.rows('sendExecution')[0], { action: 'REPLY' });
+    f.db.seed('engageSentReply', { id: 'reply', organizationId: 'org', projectId: 'project', postId: 'root' });
+    if (unpermitted) Object.assign(f.db.rows('sendSegment')[0], { authorizedAt: null, submitBefore: null, permitHash: null });
+    return f;
+  }
+
+  it('requeues the X reply on a different browser without a submission permit', async () => {
+    const f = await uncertainReply(true);
+    const result = await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request());
+    expect(result).toMatchObject({ status: 'requeued' });
+    expect(f.db.rows('sendIntent')[0]).toMatchObject({ status: 'QUEUED', activeExecutionId: null });
+    expect(f.db.rows('sendExecution')[0]).toMatchObject({ status: 'RETRY_REQUESTED' });
+    expect(await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request())).toEqual(result);
+  });
+
+  it('requires consent for a stopped reply that had a permit', async () => {
+    const f = await uncertainReply();
+    expect(await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request()))
+      .toMatchObject({ status: 'review-required' });
+    expect(f.db.rows('sendIntent')[0].status).toBe('RECONCILING');
+    expect(await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply',
+      { ...request(), confirmDuplicateRisk: true })).toMatchObject({ status: 'requeued' });
+    expect(f.db.rows('sendQuotaReservation')[0].state).toBe('HELD');
+  });
+
+  it('leaves a live reply alone and returns the link when already published', async () => {
+    const f = await uncertainReply();
+    f.db.rows('sendExecution')[0].leaseExpiresAt = new Date(Date.now() + 60_000);
+    expect(await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply',
+      { ...request(), confirmDuplicateRisk: true })).toMatchObject({ status: 'waiting' });
+    expect(f.db.rows('sendIntent')[0].activeExecutionId).toBe(f.execution.id);
+    const url = 'https://x.com/alice/status/321';
+    Object.assign(f.db.rows('post')[0], { state: 'PUBLISHED', releaseURL: url, releaseId: '321' });
+    expect(await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request()))
+      .toEqual({ status: 'published', url });
+    expect(f.db.rows('sendMutationReceipt')).toHaveLength(0);
+  });
+
+  it('rejects a mismatched reply ID and a user outside the original owner scope', async () => {
+    const f = await uncertainReply(true);
+    await expect(f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'other', request())).rejects.toThrow();
+    f.db.rows('sendIntent')[0].policySnapshot.policyOwnerUserId = 'other';
+    f.db.rows('extensionNode')[0].registeredByUserId = 'other';
+    await expect(f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request())).rejects.toThrow();
+    expect(f.db.rows('sendIntent')[0].status).toBe('RECONCILING');
+  });
+});

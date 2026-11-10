@@ -72,3 +72,7 @@ export class RetryUnconfirmedPostDto {
   @IsString() @Matches(/\S/) @MaxLength(128) requestId: string;
   @IsInt() @Min(0) expectedResolutionRevision: number;
 }
+
+export class RetryUnconfirmedReplyDto extends RetryUnconfirmedPostDto {
+  @IsOptional() @IsBoolean() confirmDuplicateRisk?: boolean;
+}
