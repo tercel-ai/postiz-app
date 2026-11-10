@@ -779,6 +779,9 @@ importers:
       nodemon:
         specifier: ^3.1.9
         version: 3.1.11
+      playwright:
+        specifier: 1.58.0
+        version: 1.58.0
       postcss:
         specifier: 8.4.38
         version: 8.4.38
