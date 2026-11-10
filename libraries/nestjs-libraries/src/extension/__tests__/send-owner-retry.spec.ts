@@ -169,6 +169,54 @@ describe('owner retry of a saved reply', () => {
     expect(await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request())).toEqual(result);
   });
 
+
+  it('returns duplicate-risk review without writing or locking send settings', async () => {
+    const f = await uncertainReply();
+    const lock = vi.spyOn(f.service, 'assertControlledIn');
+    await expect(f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request()))
+      .resolves.toMatchObject({ status: 'review-required' });
+    expect(lock).not.toHaveBeenCalled();
+    expect(f.db.rows('sendMutationReceipt')).toHaveLength(0);
+  });
+
+  it('checks project activation before acquiring the send settings lock', async () => {
+    const f = await uncertainReply(true);
+    const lock = vi.spyOn(f.service, 'assertControlledIn');
+    f.projects.assertProjectActive.mockRejectedValue(new Error('PROJECT_INACTIVE'));
+    await expect(f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request()))
+      .rejects.toThrow('PROJECT_INACTIVE');
+    expect(lock).not.toHaveBeenCalled();
+  });
+
+  it('backs off and requeues once after transient serialization conflicts', async () => {
+    const f = await uncertainReply(true);
+    const conflict = Object.assign(new Error('Serialization conflict'), { code: 'P2034' });
+    const lock = vi.spyOn(f.service, 'assertControlledIn')
+      .mockRejectedValueOnce(conflict).mockRejectedValueOnce(conflict);
+    const retry = f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request());
+    const result = expect(retry).resolves.toEqual({ status: 'requeued' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    await result;
+    expect(lock).toHaveBeenCalledTimes(3);
+    expect(f.db.rows('sendMutationReceipt')).toHaveLength(1);
+  });
+
+  it('returns HTTP 409 after the serialization retry budget is exhausted', async () => {
+    const f = await uncertainReply(true);
+    const lock = vi.spyOn(f.service, 'assertControlledIn')
+      .mockRejectedValue(Object.assign(new Error('Serialization conflict'), { code: 'P2034' }));
+    const retry = f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request());
+    await Promise.all([
+      expect(retry).rejects.toMatchObject({ status: 409, response: { code: 'SEND_RETRY_BUSY' } }),
+      vi.advanceTimersByTimeAsync(1000),
+    ]);
+    expect(lock).toHaveBeenCalledTimes(4);
+    expect(f.db.rows('sendIntent')[0]).toMatchObject({ status: 'RECONCILING', activeExecutionId: f.execution.id });
+    expect(f.db.rows('sendMutationReceipt')).toHaveLength(0);
+  });
+
   it('requires consent for a stopped reply that had a permit', async () => {
     const f = await uncertainReply();
     expect(await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request()))

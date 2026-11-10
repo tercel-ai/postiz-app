@@ -1999,7 +1999,6 @@ export class SendCoordinatorService {
       if (reply && (originalIntent.activeExecutionId !== executionId || original.leaseExpiresAt > new Date() ||
           ['RESERVED', 'SENDING'].includes(original.status)))
         return { status: 'waiting' as const };
-      await this.assertControlledIn(tx, org);
       await this.projects.assertProjectActive(org, original.projectId);
       const account = await tx.accountWriteState.findUniqueOrThrow({ where: { organizationId_canonicalAccountKey: {
         organizationId: org, canonicalAccountKey: original.canonicalAccountKey,
@@ -2014,6 +2013,8 @@ export class SendCoordinatorService {
       await this.assertPostReviewStopped(tx, execution, intent, segment, now);
       if (reply && (segment.authorizedAt || segment.submitBefore || segment.permitHash) && body.confirmDuplicateRisk !== true)
         return { status: 'review-required' as const, reason: 'The previous attempt may already have posted this reply. Retrying could create a duplicate.' };
+      // Read-only retry decisions do not need to update the shared sending mode rows.
+      await this.assertControlledIn(tx, org);
       const locked = await tx.accountWriteState.updateMany({ where: { id: account.id, revision: account.revision }, data: { revision: { increment: 1 } } });
       if (locked.count !== 1) reject('ACCOUNT_WRITE_STATE_CHANGED');
       await tx.sendExecution.update({ where: { id: executionId }, data: {
@@ -2027,6 +2028,13 @@ export class SendCoordinatorService {
       const result = { sendIntentId: intent.id, status: 'QUEUED' as const };
       await tx.sendMutationReceipt.create({ data: { ...key, requestHash, result } });
       return result;
+    }, { backoffOnConflict: true }).catch((error: unknown) => {
+      if ((error as { code?: string })?.code === 'P2034')
+        throw new ConflictException({
+          code: 'SEND_RETRY_BUSY',
+          message: 'Another send operation is updating the queue. Try Retry now again.',
+        });
+      throw error;
     });
   }
 

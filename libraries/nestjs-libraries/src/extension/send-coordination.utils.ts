@@ -104,7 +104,8 @@ export function postSendHash(post: {
 }
 export async function sendTransaction<T>(
   db: { $transaction: Function },
-  work: (tx: Prisma.TransactionClient) => Promise<T>
+  work: (tx: Prisma.TransactionClient) => Promise<T>,
+  { backoffOnConflict = false } = {}
 ): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -112,12 +113,12 @@ export async function sendTransaction<T>(
         isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
       });
     } catch (error) {
-      if (
-        attempt < 3 &&
-        ['P2002', 'P2034'].includes((error as { code?: string }).code ?? '')
-      )
-        continue;
-      throw error;
+      const code = (error as { code?: string })?.code;
+      if (attempt >= 3 || (code !== 'P2002' && code !== 'P2034')) throw error;
+      if (backoffOnConflict && code === 'P2034') {
+        const delay = 25 * 2 ** attempt + Math.floor(Math.random() * 25);
+        await new Promise<void>(resolve => setTimeout(resolve, delay));
+      }
     }
   }
 }
