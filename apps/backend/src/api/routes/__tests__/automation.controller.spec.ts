@@ -94,7 +94,7 @@ describe('SchedulePostsDto — the plan form no longer lives on /posts/schedule'
     const schedulePosts = vi.fn().mockResolvedValue({ scheduled: [], failed: [] });
     const schedulePlanPosts = vi.fn();
     const controller = new PostsController(
-      { schedulePosts, schedulePlanPosts, isControlled: vi.fn().mockResolvedValue(false) } as any,
+      { schedulePosts, schedulePlanPosts } as any,
       {} as any,
       {} as any,
       {} as any,
@@ -105,9 +105,9 @@ describe('SchedulePostsDto — the plan form no longer lives on /posts/schedule'
     await controller.schedulePosts({ id: 'org-1' } as any, {
       posts: [{ id: 'p1' }],
       planId: 'plan-1',
-    } as any);
+    } as any, { id: 'owner-1' } as any);
 
-    expect(schedulePosts).toHaveBeenCalledWith('org-1', [{ id: 'p1' }]);
+    expect(schedulePosts).toHaveBeenCalledExactlyOnceWith('org-1', [{ id: 'p1' }], { userId: 'owner-1', origin: 'MANUAL' });
     expect(schedulePlanPosts).not.toHaveBeenCalled();
   });
 });

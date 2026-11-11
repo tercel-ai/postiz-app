@@ -22,6 +22,20 @@ function budget(extra: Partial<SendBudget> = {}): SendBudget {
   };
 }
 describe('quota reservation ledger', () => {
+  it('seeds a new bucket with confirmed X writes that had no submit permit', async () => {
+    const db = memorySendDatabase();
+    const q = new SendQuotaService();
+    db.seed('sendExecution', {
+      id: 'verified', organizationId: 'org', projectId: 'project', platform: 'x', action: 'REPLY',
+    });
+    db.seed('sendSegment', {
+      executionId: 'verified', organizationId: 'org', segmentIndex: 0,
+      authorizedAt: null, confirmedAt: now, status: 'CONFIRMED',
+    });
+    await db.$transaction((tx: any) => q.reserve(tx, 'org', 'next', 0, [budget({ limit: 2 })], now));
+    expect(db.rows('sendQuotaBucket')[0]).toMatchObject({ confirmedUnits: 1, heldUnits: 1 });
+  });
+
   it('corrects a late confirmation in budgets created after the original release exactly once', async () => {
     const db = memorySendDatabase();
     const q = new SendQuotaService();
@@ -363,6 +377,9 @@ describe('existing send policy and quota compatibility', () => {
         now
       )
     ).rejects.toThrow('AUTOMATION_DISABLED');
+    await expect(
+      quotas.resolve(db as any, { ...intent, sendOrigin: 'AUTOMATION' }, account, 0, now, { recordingConfirmation: true })
+    ).resolves.toHaveProperty('budgets');
     await expect(
       quotas.resolve(db as any, intent, account, 0, now)
     ).resolves.toHaveProperty('budgets');

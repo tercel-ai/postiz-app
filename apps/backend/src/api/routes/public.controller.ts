@@ -1,3 +1,4 @@
+import { readPublishNowRequestedAt, stripDispatchTarget } from '@gitroom/nestjs-libraries/extension/send-dispatch';
 import {
   Body,
   Controller,
@@ -152,6 +153,8 @@ export class PublicController {
 
     return posts.map(({ childrenPost, ...p }) => ({
       ...p,
+      sendTarget: stripDispatchTarget(p.sendTarget),
+      publishNowRequestedAt: readPublishNowRequestedAt(p.sendTarget)?.toISOString() ?? null,
       ...(p.integration
         ? {
             integration: {

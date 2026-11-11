@@ -1,3 +1,4 @@
+import { readPublishNowRequestedAt } from '../send-dispatch';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { SendBindingService } from '../send-binding.service';
 import {
@@ -348,4 +349,17 @@ it('requires reconfirming an old draft whose account-selection provenance is unk
   expect(
     (await f.enqueue({ explicitIntegrationId: 'one' })).integrationId
   ).toBe('one');
+});
+
+it('keeps dispatch metadata through first actor binding while freezing pure account identity', async () => {
+ const f=fixture(); f.seedActor();
+ await f.enqueue({publishNow:true});
+ expect(f.db.rows('post')[0].sendTarget).toEqual({dispatch:{mode:'now',requestedAt:now.toISOString()}});
+ expect(f.db.rows('sendIntent')[0].target).toBeNull();
+ const item=(await f.claim()).items[0];
+ expect(item?.targetAccount).toMatchObject({id:'123',idNamespace:'x.rest_id'});
+ expect(item?.targetAccount).not.toHaveProperty('dispatch');
+ expect(readPublishNowRequestedAt(f.db.rows('post')[0].sendTarget)).toEqual(now);
+ expect(f.db.rows('sendIntent')[0].target).not.toHaveProperty('dispatch');
+ expect(f.db.rows('sendExecution')[0].target).not.toHaveProperty('dispatch');
 });

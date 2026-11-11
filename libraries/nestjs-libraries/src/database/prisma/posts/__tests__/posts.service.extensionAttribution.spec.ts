@@ -231,3 +231,12 @@ describe('attribution ordering vs thread settling', () => {
     expect(order).toEqual(['settle-children', 'attribute']);
   });
 });
+
+it('keeps receipt-managed current-session handover attribution out of the active-session fallback', async () => {
+  const { svc, repo, integrationService } = makeService({ id: 'p1', state: 'QUEUE', group: 'g1', parentPostId: null,
+    integrationId: null, providerIdentifier: 'x', publishMethod: 'EXTENSION', executionProtocol: 'LEGACY', sendIntentId: null,
+    sendTarget: { handoverMode: 'AUTONOMOUS', accountSelectionMode: 'CURRENT_SESSION' } });
+  await svc.markPublishedFromExtension('org', 'p1', 'https://x.com/other/status/1', '1');
+  expect(integrationService.resolveExtensionPublisherId).not.toHaveBeenCalled();
+  expect(repo.attributeExtensionPublisher).not.toHaveBeenCalled();
+});

@@ -46,7 +46,7 @@ import { CreatePostDto } from '@gitroom/nestjs-libraries/dtos/posts/create.post.
 import { MarkExtensionPublishedDto } from '@gitroom/nestjs-libraries/dtos/posts/mark-extension-published.dto';
 import { MarkExtensionPostRemovedDto } from '@gitroom/nestjs-libraries/dtos/posts/mark-extension-post-removed.dto';
 import { MarkExtensionPublishFailedDto } from '@gitroom/nestjs-libraries/dtos/posts/mark-extension-publish-failed.dto';
-import { SchedulePostsDto } from '@gitroom/nestjs-libraries/dtos/posts/schedule-posts.dto';
+import { RetryPostScheduleDto, SchedulePostsDto } from '@gitroom/nestjs-libraries/dtos/posts/schedule-posts.dto';
 import {
   AuthorizationActions,
   Sections,
@@ -433,9 +433,10 @@ export class PostsController {
   retryPost(
     @GetOrgFromRequest() org: Organization,
     @Param('id') id: string,
-    @GetUserFromRequest() user?: User
+    @GetUserFromRequest() user?: User,
+    @Body() body?: RetryPostScheduleDto
   ) {
-    return this._postsService.retryPost(org.id, id, user?.id);
+    return this._postsService.retryPost(org.id, id, user?.id, ...(body?.type ? [body.type] as ['now' | 'schedule'] : []));
   }
 
   @Put('/:id/date')
@@ -465,8 +466,7 @@ export class PostsController {
     @Body() body: SchedulePostsDto,
     @GetUserFromRequest() user?: User
   ) {
-    if (await this._postsService.isControlled(org.id)) return this._postsService.schedulePosts(org.id, body.posts, { userId: user?.id ?? '', origin: 'MANUAL' });
-    return this._postsService.schedulePosts(org.id, body.posts);
+    return this._postsService.schedulePosts(org.id, body.posts, { userId: user?.id ?? '', origin: 'MANUAL' });
   }
 
   @Post('/separate-posts')

@@ -1362,3 +1362,40 @@ describe('PostsService.schedulePlanPosts — automation switch chain', () => {
     });
   });
 });
+
+
+describe('Post now schedule priority', () => {
+  it('uses server time for a draft now request despite a future client date', async () => {
+    const { service, schedulePostGroupToQueue } = makeService([{ id: 'p', group: 'g', state: 'DRAFT', providerIdentifier: 'x', settings: '{}', integrationId: null }]);
+    const before = Date.now();
+    const result = await service.schedulePosts('org', [{ id: 'p', type: 'now', date: '2099-01-01T00:00:00Z' }] as any);
+    expect(result.failed).toEqual([]);
+    const args = schedulePostGroupToQueue.mock.calls[0];
+    expect(args[3].getTime()).toBeGreaterThanOrEqual(before);
+    expect(args[3].getTime()).toBeLessThanOrEqual(Date.now());
+    expect(args[5]).toBe(true);
+  });
+});
+
+
+it('promotes an ordinary autonomous QUEUE root without editing content or resolving its account', async () => {
+  const { service, schedulePostGroupToQueue } = makeService([{ id: 'p', group: 'g', state: 'QUEUE', providerIdentifier: 'x', publishMethod: 'EXTENSION' }]);
+  const promote = vi.fn().mockResolvedValue({ count: 1 });
+  (service as any)._postRepository.rescheduleAutonomousQueuedPost = promote;
+  const result = await service.schedulePosts('org', [{ id: 'p', type: 'now' }] as any, { userId: 'owner', origin: 'MANUAL' });
+  expect(promote).toHaveBeenCalledWith('org', 'p', 'owner', expect.any(Date), true);
+  expect(schedulePostGroupToQueue).not.toHaveBeenCalled();
+  expect(result.scheduled).toHaveLength(1);
+});
+
+
+it('forwards explicit Post now retry after the existing coordinator clock parameter', async () => {
+  const { service } = makeService([]);
+  const retry = vi.fn().mockResolvedValue({});
+  Object.assign(service, {
+    _postRepository: { getPostById: vi.fn().mockResolvedValue({ id: 'p', sendIntentId: 'intent', publishMethod: 'EXTENSION' }) },
+    _sendCoordinator: { retry },
+  });
+  await service.retryPost('org', 'p', 'owner', 'now');
+  expect(retry).toHaveBeenCalledWith('org', 'p', 'owner', undefined, true);
+});

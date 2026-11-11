@@ -1,3 +1,4 @@
+import { preserveDispatchTarget } from './send-dispatch';
 import { ConflictException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { CONTROLLED_SEND_PLATFORMS, canonicalControlledPlatform } from './controlled-platforms';
@@ -17,8 +18,22 @@ const activeExecutions = ['RESERVED', 'SENDING', 'RECONCILING'];
 const isUnsupportedCompanyHandover = (
   post: { publishMethod?: string | null; providerIdentifier?: string | null },
   namespace: unknown
-) => post.publishMethod === 'EXTENSION' &&
+) => post.publishMethod !== 'API' &&
   (post.providerIdentifier === 'linkedin-page' || namespace === 'linkedin.organization_id');
+/** Browser handovers deliberately use the session that performs the new write. */
+export function isCurrentSessionHandover(post: {
+  executionProtocol?: string | null; sendIntentId?: string | null;
+  publishMethod?: string | null; providerIdentifier?: string | null; sendTarget?: unknown;
+}): boolean {
+  const target = post.sendTarget as Prisma.JsonObject | null;
+  return post.executionProtocol === 'LEGACY' && !post.sendIntentId &&
+    post.publishMethod !== 'API' && target?.handoverMode === 'AUTONOMOUS' &&
+    !isUnsupportedCompanyHandover({ ...post, publishMethod: 'EXTENSION' }, target?.idNamespace);
+}
+export const currentSessionHandoverTarget = {
+  handoverMode: 'AUTONOMOUS', accountSelectionMode: 'CURRENT_SESSION',
+} as const;
+
 export interface ControlledDrain {
   version: 1;
   targetMode: 'AUTONOMOUS';
@@ -108,8 +123,8 @@ export async function handoverControlledIn(
   const transfers = new Map<
     string,
     {
-      integrationId: string;
-      target: Prisma.JsonObject;
+      integrationId: string | null;
+      target: Prisma.JsonObject | null;
       intentIds: string[];
       postIds: string[];
     }
@@ -145,11 +160,13 @@ export async function handoverControlledIn(
     else if (posts.some(post => isUnsupportedCompanyHandover(post, target?.idNamespace)))
       reason = 'HANDOVER_LINKEDIN_COMPANY_UNSUPPORTED';
     else if (
+      !(posts.every(post => post.publishMethod !== 'API' && !!post.providerIdentifier &&
+        (CONTROLLED_SEND_PLATFORMS as readonly string[]).includes(canonicalControlledPlatform(post.providerIdentifier)))) && (
       !intent.integrationId ||
       typeof target?.id !== 'string' ||
       !target.id ||
       typeof target.idNamespace !== 'string' ||
-      !target.idNamespace
+      !target.idNamespace)
     )
       reason = 'ACCOUNT_IDENTITY_UNRESOLVED';
     if (reason) {
@@ -180,24 +197,27 @@ export async function handoverControlledIn(
     });
     if (updated.count !== transfer.intentIds.length)
       throw new ConflictException('SEND_INTENT_CHANGED');
-    const posts = await tx.post.updateMany({
-      where: {
-        organizationId: org,
-        sendIntentId: { in: transfer.intentIds },
-        id: { in: transfer.postIds },
-        releaseId: null,
-      },
-      data: {
-        sendIntentId: null,
-        executionProtocol: 'LEGACY',
-        integrationId: transfer.integrationId,
-        sendTarget: { ...transfer.target, handoverMode: 'AUTONOMOUS' },
-        accountSelectionMode: 'EXPLICIT',
-      },
-    });
-    if (posts.count !== transfer.postIds.length)
-      throw new ConflictException('SEND_CONTENT_CHANGED');
+    let transferred = 0;
+    for (const post of boundPosts.filter(post => transfer.postIds.includes(post.id))) {
+      const browser = post.publishMethod !== 'API';
+      const posts = await tx.post.updateMany({
+        where: {
+          organizationId: org, sendIntentId: { in: transfer.intentIds },
+          id: post.id, releaseId: null,
+          ...(browser ? { OR: [{ publishMethod: 'EXTENSION' }, { publishMethod: null }] } : { publishMethod: 'API' }),
+        },
+        data: {
+          sendIntentId: null, executionProtocol: 'LEGACY',
+          integrationId: browser ? null : transfer.integrationId,
+          sendTarget: preserveDispatchTarget(post.sendTarget, browser ? currentSessionHandoverTarget : { ...transfer.target, handoverMode: 'AUTONOMOUS' }),
+          accountSelectionMode: browser ? 'CURRENT_SESSION' : 'EXPLICIT',
+        },
+      });
+      transferred += posts.count;
+    }
+    if (transferred !== transfer.postIds.length) throw new ConflictException('SEND_CONTENT_CHANGED');
   }
+
   const integrations = await tx.integration.findMany({
     where: {
       organizationId: org,
@@ -215,7 +235,7 @@ export async function handoverControlledIn(
   const draftById = new Map(drafts.map((post) => [post.id, post]));
   const draftTransfers = new Map<
     string,
-    { target: Prisma.JsonObject | null; ids: string[] }
+    { target: Prisma.JsonObject | null; ids: string[]; browser: boolean }
   >();
   for (const post of drafts) {
     let ancestor = post;
@@ -259,34 +279,41 @@ export async function handoverControlledIn(
       issue(post.id, 'HANDOVER_LINKEDIN_COMPANY_UNSUPPORTED');
       continue;
     }
-    if (!target && (post.integrationId || post.state === 'QUEUE')) {
+    const browserPlatformKnown = post.publishMethod !== 'API' && !!post.providerIdentifier &&
+      (CONTROLLED_SEND_PLATFORMS as readonly string[]).includes(canonicalControlledPlatform(post.providerIdentifier));
+    if (!target && !browserPlatformKnown && (post.integrationId || post.state === 'QUEUE')) {
       issue(post.id, 'ACCOUNT_IDENTITY_UNRESOLVED');
       continue;
     }
-    const key = sendHash(target);
-    const transfer = draftTransfers.get(key) ?? { target, ids: [] };
+    const key = sendHash([target, post.publishMethod === 'API']);
+    const transfer = draftTransfers.get(key) ?? { target, ids: [], browser: post.publishMethod !== 'API' };
     transfer.ids.push(post.id);
     draftTransfers.set(key, transfer);
   }
   for (const transfer of draftTransfers.values()) {
-    const posts = await tx.post.updateMany({
-      where: {
-        id: { in: transfer.ids },
-        organizationId: org,
-        sendIntentId: null,
-        releaseId: null,
-      },
-      data: {
-        executionProtocol: 'LEGACY',
-        ...(transfer.target
-          ? {
-              sendTarget: { ...transfer.target, handoverMode: 'AUTONOMOUS' },
-            }
-          : {}),
-      },
-    });
-    if (posts.count !== transfer.ids.length)
-      throw new ConflictException('SEND_CONTENT_CHANGED');
+    for (const postId of transfer.ids) {
+      const post = draftById.get(postId)!;
+      const posts = await tx.post.updateMany({
+        where: {
+          id: post.id,
+          organizationId: org,
+          sendIntentId: null,
+          releaseId: null,
+        },
+        data: {
+          executionProtocol: 'LEGACY',
+          ...(transfer.browser ? {
+            integrationId: null, accountSelectionMode: 'CURRENT_SESSION', sendTarget: preserveDispatchTarget(post.sendTarget, currentSessionHandoverTarget),
+          } : transfer.target
+            ? {
+                sendTarget: preserveDispatchTarget(post.sendTarget, { ...transfer.target, handoverMode: 'AUTONOMOUS' }),
+              }
+            : {}),
+        },
+      });
+      if (posts.count !== 1)
+        throw new ConflictException('SEND_CONTENT_CHANGED');
+    }
   }
   return {
     version: 1,
@@ -417,14 +444,30 @@ async function controlledHoldsIn(tx: Prisma.TransactionClient, org: string) {
     organizationId: org, OR: [{ status: { in: activeExecutions } }, { id: { in: [...referenced] } }],
   } });
   const orphaned = [...referenced].some(id => !executions.some(execution => execution.id === id));
-  const currentLocks = await Promise.all(locks.map(lock => releaseExpiredAccountWriterIn(tx, lock, new Date())));
+  const now = new Date();
+  const currentLocks = await Promise.all(locks.map(lock => releaseExpiredAccountWriterIn(tx, lock, now)));
+  const releasedWriters = new Set(locks.filter((_, index) => !currentLocks[index].activeExecutionId).map(lock => lock.activeExecutionId));
   const live = [];
   for (const execution of executions) {
+    if (releasedWriters.has(execution.id)) continue;
     const retainedWriter = currentLocks.some(lock => lock.activeExecutionId === execution.id);
-    if (retainedWriter || !await uncertainWriterExpiredIn(tx, execution, new Date())) live.push(execution);
+    if (retainedWriter || !await uncertainWriterExpiredIn(tx, execution, now)) live.push(execution);
   }
   const liveIds = new Set(live.map(execution => execution.id));
-  return { executions: live,
+  const coolingAccounts = await tx.accountWriteState.findMany({
+    where: { organizationId: org, nextWriteNotBefore: { gt: now } },
+    select: { canonicalAccountKey: true, integrationId: true, nextWriteNotBefore: true },
+  });
+  const integrations = coolingAccounts.length ? await tx.integration.findMany({
+    where: { organizationId: org, id: { in: coolingAccounts.map(account => account.integrationId) } },
+    select: { id: true, providerIdentifier: true },
+  }) : [];
+  const platforms = new Map(integrations.map(integration =>
+    [integration.id, canonicalControlledPlatform(integration.providerIdentifier)]));
+  const cooldowns = coolingAccounts.map(account => ({
+    ...account, platform: platforms.get(account.integrationId),
+  }));
+  return { executions: live, cooldowns,
     locks: currentLocks.filter(lock => lock.activeExecutionId && liveIds.has(lock.activeExecutionId)),
     reservations: reservations.filter(reservation => liveIds.has(reservation.executionId)), orphaned };
 }
@@ -432,8 +475,12 @@ async function controlledHoldsIn(tx: Prisma.TransactionClient, org: string) {
 /** Due discovery and final admission use the same observed account holds. */
 export async function controlledBlockedPlatformsIn(tx: Prisma.TransactionClient, org: string): Promise<string[]> {
   const holds = await controlledHoldsIn(tx, org);
-  if (holds.orphaned || holds.executions.some(execution => !execution.platform)) return [...CONTROLLED_SEND_PLATFORMS, 'linkedin-page'];
-  const platforms = new Set(holds.executions.map(execution => canonicalControlledPlatform(execution.platform)));
+  if (holds.orphaned || holds.executions.some(execution => !execution.platform) ||
+      holds.cooldowns.some(account => !account.platform)) return [...CONTROLLED_SEND_PLATFORMS, 'linkedin-page'];
+  const platforms = new Set([
+    ...holds.executions.map(execution => canonicalControlledPlatform(execution.platform)),
+    ...holds.cooldowns.map(account => account.platform!),
+  ]);
   if (platforms.has('linkedin')) platforms.add('linkedin-page');
   return [...platforms];
 }
@@ -444,7 +491,7 @@ export async function assertAutonomousAccountIn(
   org: string,
   selection: { integrationId?: string; platform?: string }
 ) {
-  const { executions, locks, reservations, orphaned } = await controlledHoldsIn(tx, org);
+  const { executions, locks, reservations, orphaned, cooldowns } = await controlledHoldsIn(tx, org);
   if (orphaned) throw new ConflictException('CONTROLLED_ACCOUNT_DRAIN_REQUIRED');
   const target = selection.integrationId
     ? await tx.integration.findFirst({
@@ -487,5 +534,19 @@ export async function assertAutonomousAccountIn(
       !executions.some((execution) => execution.id === reservation.executionId)
     )
       throw new ConflictException('CONTROLLED_ACCOUNT_DRAIN_REQUIRED');
+  }
+  const matchingCooldowns = cooldowns.filter(account => canonical
+    ? account.canonicalAccountKey === canonical || account.integrationId === target!.id
+    : !account.platform || !platform || account.platform === platform);
+  if (matchingCooldowns.length) {
+    const serverNow = new Date();
+    const nextSendNotBefore = new Date(Math.max(...matchingCooldowns.map(account => account.nextWriteNotBefore!.getTime())));
+    throw new ConflictException({
+      code: 'ACCOUNT_WRITE_INTERVAL',
+      message: 'Wait until the account write interval ends.',
+      nextSendNotBefore: nextSendNotBefore.toISOString(),
+      serverNow: serverNow.toISOString(),
+      retryAfterMs: Math.max(0, nextSendNotBefore.getTime() - serverNow.getTime()),
+    });
   }
 }

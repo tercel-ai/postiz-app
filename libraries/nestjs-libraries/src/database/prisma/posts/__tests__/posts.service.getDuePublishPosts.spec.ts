@@ -643,3 +643,25 @@ describe('PostsService.countDuePublishPosts', () => {
     }
   });
 });
+
+
+it('omits the original bound account from old handed-over browser queue projections', async () => {
+  const { svc } = makeService({ rows: [{ id: 'handed', content: 'hello', settings: '{}', image: '[]',
+    executionProtocol: 'LEGACY', sendIntentId: null, publishMethod: 'EXTENSION',
+    sendTarget: { handoverMode: 'AUTONOMOUS', id: 'old' },
+    integration: { internalId: 'old', providerIdentifier: 'x' }, providerIdentifier: 'x',
+  }] });
+  const { due } = await svc.getDuePublishPosts('org-1', 10);
+  expect(due[0]).not.toHaveProperty('targetAccount');
+  expect(due[0]).toMatchObject({ accountSelectionMode: 'CURRENT_SESSION' });
+});
+
+
+it('projects the server priority timestamp as ISO or null', async () => {
+  const row = { id: 'p', content: 'text', image: '[]', settings: '{}', providerIdentifier: 'x' };
+  const now = new Date('2026-11-11T12:34:56Z');
+  const { svc } = makeService({ rows: [{ ...row, sendTarget: {dispatch:{mode:'now',requestedAt:now.toISOString()}} }, { ...row, id: 'ordinary', sendTarget: null }] });
+  const { due } = await svc.getDuePublishPosts('org');
+  expect(due[0].publishNowRequestedAt).toBe(now.toISOString());
+  expect(due[1].publishNowRequestedAt).toBeNull();
+});

@@ -1,3 +1,5 @@
+import { readPublishNowRequestedAt } from '../../../extension/send-dispatch';
+import { isCurrentSessionHandover } from '../../../extension/send-mode-handover';
 import { ProjectInactiveException } from '@gitroom/nestjs-libraries/projects/project.exception';
 import { SendModeService } from '../../../extension/send-mode.service';
 import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
@@ -428,11 +430,16 @@ export class PostsService {
       group: string;
       integrationId?: string | null;
       providerIdentifier?: string | null;
+      executionProtocol?: string | null;
+      sendIntentId?: string | null;
+      sendTarget?: unknown;
+      publishMethod?: string | null;
     }
   ): Promise<void> {
     // An account was chosen at schedule time — that is the user's own answer
     // and outranks anything a session reading could say.
-    if (post.integrationId) return;
+    // Current-session handovers are attributed from their original browser receipt.
+    if (post.integrationId || isCurrentSessionHandover(post)) return;
     // No platform on the row means nothing to resolve against. Such a post
     // cannot reach the extension queue via the platform-routed branches either,
     // so this is only the belt to publishMethod=EXTENSION's braces.
@@ -1955,6 +1962,7 @@ export class PostsService {
     const postList = [];
     const postNowErrors: string[] = [];
     const allCreatedPostIds: string[] = [];
+    const preservedQueuedGroups = new Set<string>();
     let withdrewSchedule = false;
     for (const [itemIndex, post] of body.posts.entries()) {
       if (coordinated) {
@@ -1973,6 +1981,18 @@ export class PostsService {
           continue;
         }
         post.value = post.value.map((value, index) => ({ ...value, id: index === 0 ? rootId : value.id || sendUuid(`${rootId}:${index}`, sendUuid.URL) }));
+      }
+      if (!coordinated && body.type === 'now' && post.value[0]?.id) {
+        const existing = await this._postRepository.getPostById(post.value[0].id, orgId);
+        if (existing && existing.state !== 'DRAFT') {
+          if (body.projectId !== undefined && existing.projectId !== body.projectId) throw new BadRequestException('POST_PROJECT_MISMATCH');
+          const result = await this.schedulePosts(orgId, [{ id: existing.id, type: 'now' }], { userId: userId ?? '', origin: 'MANUAL' });
+          if (result.failed.length) throw new BadRequestException(result.failed[0].message);
+          allCreatedPostIds.push(existing.id);
+          preservedQueuedGroups.add(existing.group);
+          postList.push({ postId: existing.id, integration: existing.integrationId, state: 'QUEUE', releaseURL: existing.releaseURL, publishMethod: existing.publishMethod });
+          continue;
+        }
       }
       const messages = (post.value || []).map((p) => p.content);
       const updateContent = !body.shortLink
@@ -2008,7 +2028,7 @@ export class PostsService {
       const saved = await this._postRepository.createOrUpdatePost(
         coordinated ? 'draft' : body.type,
         orgId,
-        body.type === 'now' ? dayjs().format('YYYY-MM-DDTHH:mm:00') : body.date,
+        body.type === 'now' ? new Date().toISOString() : body.date,
         post,
         body.tags,
         body.inter,
@@ -2028,7 +2048,7 @@ export class PostsService {
       if (coordinated) {
         await this._sendCoordinator!.enqueue(orgId, posts[0].id, {
           userId: userId!, origin: sendContext?.origin ?? 'MANUAL',
-          explicitIntegrationId: post.integration?.id, ...sendContext,
+          explicitIntegrationId: post.integration?.id, ...sendContext, publishNow: body.type === 'now',
         });
       }
 
@@ -2127,7 +2147,7 @@ export class PostsService {
     // Must happen after the loop so no iteration soft-deletes a sibling that hasn't been upserted yet.
     const group = body.posts[0]?.group;
     const isEditingExisting = body.posts.some((p) => p.value?.some((v) => !!v.id));
-    if (group && isEditingExisting && allCreatedPostIds.length > 0 && !withdrewSchedule) {
+    if (group && !preservedQueuedGroups.has(group) && isEditingExisting && allCreatedPostIds.length > 0 && !withdrewSchedule) {
       await this._postRepository.softDeleteGroupPosts(group, {
         organizationId: orgId,
         excludeIds: allCreatedPostIds,
@@ -2192,14 +2212,15 @@ export class PostsService {
     return { postId: post.id, sendIntentId: post.sendIntentId, state: post.state, publishMethod: post.publishMethod };
   }
 
-  async retryPost(orgId: string, postId: string, userId?: string) {
+  async retryPost(orgId: string, postId: string, userId?: string, type?: 'now' | 'schedule') {
     const post = await this._postRepository.getPostById(postId, orgId);
     if (!post) {
       throw new BadRequestException('Post not found');
     }
     if (post.sendIntentId) {
       if (!this._sendCoordinator) throw new ServiceUnavailableException('SEND_COORDINATION_NOT_ENABLED');
-      await this._sendCoordinator.retry(orgId, postId, userId ?? '');
+      if (type === undefined) await this._sendCoordinator.retry(orgId, postId, userId ?? '');
+      else await this._sendCoordinator.retry(orgId, postId, userId ?? '', undefined, type === 'now');
       if (post.publishMethod === 'API') await this.startWorkflow(getSocialTaskQueue(post.providerIdentifier!), postId, orgId, true);
       return { postId, state: 'QUEUE' };
     }
@@ -2606,6 +2627,7 @@ export class PostsService {
     // unambiguous under concurrency.
     const leaseToken = `ext_${randomUUID()}`;
     const leaseCutoff = PostsService.extensionLeaseCutoff(now);
+    const blockedPlatforms = this._sendCoordinator ? await this._sendCoordinator.legacyBlockedPlatforms(orgId) : [];
     const rows = await this._postRepository.claimDueExtensionPublishPosts(
       orgId,
       providerIds,
@@ -2613,7 +2635,7 @@ export class PostsService {
       Math.max(1, Math.min(limit, 50)),
       leaseToken,
       leaseCutoff,
-      ...(this._sendCoordinator ? [await this._sendCoordinator.legacyBlockedPlatforms(orgId)] : [])
+      blockedPlatforms
     );
     // Per-platform thread segment-gap ranges (admin-editable setting), resolved
     // once per poll and stamped on each item so the extension paces threads the
@@ -2723,6 +2745,7 @@ export class PostsService {
       const segmentGap = segmentGaps[platform as PublishPlatform];
       return {
         id: p.id,
+        publishNowRequestedAt: readPublishNowRequestedAt(p.sendTarget)?.toISOString() ?? null,
         platform,
         // Post.title is the canonical field and createOrUpdatePost now
         // persists it, but rows written before that (and any caller that
@@ -2783,7 +2806,7 @@ export class PostsService {
         // publish by platform): there is no intended account to contradict, so
         // publishing as whoever is logged in IS the intent and the extension
         // skips the check rather than failing every such post.
-        ...(p.integration?.internalId
+        ...(isCurrentSessionHandover(p) ? { accountSelectionMode: 'CURRENT_SESSION' as const } : p.integration?.internalId
           ? {
               targetAccount: {
                 id: p.integration.internalId,
@@ -2877,7 +2900,7 @@ export class PostsService {
    */
   async schedulePosts(
     orgId: string,
-    items: Array<{ id: string; publishMethod?: PublishMethod; date?: string; expectedRouteRevision?: number; expectedContentRevision?: number }>,
+    items: Array<{ id: string; type?: 'now' | 'schedule'; publishMethod?: PublishMethod; date?: string; expectedRouteRevision?: number; expectedContentRevision?: number }>,
     sendContext?: { userId: string; origin: 'MANUAL' | 'AUTOMATION' }
   ) {
     const ids = [...new Set(items.map((i) => i.id))];
@@ -2898,10 +2921,12 @@ export class PostsService {
         try {
           if (!this._sendCoordinator || !sendContext) throw new BadRequestException('SEND_POLICY_OWNER_REQUIRED');
           const item = itemById.get(id)!;
+          const publishNow = item.type === 'now';
+          const publishDate = publishNow ? new Date() : item.date ? new Date(item.date) : undefined;
           const choice = item.publishMethod ?? (post.publishMethod === 'API' ? 'api' : 'extension');
-          const queued = post.sendIntentId && item.date && (item.expectedRouteRevision !== undefined || item.expectedContentRevision !== undefined)
-            ? await this._sendCoordinator.rescheduleQueuedPost(orgId, id, sendContext.userId, new Date(item.date), item.expectedRouteRevision, item.expectedContentRevision)
-            : await this._sendCoordinator.enqueue(orgId, id, { ...sendContext, publishMethod: choice === 'api' ? 'API' : 'EXTENSION', ...(item.date ? { publishDate: new Date(item.date) } : {}) });
+          const queued = post.sendIntentId && (publishNow || (item.date && (item.type === 'schedule' || item.expectedRouteRevision !== undefined || item.expectedContentRevision !== undefined)))
+            ? await this._sendCoordinator.rescheduleQueuedPost(orgId, id, sendContext.userId, publishDate!, item.expectedRouteRevision, item.expectedContentRevision, publishNow)
+            : await this._sendCoordinator.enqueue(orgId, id, { ...sendContext, publishMethod: choice === 'api' ? 'API' : 'EXTENSION', ...(publishDate ? { publishDate } : {}), ...(item.type ? { publishNow } : {}) });
           if (queued.publishMethod === 'API') await this.startWorkflow(getSocialTaskQueue(queued.providerIdentifier!), id, orgId);
           scheduled.push({ id, publishMethod: queued.publishMethod === 'API' ? 'api' : 'extension' });
         } catch (error) {
@@ -2912,6 +2937,23 @@ export class PostsService {
       if (!isLegacyExecution(post.executionProtocol)) {
         failed.push({ id, code: 'ACCOUNT_BOUND_SEND_NOT_ENABLED', message: 'Account-bound sending is not enabled' });
         continue;
+      }
+      const requested = itemById.get(id)!;
+      if (requested.type === 'now' || (requested.type === 'schedule' && requested.date)) {
+        try {
+          if (post.projectId && this._projectValidation) await this._projectValidation.assertProjectActive(orgId, post.projectId);
+          if (post.state === 'QUEUE') {
+            await this._postRepository.rescheduleAutonomousQueuedPost(orgId, id, sendContext?.userId ?? '',
+              requested.type === 'now' ? new Date() : new Date(requested.date!), requested.type === 'now');
+            if (post.publishMethod === 'API') await this.startWorkflow(getSocialTaskQueue(post.providerIdentifier!), id, orgId);
+            scheduled.push({ id, publishMethod: post.publishMethod === 'API' ? 'api' : post.publishMethod === 'EXTENSION' ? 'extension' : null });
+            continue;
+          }
+          if (post.state !== 'DRAFT') throw new BadRequestException('LEGACY_SCHEDULE_NOT_RESCHEDULABLE');
+        } catch (error) {
+          failed.push({ id, code: 'SCHEDULE_BLOCKED', message: (error as Error).message });
+          continue;
+        }
       }
       // Idempotent: a post already scheduled/published is a no-op success.
       if (post.state !== 'DRAFT') {
@@ -2977,13 +3019,13 @@ export class PostsService {
         continue;
       }
 
-      const newDate = itemById.get(id)?.date;
-      const queued = await this._postRepository.schedulePostGroupToQueue(
-        orgId,
-        post.group,
-        method === 'api' ? 'API' : 'EXTENSION',
-        newDate ? dayjs(newDate).toDate() : undefined
-      );
+      const item = itemById.get(id)!;
+      const newDate = item.type === 'now' ? new Date().toISOString() : item.date;
+      const publishMethod = method === 'api' ? 'API' : 'EXTENSION';
+      const publishDate = newDate ? dayjs(newDate).toDate() : undefined;
+      const queued = item.type === undefined
+        ? await this._postRepository.schedulePostGroupToQueue(orgId, post.group, publishMethod, publishDate)
+        : await this._postRepository.schedulePostGroupToQueue(orgId, post.group, publishMethod, publishDate, undefined, item.type === 'now');
 
       if (!queued.count) {
         failed.push({ id, code: 'SCHEDULE_CONFLICT', message: 'Post changed before scheduling; reload and retry' });

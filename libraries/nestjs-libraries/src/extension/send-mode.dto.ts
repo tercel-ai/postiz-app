@@ -1,3 +1,4 @@
+import { Type } from 'class-transformer';
 import {
   IsBoolean,
   IsIn,
@@ -8,6 +9,7 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateNested,
 } from 'class-validator';
 
 class SendModeMutationDto {
@@ -113,7 +115,30 @@ export class BeginBrowserWriteDto extends BrowserWriteOwnerDto {
   sentReplyId?: string;
 }
 
+export const BROWSER_ACTOR_NAMESPACE_PATTERN = /^(?:[a-z][a-z0-9._-]{0,127}|linkedin\.fs_miniProfile)$/;
+
+export class BrowserWriteActorDto {
+  @IsString()
+  @Matches(/\S/)
+  @MaxLength(2048)
+  id!: string;
+
+  @IsString()
+  @Matches(BROWSER_ACTOR_NAMESPACE_PATTERN)
+  idNamespace!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  handle?: string;
+}
+
 export class BrowserWriteOutcomeDto extends BrowserWriteOwnerDto {
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => BrowserWriteActorDto)
+  actor?: BrowserWriteActorDto;
+
   @IsIn(['CONFIRMED', 'UNKNOWN', 'NOT_SUBMITTED'])
   status!: 'CONFIRMED' | 'UNKNOWN' | 'NOT_SUBMITTED';
 

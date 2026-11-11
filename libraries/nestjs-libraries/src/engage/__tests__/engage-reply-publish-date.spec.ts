@@ -45,7 +45,7 @@ function buildRepo(opts: { platform?: string; postState?: string } = {}) {
     {} as any, // _tx
     {} as any // _scanCursor
   );
-  return { repo, postUpdate };
+  return { repo, postUpdate, postFindUnique };
 }
 
 describe('updateReplyUrl — the reply is dated when it actually went live', () => {
@@ -111,4 +111,14 @@ describe('markSentReplyRemoved — a removal report is not a send time', () => {
     expect(postUpdate.mock.calls[0][0].data.state).toBe('PUBLISHED');
     expect(postUpdate.mock.calls[0][0].data).not.toHaveProperty('publishDate');
   });
+});
+
+it('preserves current-session receipt attribution when the legacy reply callback arrives', async () => {
+  const { repo, postUpdate, postFindUnique } = buildRepo();
+  postFindUnique.mockResolvedValue({ integrationId: null, settings: '{}', providerIdentifier: 'reddit', publishMethod: 'EXTENSION',
+    executionProtocol: 'LEGACY', sendIntentId: null, sendTarget: { handoverMode: 'AUTONOMOUS', accountSelectionMode: 'CURRENT_SESSION' } } as any);
+  const infer = vi.spyOn(repo as any, '_resolveExtensionReplyIntegrationId').mockResolvedValue('stale-old-account');
+  await repo.updateReplyUrl('org', 'reply-1', null, undefined, { markPublished: true });
+  expect(infer).not.toHaveBeenCalled();
+  expect(postUpdate.mock.calls[0][0].data).not.toHaveProperty('integrationId');
 });

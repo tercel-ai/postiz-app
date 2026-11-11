@@ -19,6 +19,7 @@ import {
   sendLease,
   sendPreflightChallenge,
   sendTransaction,
+  SEND_PREPARATION_LIMIT_MS,
 } from './send-coordination.utils';
 
 export interface NodeAuthentication {
@@ -121,7 +122,7 @@ export class SendExecutionService {
       const until = new Date(
         Math.min(
           now.getTime() + 120_000,
-          execution.createdAt.getTime() + 1_800_000
+          execution.createdAt.getTime() + SEND_PREPARATION_LIMIT_MS
         )
       );
       if (until <= now)

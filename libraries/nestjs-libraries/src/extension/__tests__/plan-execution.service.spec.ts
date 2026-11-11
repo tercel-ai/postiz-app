@@ -1,3 +1,4 @@
+import { readPublishNowRequestedAt, withPublishNowRequestedAt } from '../send-dispatch';
 import { describe, it, expect, vi } from 'vitest';
 import { PlanExecutionService } from '../plan-execution.service';
 import { isPlanRouteMap } from '../plan-execution.dto';
@@ -378,4 +379,13 @@ describe('plan account route snapshots', () => {
     ).toBe(false);
     expect(service.compare(null, body.executionRoutes)).toBe(false);
   });
+});
+
+it('preserves a root dispatch when changing draft route but clears historic dispatch for materialized drafts', async () => {
+ const {db,service}=setup(); const at=new Date('2026-10-15T12:00:00Z');
+ db.post.findMany.mockResolvedValue([{...draft,sendTarget:withPublishNowRequestedAt(null,at)}] as any);
+ await service.save('org','user','project','plan',body);
+ expect(readPublishNowRequestedAt(db.post.updateMany.mock.calls[0][0].data.sendTarget)).toEqual(at);
+ await service.materialize('org','plan',[{...draft,sendTarget:withPublishNowRequestedAt(null,at)}] as any);
+ expect(readPublishNowRequestedAt(db.post.createMany.mock.calls[0][0].data[0].sendTarget)).toBeNull();
 });

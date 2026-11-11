@@ -312,9 +312,12 @@ describe('account writer lifetime independent of uncertain result lifetime', () 
 
   it('does not let a late old confirmation clear the newer writer or settle its quota', async () => {
     const f = await uncertain();
-    const next = await f.service.reserveApi('org', 'independent', 'new', f.later);
-    await f.service.authorizeApiSegment('org', next.id, 0, { id: '123', idNamespace: 'x.rest_id' }, f.later);
-    await f.service.apiOutcome('org', f.old.id, 0, { status: 'confirmed', eventId: 'late', platformId: 'old-result' }, f.later);
+    const oldSegment = f.db.rows('sendSegment').find(row => row.executionId === f.old.id);
+    const oldExecution = f.db.rows('sendExecution').find(row => row.id === f.old.id);
+    const afterCooldown = new Date(oldSegment.submitBefore.getTime() + oldExecution.gapMs);
+    const next = await f.service.reserveApi('org', 'independent', 'new', afterCooldown);
+    await f.service.authorizeApiSegment('org', next.id, 0, { id: '123', idNamespace: 'x.rest_id' }, afterCooldown);
+    await f.service.apiOutcome('org', f.old.id, 0, { status: 'confirmed', eventId: 'late', platformId: 'old-result' }, afterCooldown);
     expect(f.db.rows('accountWriteState')[0].activeExecutionId).toBe(next.id);
     expect(f.db.rows('sendQuotaReservation').find(row => row.executionId === next.id).state).toBe('HELD');
     expect(f.db.rows('sendIntent').find(row => row.id === f.old.sendIntentId).status).toBe('SUCCEEDED');

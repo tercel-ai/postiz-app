@@ -1,3 +1,4 @@
+import { preserveDispatchTarget } from './send-dispatch';
 import {
   BadRequestException,
   ConflictException,
@@ -12,6 +13,8 @@ import { canonicalSendAccount, sendHash, sendJson, sendTransaction } from './sen
 import {
   BeginBrowserWriteDto,
   BrowserWriteOutcomeDto,
+  BrowserWriteActorDto,
+  BROWSER_ACTOR_NAMESPACE_PATTERN,
   BrowserReplyRecoveryDto,
   CancelSendModeTransitionDto,
   ResolveAutonomousEffectDto,
@@ -20,7 +23,7 @@ import {
   SaveSendModeDto,
   SaveSystemSendModeDto,
 } from './send-mode.dto';
-import { TERMINAL_SEND_INTENT_STATUSES, parseControlledDrain, handoverControlledIn, controlledDrainStateIn, controlledDrainAllowsIn, assertAutonomousAccountIn } from './send-mode-handover';
+import { TERMINAL_SEND_INTENT_STATUSES, parseControlledDrain, handoverControlledIn, controlledDrainStateIn, controlledDrainAllowsIn, assertAutonomousAccountIn, isCurrentSessionHandover, currentSessionHandoverTarget } from './send-mode-handover';
 import { isLegacyExecution } from './legacy-execution';
 import { canonicalControlledPlatform } from './controlled-platforms';
 import { readEngageConfigMetadata } from '../engage/engage-config-metadata';
@@ -44,6 +47,9 @@ export interface AutonomousEffectRequest {
 interface AutonomousEffectResult {
   status: 'AUTHORIZED' | 'UNKNOWN' | 'CONFIRMED' | 'NOT_SUBMITTED';
   source?: 'BROWSER';
+  accountSelectionMode?: 'CURRENT_SESSION';
+  actor?: BrowserWriteActorDto;
+  actualIntegrationId?: string | null;
   platform?: string;
   browserUserId?: string;
   revision: number;
@@ -2043,6 +2049,7 @@ export class SendModeService {
               claimedAt: true,
               sendTarget: true,
               contentUnitId: true,
+              publishMethod: true,
             },
           })
         : null;
@@ -2100,8 +2107,9 @@ export class SendModeService {
       }
       const handedOverIntent = post ? await tx.sendIntent.findFirst({ where: { organizationId,
         ...(post.contentUnitId ? { contentUnitId: post.contentUnitId } : { rootPostId: post.id }), status: 'HANDED_OVER' } }) : null;
-      const handoverTarget = (post?.sendTarget as Prisma.JsonObject | null)?.handoverMode === 'AUTONOMOUS' ? post?.sendTarget : undefined;
-      if (handedOverIntent && post?.integrationId !== handedOverIntent.integrationId)
+      const currentSessionHandover = !!post && isCurrentSessionHandover(post);
+      const handoverTarget = !currentSessionHandover && (post?.sendTarget as Prisma.JsonObject | null)?.handoverMode === 'AUTONOMOUS' ? post?.sendTarget : undefined;
+      if (handedOverIntent && !currentSessionHandover && post?.integrationId !== handedOverIntent.integrationId)
         throw new ConflictException('HANDOVER_ACCOUNT_CHANGED');
       if (handoverTarget && body.handoverAccountVerification !== true)
         throw new ConflictException('HANDOVER_EXTENSION_UPGRADE_REQUIRED');
@@ -2137,7 +2145,14 @@ export class SendModeService {
         throw new ConflictException(
           'AUTONOMOUS_EFFECT_CONTENT_ALREADY_ADMITTED'
         );
+      if (currentSessionHandover && post) {
+        // Normalize pre-existing handovers only after every exposure guard passed.
+        await tx.post.updateMany({ where: { id: post.id, organizationId, sendIntentId: null,
+          OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] },
+          data: { integrationId: null, accountSelectionMode: 'CURRENT_SESSION', sendTarget: preserveDispatchTarget(post.sendTarget, currentSessionHandoverTarget) } });
+      }
       const result: AutonomousEffectResult = {
+        ...(currentSessionHandover ? { accountSelectionMode: 'CURRENT_SESSION' as const } : {}),
         source: 'BROWSER',
         platform,
         browserUserId: userId,
@@ -2162,7 +2177,7 @@ export class SendModeService {
       });
       return {
         id: row.id,
-        ...(handoverTarget ? { targetAccount: handoverTarget } : {}),
+        ...(currentSessionHandover ? { accountSelectionMode: 'CURRENT_SESSION' as const } : handoverTarget ? { targetAccount: handoverTarget } : {}),
         admitted: true,
         status: result.status,
         organizationId,
@@ -2190,6 +2205,31 @@ export class SendModeService {
     });
   }
 
+  private validBrowserActor(actor: BrowserWriteActorDto): boolean {
+    return !!actor && typeof actor === 'object' && !Array.isArray(actor) &&
+      typeof actor.id === 'string' && !!actor.id.trim() && actor.id.length <= 2048 &&
+      typeof actor.idNamespace === 'string' && BROWSER_ACTOR_NAMESPACE_PATTERN.test(actor.idNamespace) &&
+      (actor.handle === undefined || (typeof actor.handle === 'string' && actor.handle.length <= 256));
+  }
+
+  private async attributeBrowserHandoverIn(tx: Prisma.TransactionClient, organizationId: string,
+    result: AutonomousEffectResult): Promise<string | null> {
+    if (!result.actor || !result.platform) return null;
+    const accounts = await tx.integration.findMany({ where: { organizationId, deletedAt: null } });
+    const key = canonicalSendAccount(organizationId, result.platform, result.actor.idNamespace, result.actor.id);
+    const matches = accounts.filter(account => account.internalId && account.identityNamespace &&
+      this.browserPlatform(account.providerIdentifier) === result.platform &&
+      canonicalSendAccount(organizationId, result.platform!, account.identityNamespace, account.internalId) === key);
+    const integrationId = matches.length === 1 ? matches[0].id : null;
+    if (result.accountSelectionMode === 'CURRENT_SESSION' && result.postIds?.length) {
+      const posts = await tx.post.findMany({ where: { organizationId, id: { in: result.postIds } } });
+      const ids = posts.filter(post => isCurrentSessionHandover(post)).map(post => post.id);
+      if (ids.length) await tx.post.updateMany({ where: { organizationId, id: { in: ids }, sendIntentId: null,
+        executionProtocol: 'LEGACY' }, data: { integrationId } });
+    }
+    return integrationId;
+  }
+
   async settleBrowserWrite(
     organizationId: string,
     userId: string,
@@ -2202,6 +2242,7 @@ export class SendModeService {
       !id ||
       id.length > 128 ||
       !['CONFIRMED', 'UNKNOWN', 'NOT_SUBMITTED'].includes(body.status) ||
+      (body.actor !== undefined && !this.validBrowserActor(body.actor)) ||
       (body.platformPostId !== undefined &&
         (typeof body.platformPostId !== 'string' ||
           !body.platformPostId.trim() ||
@@ -2223,6 +2264,10 @@ export class SendModeService {
       const current = this.effectResult(row.result);
       if (current.source !== 'BROWSER' || current.browserUserId !== userId)
         throw new ForbiddenException('BROWSER_WRITE_OWNER_REQUIRED');
+      if (current.actor && body.actor && sendHash(current.actor) !== sendHash(body.actor))
+        throw new ConflictException('BROWSER_WRITE_OUTCOME_CONFLICT');
+      if ((current.status === 'NOT_SUBMITTED' || current.status === 'CONFIRMED' && current.hasResult === true) && body.actor && !current.actor)
+        throw new ConflictException('BROWSER_WRITE_OUTCOME_CONFLICT');
       const result = {
         ...(body.platformPostId ? { postId: body.platformPostId } : {}),
         ...(body.url ? { url: body.url } : {}),
@@ -2234,7 +2279,10 @@ export class SendModeService {
           if (current.hasResult === true) {
             if (sendHash(current.result) !== sendHash(result))
               throw new ConflictException('BROWSER_WRITE_OUTCOME_CONFLICT');
-          } else if (Object.keys(result).length > 0) {
+          } else if (Object.keys(result).length > 0 || body.actor && !current.actor) {
+            const observed: AutonomousEffectResult = { ...current, ...(body.actor ? { actor: body.actor } : {}) };
+            const actualIntegrationId = current.accountSelectionMode === 'CURRENT_SESSION'
+              ? await this.attributeBrowserHandoverIn(tx, organizationId, observed) : undefined;
             const saved = await tx.sendMutationReceipt.updateMany({
               where: {
                 id,
@@ -2243,10 +2291,10 @@ export class SendModeService {
               },
               data: {
                 result: sendJson({
-                  ...current,
+                  ...observed,
                   revision: current.revision + 1,
-                  hasResult: true,
-                  result,
+                  ...(actualIntegrationId !== undefined ? { actualIntegrationId } : {}),
+                  ...(Object.keys(result).length > 0 ? { hasResult: true, result } : {}),
                 }),
               },
             });
@@ -2258,12 +2306,20 @@ export class SendModeService {
       }
       if (current.status === 'UNKNOWN' && body.status === 'NOT_SUBMITTED')
         throw new ConflictException('BROWSER_WRITE_OUTCOME_CONFLICT');
+      const observed: AutonomousEffectResult = { ...current, ...(body.actor ? { actor: body.actor } : {}) };
       const next = {
-        ...current,
+        ...observed,
+        ...(body.status === 'CONFIRMED' && current.accountSelectionMode === 'CURRENT_SESSION'
+          ? { actualIntegrationId: await this.attributeBrowserHandoverIn(tx, organizationId, observed) } : {}),
         status: body.status,
         revision: current.revision + 1,
         ...(body.status === 'CONFIRMED'
           ? { confirmedAt: new Date().toISOString(), hasResult: true, result }
+          : body.status === 'UNKNOWN' && Object.keys(result).length
+          ? { result: {
+              ...(current.result && typeof current.result === 'object' && !Array.isArray(current.result) ? current.result : {}),
+              ...result,
+            } }
           : {}),
       };
       const saved = await tx.sendMutationReceipt.updateMany({
@@ -2703,6 +2759,8 @@ export class SendModeService {
         revision: previous.revision + 1,
         evidence: body.evidence,
         resolvedByUserId: userId,
+        ...(body.decision === 'CONFIRMED' && previous.source === 'BROWSER' && previous.accountSelectionMode === 'CURRENT_SESSION'
+          ? { actualIntegrationId: await this.attributeBrowserHandoverIn(tx, organizationId, previous) } : {}),
         ...(body.decision === 'CONFIRMED'
           ? { confirmedAt: new Date().toISOString() }
           : {}),

@@ -314,3 +314,27 @@ describe('durable browser write admission', () => {
     );
   });
 });
+
+it.each([false,true])('retains UNKNOWN candidate evidence without confirming it and replaces it with later proof (operator confirms first: %s)', async resolveFirst => {
+ const {db,service}=setup();
+ const permit=await service.beginBrowserWrite('org','user',begin);
+ const receipt=()=>db.rows('sendMutationReceipt').find(row=>row.id===permit.id);
+ receipt().result.result={diagnostic:'original receipt detail'};
+ const candidate={...owner,status:'UNKNOWN' as const,platformPostId:'candidate',url:'https://x.com/user/status/candidate'};
+ await service.settleBrowserWrite('org','user',permit.id,candidate);
+ expect(receipt().result).toMatchObject({status:'UNKNOWN',result:{diagnostic:'original receipt detail',postId:'candidate',url:candidate.url}});
+ expect(receipt().result.hasResult).not.toBe(true);
+ expect(receipt().result.actualIntegrationId).toBeUndefined();
+ expect(await service.beginBrowserWrite('org','user',begin)).toMatchObject({admitted:false,status:'UNKNOWN'});
+ await expect(service.beginBrowserWrite('org','user',{...begin,requestId:'second'})).rejects.toThrow('AUTONOMOUS_EFFECT_RECONCILIATION_REQUIRED');
+ await service.settleBrowserWrite('org','user',permit.id,{...owner,status:'UNKNOWN'});
+ expect(receipt().result.result.url).toBe(candidate.url);
+ if(resolveFirst) {
+  await service.resolveAutonomousEffect('org','user',permit.id,{...owner,requestId:'operator',expectedRevision:receipt().result.revision,decision:'CONFIRMED',executorStopped:true,noPendingSubmit:true,evidence:'Executor stopped; actual publication verified.'});
+  expect(receipt().result.hasResult).not.toBe(true);
+ }
+ const proof={...owner,status:'CONFIRMED' as const,platformPostId:'actual',url:'https://x.com/user/status/actual'};
+ await service.settleBrowserWrite('org','user',permit.id,proof);
+ expect(db.rows('sendMutationReceipt').find(row=>row.id===permit.id).result).toMatchObject({status:'CONFIRMED',hasResult:true,result:{postId:'actual',url:proof.url}});
+ await expect(service.settleBrowserWrite('org','user',permit.id,candidate)).rejects.toThrow('BROWSER_WRITE_OUTCOME_CONFLICT');
+});

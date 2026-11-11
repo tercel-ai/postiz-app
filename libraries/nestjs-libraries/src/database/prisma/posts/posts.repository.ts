@@ -1,3 +1,4 @@
+import { readPublishNowRequestedAt, withPublishNowRequestedAt, sortPublishDispatchRows } from '../../../extension/send-dispatch';
 import { SendModeService } from '../../../extension/send-mode.service';
 import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { isLegacyExecution, legacyExecutionWhere } from '../../../extension/legacy-execution';
@@ -2127,14 +2128,17 @@ export class PostsRepository {
   }
 
   async changeDate(orgId: string, id: string, date: string) {
+    const previous = await this._post.model.post.findFirst({ where: { organizationId: orgId, id, sendIntentId: null }, select: { sendTarget: true } });
     return this._post.model.post.update({
       where: {
         organizationId: orgId,
         id,
         sendIntentId: null,
+        sendTarget: { equals: previous?.sendTarget ?? Prisma.AnyNull },
       },
       data: {
         publishDate: dayjs(date).toDate(),
+        sendTarget: withPublishNowRequestedAt(previous?.sendTarget, null),
       },
     });
   }
@@ -2348,8 +2352,10 @@ export class PostsRepository {
       // would make the post unpublishable. mapTypeToPost guarantees it is
       // present on every path into here: it overwrites it from the bound
       // account, and rejects an accountless post that doesn't carry its own.
+      const previousTarget = value.id ? (await (tx?.post ?? this._post.model.post).findFirst({ where: { id, organizationId: orgId }, select: { sendTarget: true } }))?.sendTarget : null;
       const updateData = (type: 'create' | 'update') => ({
         publishDate: dayjs(date).toDate(),
+        sendTarget: withPublishNowRequestedAt(type === 'update' ? previousTarget : null, state === 'now' && !posts.length ? dayjs(date).toDate() : null),
         // Persist explicit input provenance; a later enqueue must not guess from a non-null FK.
         ...(body.integration?.id
           ? { accountSelectionMode: 'EXPLICIT' }
@@ -2981,8 +2987,17 @@ export class PostsRepository {
     };
   }
 
+  private static readonly PUBLISH_PRIORITY_ORDER: Prisma.PostOrderByWithRelationInput[] = [
+    { publishDate: 'asc' },
+    { id: 'asc' },
+  ];
+
   private static readonly EXTENSION_DUE_SELECT = {
     id: true,
+    executionProtocol: true,
+    sendIntentId: true,
+    sendTarget: true,
+    accountSelectionMode: true,
     // One group = one channel's anchor + its thread chain. It is how a claimed
     // root is expanded into its segments (getExtensionPublishChainNodes) and how
     // the whole chain is settled once the extension reports back.
@@ -3217,18 +3232,58 @@ export class PostsRepository {
     });
   }
 
-  getDueExtensionPublishPosts(
-    organizationId: string,
-    providerIdentifiers: string[],
-    now: Date,
-    limit: number
+  /** Scan immediate candidates in bounded pages, retaining only the earliest requested roots. */
+  private async publishDispatchCandidates(model: Prisma.TransactionClient['post'], where: Prisma.PostWhereInput, limit: number) {
+    if (!Number.isFinite(limit) || limit <= 0) return [];
+    limit = Math.min(Math.floor(limit), 50);
+    const pageSize = 100;
+    const priorityWhere: Prisma.PostWhereInput = {
+      ...where,
+      AND: [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
+        { sendTarget: { path: ['dispatch', 'mode'], equals: 'now' } }],
+    };
+    let priority: Array<{ id: string; sendTarget: Prisma.JsonValue; publishDate: Date }> = [];
+    let cursor: string | undefined;
+    while (true) {
+      const page = await model.findMany({
+        where: priorityWhere,
+        orderBy: { id: 'asc' },
+        take: pageSize,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        select: { id: true, sendTarget: true, publishDate: true },
+      });
+      priority = sortPublishDispatchRows([
+        ...priority,
+        ...page.filter(row => readPublishNowRequestedAt(row.sendTarget)),
+      ]).slice(0, limit);
+      if (page.length < pageSize) break;
+      cursor = page[page.length - 1].id;
+    }
+    const selected = priority;
+    if (selected.length === limit) return selected;
+    // When fewer than the limit are valid, priority still contains every valid ID.
+    // Missing, JSON-null and malformed dispatch values remain ordinary candidates.
+    const ordinary = await model.findMany({
+      where: { ...where, AND: [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
+        { id: { notIn: priority.map(row => row.id) } }] },
+      orderBy: PostsRepository.PUBLISH_PRIORITY_ORDER,
+      take: limit - selected.length,
+      select: { id: true, sendTarget: true, publishDate: true },
+    });
+    return [...selected, ...ordinary];
+  }
+
+  async getDueExtensionPublishPosts(
+    organizationId: string, providerIdentifiers: string[], now: Date, limit: number
   ) {
-    return this._post.model.post.findMany({
-      where: this.extensionDueWhere(organizationId, providerIdentifiers, now),
-      orderBy: { publishDate: 'asc' },
-      take: limit,
+    const where = this.extensionDueWhere(organizationId, providerIdentifiers, now);
+    const candidates = await this.publishDispatchCandidates(this._post.model.post, where, limit);
+    if (!candidates.length) return [];
+    const rows = await this._post.model.post.findMany({
+      where: { AND: [where, { id: { in: candidates.map(row => row.id) } }] },
       select: PostsRepository.EXTENSION_DUE_SELECT,
     });
+    return candidates.flatMap(candidate => rows.filter(row => row.id === candidate.id));
   }
 
   /**
@@ -3318,30 +3373,26 @@ export class PostsRepository {
         return this.claimDueExtensionPublishPosts(organizationId, providerIdentifiers, now, limit, leaseToken, leaseCutoff, blockedPlatforms, client, captured);
       });
     }
+    const selectedIds = drainPostIds;
+    if (selectedIds?.length === 0) return [];
     const available = PostsRepository.extensionLeaseAvailableWhere(leaseCutoff);
-    const dueWhere = { ...this.extensionDueWhere(organizationId, providerIdentifiers, now), ...(drainPostIds ? { id: { in: drainPostIds } } : {}), ...(blockedPlatforms.length ? { NOT: { OR: [{ providerIdentifier: { in: blockedPlatforms } }, { integration: { providerIdentifier: { in: blockedPlatforms } } }] } } : {}) };
+    const dueWhere = { ...this.extensionDueWhere(organizationId, providerIdentifiers, now), ...(selectedIds ? { id: { in: selectedIds } } : {}), ...(blockedPlatforms.length ? { AND: [legacyExecutionWhere(), { NOT: { OR: [{ providerIdentifier: { in: blockedPlatforms } }, { integration: { providerIdentifier: { in: blockedPlatforms } } }] } }] } : {}) };
 
-    const candidates = await (tx?.post ?? this._post.model.post).findMany({
-      where: { AND: [dueWhere, available] },
-      orderBy: { publishDate: 'asc' },
-      take: limit,
-      select: { id: true },
-    });
-    const ids = candidates.map((c) => c.id);
+    const model = tx?.post ?? this._post.model.post;
+    const candidates = await this.publishDispatchCandidates(model, { AND: [dueWhere, available] }, limit);
+    const ids = candidates.map(c => c.id);
     if (!ids.length) return [];
-
-    await (tx?.post ?? this._post.model.post).updateMany({
-      // Re-check availability at write time so a concurrent claim of the same
-      // candidate loses the race for that row (guard is a no-op there).
-      where: { AND: [dueWhere, available, { id: { in: ids } }] },
+    // Compare the captured dispatch/identity as well as route and lease eligibility.
+    for (const candidate of candidates) await model.updateMany({
+      where: { AND: [dueWhere, available, { id: candidate.id },
+        { sendTarget: { equals: candidate.sendTarget ?? Prisma.AnyNull } }] },
       data: { releaseId: leaseToken, claimedAt: now },
     });
-
-    return (tx?.post ?? this._post.model.post).findMany({
-      where: { id: { in: ids }, releaseId: leaseToken },
-      orderBy: { publishDate: 'asc' },
+    const rows = await model.findMany({
+      where: { AND: [dueWhere, { id: { in: ids }, releaseId: leaseToken }] },
       select: PostsRepository.EXTENSION_DUE_SELECT,
     });
+    return candidates.flatMap(candidate => rows.filter(row => row.id === candidate.id));
   }
 
   /**
@@ -3362,6 +3413,7 @@ export class PostsRepository {
       select: {
         id: true,
         group: true,
+        projectId: true,
         state: true,
         integrationId: true,
         executionProtocol: true,
@@ -3659,6 +3711,59 @@ export class PostsRepository {
     );
   }
 
+  /** Mutate only scheduling metadata on an unsent autonomous chain. */
+  async rescheduleAutonomousQueuedPost(
+    organizationId: string, postId: string, userId: string, publishDate: Date,
+    publishNow: boolean, tx?: Prisma.TransactionClient
+  ): Promise<Prisma.BatchPayload> {
+    if (!tx) {
+      if (!this._tx || !this._sendModes) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
+      return sendTransaction(this._tx.model, async client => {
+        await this._sendModes!.assertAutonomousIn(client, organizationId);
+        return this.rescheduleAutonomousQueuedPost(organizationId, postId, userId, publishDate, publishNow, client);
+      });
+    }
+    const member = userId ? await tx.userOrganization.findUnique({
+      where: { userId_organizationId: { userId, organizationId } },
+    }) : null;
+    if (!member || member.disabled) throw new ForbiddenException('ORGANIZATION_MEMBERSHIP_REQUIRED');
+    const root = await tx.post.findFirst({ where: { id: postId, organizationId, deletedAt: null, parentPostId: null } });
+    const safe = (post: Post) => post.state === 'QUEUE' && !post.deletedAt &&
+      isLegacyExecution(post.executionProtocol) && !post.sendIntentId && !post.releaseURL &&
+      !post.intervalInDays && (!post.releaseId || (publishNow && post.releaseId.startsWith('ext_') && !!post.claimedAt));
+    if (!root || !safe(root)) throw new ConflictException('LEGACY_SCHEDULE_NOT_RESCHEDULABLE');
+    const chain = await tx.post.findMany({ where: { organizationId, group: root.group, deletedAt: null } });
+    if (!chain.length || chain.some(post => !safe(post) || post.projectId !== root.projectId ||
+        post.providerIdentifier !== root.providerIdentifier)) throw new ConflictException('LEGACY_SCHEDULE_NOT_RESCHEDULABLE');
+    const reachable = new Set([root.id]);
+    let parent = root.id;
+    while (true) {
+      const children = chain.filter(post => post.parentPostId === parent);
+      if (!children.length) break;
+      if (children.length !== 1 || reachable.has(children[0].id)) throw new ConflictException('INVALID_SEND_CHAIN');
+      parent = children[0].id; reachable.add(parent);
+    }
+    if (reachable.size !== chain.length) throw new ConflictException('INVALID_SEND_CHAIN');
+    const receipts = await tx.sendMutationReceipt.findMany({ where: { organizationId, operation: 'autonomous-side-effect' } });
+    if (receipts.some(receipt => {
+      const result = receipt.result as { status?: string; postIds?: string[] } | null;
+      return result?.postIds?.some(id => reachable.has(id)) && result.status !== 'NOT_SUBMITTED';
+    })) throw new ConflictException('LEGACY_SCHEDULE_NOT_RESCHEDULABLE');
+    // Compare the observed route/content revisions while leaving all writer leases intact.
+    for (const post of chain) {
+      const changed = await tx.post.updateMany({
+        where: { id: post.id, organizationId, state: 'QUEUE', deletedAt: null,
+          contentRevision: post.contentRevision, routeRevision: post.routeRevision,
+          releaseId: post.releaseId, claimedAt: post.claimedAt, sendIntentId: null,
+          sendTarget: { equals: post.sendTarget ?? Prisma.AnyNull },
+          AND: [legacyExecutionWhere()] },
+        data: { publishDate, sendTarget: withPublishNowRequestedAt(post.sendTarget, publishNow && post.id === root.id ? publishDate : null) },
+      });
+      if (changed.count !== 1) throw new ConflictException('LEGACY_SCHEDULE_NOT_RESCHEDULABLE');
+    }
+    return { count: chain.length };
+  }
+
   /**
    * Schedule a post's whole group (anchor + its thread chain) from DRAFT to QUEUE
    * and stamp the resolved send-path. Group-scoped so a thread commits atomically
@@ -3670,16 +3775,19 @@ export class PostsRepository {
     group: string,
     publishMethod: PublishMethod,
     publishDate?: Date,
-    tx?: Prisma.TransactionClient
+    tx?: Prisma.TransactionClient,
+    publishNow?: boolean
   ): Promise<Prisma.BatchPayload> {
     if (this._sendModes && !tx) {
       if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
       return sendTransaction(this._tx.model, async client => {
         await this._sendModes!.assertAutonomousIn(client, organizationId);
-        return this.schedulePostGroupToQueue(organizationId, group, publishMethod, publishDate, client);
+        return this.schedulePostGroupToQueue(organizationId, group, publishMethod, publishDate, client, publishNow);
       });
     }
-    return (tx?.post ?? this._post.model.post).updateMany({
+    const model = tx?.post ?? this._post.model.post;
+    const schedulingRows = publishNow !== undefined || publishDate ? await model.findMany({ where: { organizationId, group, state: State.DRAFT, deletedAt: null, AND: [legacyExecutionWhere()] }, select: { id: true, parentPostId: true, sendTarget: true } }) : [];
+    const result = await model.updateMany({
       where: {
         organizationId,
         AND: [legacyExecutionWhere()],
@@ -3696,6 +3804,15 @@ export class PostsRepository {
         ...(publishDate ? { publishDate } : {}),
       },
     });
+    const requestedAt = publishNow ? publishDate ?? new Date() : null;
+    if (result.count) for (const row of schedulingRows) {
+      const changed = await model.updateMany({
+        where: { id: row.id, organizationId, group, state: State.QUEUE, deletedAt: null, AND: [legacyExecutionWhere()], sendTarget: { equals: row.sendTarget ?? Prisma.AnyNull } },
+        data: { sendTarget: withPublishNowRequestedAt(row.sendTarget, !row.parentPostId ? requestedAt : null) },
+      });
+      if (changed.count !== 1) throw new ConflictException('SEND_DRAFT_CHANGED');
+    }
+    return result;
   }
 
   /**

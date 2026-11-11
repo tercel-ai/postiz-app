@@ -95,6 +95,7 @@ it('supersedes an offline exposed draft without inventing an unknown or a negati
  f.db.rows('sendSegment')[0].result={status:'draft_exposed'};
  f.db.rows('sendSegment')[0].authorizedAt=null;f.db.rows('sendSegment')[0].submitBefore=null;f.db.rows('sendSegment')[0].permitHash=null;
  f.db.rows('sendExecution')[0].status='SENDING';f.db.rows('sendIntent')[0].status='SENDING';
+ f.db.rows('sendQuotaReservation').splice(0);f.db.rows('sendQuotaBucket').splice(0);
  await retry(f);
  expect(f.db.rows('sendSegment')[0]).toMatchObject({status:'PENDING',result:{status:'draft_exposed'}});
  const result=await f.db.$transaction((tx:any)=>f.service.outcomeIn(tx,f.db.rows('sendExecution')[0],0,{eventId:'manual-submit',status:'confirmed',platformId:'manually-posted'},new Date()));
@@ -157,17 +158,21 @@ describe('owner retry of a saved reply', () => {
     Object.assign(f.db.rows('sendIntent')[0], { action: 'REPLY' });
     Object.assign(f.db.rows('sendExecution')[0], { action: 'REPLY' });
     f.db.seed('engageSentReply', { id: 'reply', organizationId: 'org', projectId: 'project', postId: 'root' });
-    if (unpermitted) Object.assign(f.db.rows('sendSegment')[0], { authorizedAt: null, submitBefore: null, permitHash: null });
+    if (unpermitted) {
+      Object.assign(f.db.rows('sendSegment')[0], { authorizedAt: null, submitBefore: null, permitHash: null });
+      f.db.rows('sendQuotaReservation').splice(0);
+      f.db.rows('sendQuotaBucket').splice(0);
+    }
     return f;
   }
 
   it('requeues the X reply on a different browser without a submission permit', async () => {
     const f = await uncertainReply(true);
-    const result = await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request());
+    const result = await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', { ...request(), confirmDuplicateRisk: true });
     expect(result).toMatchObject({ status: 'requeued' });
     expect(f.db.rows('sendIntent')[0]).toMatchObject({ status: 'QUEUED', activeExecutionId: null });
     expect(f.db.rows('sendExecution')[0]).toMatchObject({ status: 'RETRY_REQUESTED' });
-    expect(await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request())).toEqual(result);
+    expect(await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', { ...request(), confirmDuplicateRisk: true })).toEqual(result);
   });
 
 
@@ -213,7 +218,7 @@ describe('owner retry of a saved reply', () => {
 
   it('blocks reserving or authorizing a reply that already has a published receipt', async () => {
     const f = await uncertainReply(true);
-    await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request());
+    await f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', { ...request(), confirmDuplicateRisk: true });
     const next = await f.service.reserveApi('org', 'root', 'manual-retry', new Date());
     f.db.rows('post')[0].releaseURL = 'https://x.com/alice/status/321';
     await expect(f.service.authorizeApiSegment('org', next.id, 0, { id: '123', idNamespace: 'x.rest_id' }, new Date()))
@@ -246,7 +251,7 @@ describe('owner retry of a saved reply', () => {
     const conflict = Object.assign(new Error('Serialization conflict'), { code: 'P2034' });
     const lock = vi.spyOn(f.service, 'assertControlledIn')
       .mockRejectedValueOnce(conflict).mockRejectedValueOnce(conflict);
-    const retry = f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request());
+    const retry = f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', { ...request(), confirmDuplicateRisk: true });
     const result = expect(retry).resolves.toEqual({ status: 'requeued' });
     await vi.advanceTimersByTimeAsync(0);
     expect(lock).toHaveBeenCalledTimes(1);
@@ -260,7 +265,7 @@ describe('owner retry of a saved reply', () => {
     const f = await uncertainReply(true);
     const lock = vi.spyOn(f.service, 'assertControlledIn')
       .mockRejectedValue(Object.assign(new Error('Serialization conflict'), { code: 'P2034' }));
-    const retry = f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request());
+    const retry = f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', { ...request(), confirmDuplicateRisk: true });
     await Promise.all([
       expect(retry).rejects.toMatchObject({ status: 409, response: { code: 'SEND_RETRY_BUSY' } }),
       vi.advanceTimersByTimeAsync(1000),

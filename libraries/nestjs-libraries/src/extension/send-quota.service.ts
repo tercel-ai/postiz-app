@@ -68,7 +68,8 @@ export class SendQuotaService {
     intent: SendIntent,
     account: AccountWriteState,
     segmentIndex: number,
-    now: Date
+    now: Date,
+    { recordingConfirmation = false } = {}
   ): Promise<SendQuotaPlan> {
     const modeKey = organizationSendModeKey(intent.organizationId);
     const keys = [
@@ -91,7 +92,7 @@ export class SendQuotaService {
     const pacing = sanitizePlatformPacing(values.get('platform_pacing'));
     const window = resolvePacingWindow(pacing, intent.platform);
     if (
-      !withinPacingWindow(window, now, (at, zone) => {
+      !recordingConfirmation && !withinPacingWindow(window, now, (at, zone) => {
         try {
           const d = zone ? dayjs(at).tz(zone) : dayjs.utc(at);
           return d.hour() * 60 + d.minute();
@@ -112,7 +113,7 @@ export class SendQuotaService {
     const policy = metadata.replyPolicies[intent.platform];
     const automatic = intent.sendOrigin === 'AUTOMATION';
     if (
-      automatic &&
+      !recordingConfirmation && automatic &&
       (!metadata.automationEnabled ||
         (intent.action === 'REPLY'
           ? !metadata.autoReplyEnabled || policy?.autoReplyEnabled !== true
@@ -237,7 +238,7 @@ export class SendQuotaService {
             enforce: automatic,
           }
         );
-        if (automatic) {
+        if (automatic && !recordingConfirmation) {
           if (minutesLeftInWindow(schedule, now) <= 0)
             throw new ForbiddenException('PROJECT_REPLY_WINDOW_CLOSED');
           const pacingValue = values.get('engage_reply_pacing') as {
@@ -329,7 +330,11 @@ export class SendQuotaService {
     // New buckets include historical facts; existing buckets use only their ledger.
     const segmentWhere: Prisma.SendSegmentWhereInput = {
       organizationId: org,
-      authorizedAt: { gte: budget.windowStart, lt: budget.windowEnd },
+      OR: [
+        { authorizedAt: { gte: budget.windowStart, lt: budget.windowEnd } },
+        // Attended confirmation can record a completed write without a submit permit.
+        { authorizedAt: null, status: 'CONFIRMED', confirmedAt: { gte: budget.windowStart, lt: budget.windowEnd } },
+      ],
       ...(budget.dimension.startsWith('REPLY_ROOTS')
         ? { segmentIndex: 0 }
         : {}),

@@ -1,3 +1,4 @@
+import { preserveDispatchTarget, readPublishNowRequestedAt, withPublishNowRequestedAt } from './send-dispatch';
 import { assertAutonomousAccountIn, controlledBlockedPlatformsIn } from './send-mode-handover';
 import { SendModeService } from './send-mode.service';
 import { CONTROLLED_SEND_PLATFORMS, canonicalControlledPlatform, controlledReplySettings, hasControlledReplyTarget } from './controlled-platforms';
@@ -11,10 +12,11 @@ import {
   ForbiddenException,
   HttpException,
   Injectable,
+  Logger,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { AccountWriteState, Prisma, SendExecution, SendIntent } from '@prisma/client';
+import { AccountWriteState, Prisma, SendExecution, SendIntent, SendSegment } from '@prisma/client';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { PrismaService } from '../database/prisma/prisma.service';
 import { ProjectValidationService } from '../projects/project-validation.service';
@@ -24,6 +26,7 @@ import { SendQuotaService } from './send-quota.service';
 import {
   accountWriteNotBefore,
   canonicalSendAccount,
+  confirmationCooldown,
   releaseExpiredAccountWriterIn,
   matchesSendActor,
   postSendHash,
@@ -57,6 +60,7 @@ export interface EnqueueSend {
   explicitIntegrationId?: string;
   publishMethod?: 'API' | 'EXTENSION';
   publishDate?: Date;
+  publishNow?: boolean;
   sentReplyId?: string;
   // Internal handover adds provenance checks; it never relaxes enqueue policy.
   modeHandover?: true;
@@ -74,6 +78,9 @@ const reject = (message: string): never => {
 
 @Injectable()
 export class SendCoordinatorService {
+  private readonly logger = new Logger(SendCoordinatorService.name);
+  private writerRecoveryAfter?: string;
+
   constructor(
     private readonly db: PrismaService,
     private readonly bindings: SendBindingService,
@@ -180,6 +187,7 @@ export class SendCoordinatorService {
       const summary = sendBusinessSummary(root, intent, executions, segments, blockCode, modeState.mode === 'CONTROLLED', continuing, queuedReplyEnqueue);
       const serverNow = new Date();
       let nextSendNotBefore: Date | null = null;
+      let blockingExecutionId: string | null = null;
       let reason: string | null = blockCode ?? (summary.paused ? 'ACCOUNT_BINDINGS_NOT_ENABLED' : null);
       if (!reason && (summary.status === 'RECONCILING' || summary.status === 'PARTIAL_SUCCESS'))
         reason = 'SEND_RECONCILIATION_REQUIRED';
@@ -190,7 +198,10 @@ export class SendCoordinatorService {
         }) : null;
         if (!account) reason = 'ACCOUNT_BINDING_REQUIRED';
         else if (!account.rolloutReady) reason = 'ACCOUNT_COORDINATION_AUDIT_REQUIRED';
-        else if (account.activeExecutionId) reason = 'ACCOUNT_WRITE_BUSY';
+        else if (account.activeExecutionId) {
+          blockingExecutionId = await this.expiredXReviewExecutionIn(tx, account, serverNow);
+          reason = blockingExecutionId ? 'ACCOUNT_REVIEW_REQUIRED' : 'ACCOUNT_WRITE_BUSY';
+        }
         else {
           if (root.publishDate && root.publishDate > serverNow) {
             nextSendNotBefore = root.publishDate;
@@ -210,7 +221,9 @@ export class SendCoordinatorService {
         }
       }
       // This is a known lower bound, never a send permit or an exact execution estimate.
-      return { ...summary, timing: { serverNow, nextSendNotBefore, reason } };
+      return { ...summary, timing: { serverNow, nextSendNotBefore, reason,
+        ...(blockingExecutionId ? { blockingExecutionId } : {}),
+      } };
     });
   }
 
@@ -244,14 +257,57 @@ export class SendCoordinatorService {
     return account;
   }
 
+  async recoverExpiredAccountWriters(now = new Date()): Promise<void> {
+    const limit = 50;
+    const candidates = await this.db.accountWriteState.findMany({
+      where: { rolloutReady: true, activeExecutionId: { not: null },
+        ...(this.writerRecoveryAfter ? { id: { gt: this.writerRecoveryAfter } } : {}) },
+      orderBy: { id: 'asc' }, take: limit, select: { id: true },
+    });
+    this.writerRecoveryAfter = candidates.length === limit ? candidates[limit - 1].id : undefined;
+    for (const candidate of candidates) {
+      try {
+        await sendTransaction(this.db, async tx => {
+          const account = await tx.accountWriteState.findUnique({ where: { id: candidate.id } });
+          if (account) await releaseExpiredAccountWriterIn(tx, account, now);
+        }, { backoffOnConflict: true });
+      } catch (error) {
+        this.logger.warn(`Expired writer recovery failed for account ${candidate.id}: ${(error as { code?: string })?.code ?? 'UNKNOWN_ERROR'}`);
+      }
+    }
+  }
+
+  private xDraftRequiresReview(execution: SendExecution, segment: SendSegment): boolean {
+    return execution.kind === 'EXTENSION' && execution.platform === 'x' &&
+      ['SENDING', 'RECONCILING'].includes(execution.status) &&
+      !segment.authorizedAt && !segment.submitBefore && !segment.permitHash &&
+      (segment.status === 'UNKNOWN' || (segment.status === 'PENDING' &&
+        (segment.result as { status?: string } | null)?.status === 'draft_exposed'));
+  }
+
+  private async expiredXReviewExecutionIn(tx: Prisma.TransactionClient, account: AccountWriteState, now: Date) {
+    if (!account.activeExecutionId) return null;
+    const execution = await tx.sendExecution.findFirst({
+      where: { id: account.activeExecutionId, organizationId: account.organizationId,
+        canonicalAccountKey: account.canonicalAccountKey, kind: 'EXTENSION', platform: 'x',
+        leaseExpiresAt: { lte: now }, status: { in: ['SENDING', 'RECONCILING'] } },
+    });
+    if (!execution) return null;
+    const segments = await tx.sendSegment.findMany({
+      where: { organizationId: execution.organizationId, executionId: execution.id, status: { in: ['PENDING', 'UNKNOWN'] } },
+    });
+    return segments.some(segment => this.xDraftRequiresReview(execution, segment)) ? execution.id : null;
+  }
+
   private manualReplyRetryContext(intent: SendIntent) {
     if (intent.action !== 'REPLY' || intent.sendOrigin !== 'AUTOMATION') return undefined;
     return sendJson({ ...(intent.context as Record<string, unknown> | null), manualReplyRetry: true });
   }
 
-  private async replyAdmissionIntent(tx: Prisma.TransactionClient, intent: SendIntent): Promise<SendIntent> {
-    if (intent.action !== 'REPLY' || intent.sendOrigin !== 'AUTOMATION') return intent;
-    const context = intent.context as { manualReplyRetry?: boolean } | null;
+  private async admissionIntent(tx: Prisma.TransactionClient, intent: SendIntent): Promise<SendIntent> {
+    if (intent.sendOrigin !== 'AUTOMATION') return intent;
+    const context = intent.context as { manualReplyRetry?: boolean; manualPostNow?: boolean } | null;
+    if (intent.action === 'POST') return context?.manualPostNow === true ? { ...intent, sendOrigin: 'MANUAL' } : intent;
     // Earlier owner retries recorded the decision by superseding the original execution.
     const manualRetry = context?.manualReplyRetry === true || await tx.sendExecution.findFirst({
       where: { organizationId: intent.organizationId, sendIntentId: intent.id, status: 'RETRY_REQUESTED' },
@@ -270,7 +326,7 @@ export class SendCoordinatorService {
 
   async accountWriteNotBeforeIn(tx: Prisma.TransactionClient, intent: SendIntent,
     account: AccountWriteState, index: number, now: Date) {
-    const plan = await this.quotas.resolve(tx, await this.replyAdmissionIntent(tx, intent), account, index, now);
+    const plan = await this.quotas.resolve(tx, await this.admissionIntent(tx, intent), account, index, now);
     return accountWriteNotBefore(account, plan.gapMs);
   }
 
@@ -320,7 +376,8 @@ export class SendCoordinatorService {
         integration.identityNamespace, integration.internalId));
     if (account) account = await releaseExpiredAccountWriterIn(tx, account, now);
     if (!account?.rolloutReady) return 'ACCOUNT_NOT_READY';
-    if (account.activeExecutionId) return 'ACCOUNT_EXECUTION_ACTIVE';
+    if (account.activeExecutionId)
+      return await this.expiredXReviewExecutionIn(tx, account, now) ? 'ACCOUNT_REVIEW_REQUIRED' : 'ACCOUNT_EXECUTION_ACTIVE';
     if (account.nextWriteNotBefore && account.nextWriteNotBefore > now) return 'ACCOUNT_COOLDOWN_ACTIVE';
     if (intent.activeExecutionId) {
       const previous = await tx.sendExecution.findUnique({ where: { id: intent.activeExecutionId } });
@@ -416,8 +473,9 @@ export class SendCoordinatorService {
 
   /** Explicit scheduling is separate from idempotent enqueue; an idle intent keeps its identity. */
   async rescheduleQueuedPost(org: string, rootId: string, user: string, publishDate: Date,
-    expectedRouteRevision?: number, expectedContentRevision?: number) {
+    expectedRouteRevision?: number, expectedContentRevision?: number, publishNow = false) {
     if (!Number.isFinite(publishDate.getTime())) throw new BadRequestException('INVALID_PUBLISH_DATE');
+    const requestedAt = publishNow ? new Date() : null;
     await this.enabled(org);
     await this.assertMember(this.db, org, user);
     const scope = await this.db.post.findFirst({ where: { id: rootId, organizationId: org, deletedAt: null, parentPostId: null } });
@@ -444,9 +502,12 @@ export class SendCoordinatorService {
         reject('SEND_RESCHEDULE_UNSAFE');
       const protectedIds = new Set(await this.modes.activeLegacyPostIdsIn(tx, org));
       if (posts.some(post => protectedIds.has(post.id))) reject('LEGACY_CONTENT_DRAIN_REQUIRED');
-      await tx.sendIntent.update({ where: { id: intent.id }, data: { revision: { increment: 1 } } });
-      const updated = await tx.post.updateMany({ where: { organizationId: org, id: { in: posts.map(post => post.id) }, state: 'QUEUE', sendIntentId: intent.id, releaseId: null }, data: { publishDate } });
-      if (updated.count !== posts.length) reject('SEND_RESCHEDULE_UNSAFE');
+      await tx.sendIntent.update({ where: { id: intent.id }, data: { revision: { increment: 1 }, context: sendJson({ ...(intent.context as Record<string, unknown> | null), manualPostNow: publishNow }) } });
+      for (const post of posts) {
+        const updated = await tx.post.updateMany({ where: { organizationId: org, id: post.id, state: 'QUEUE', sendIntentId: intent.id, releaseId: null },
+          data: { publishDate: requestedAt ?? publishDate, sendTarget: withPublishNowRequestedAt(post.sendTarget, post.parentPostId ? null : requestedAt) } });
+        if (updated.count !== 1) reject('SEND_RESCHEDULE_UNSAFE');
+      }
       return tx.post.findUniqueOrThrow({ where: { id: rootId } });
     });
   }
@@ -454,6 +515,7 @@ export class SendCoordinatorService {
   async enqueue(org: string, rootId: string, options: EnqueueSend) {
     await this.enabled(org);
     const now = options.now ?? new Date();
+    const requestedAt = options.publishNow ? new Date() : null;
     const root = await this.db.post.findFirst({
       where: { id: rootId, organizationId: org, deletedAt: null },
     });
@@ -678,52 +740,58 @@ export class SendCoordinatorService {
           routeRevision: first.routeRevision,
           contentRevision: first.contentRevision,
           policySnapshot: sendJson(policy),
-          ...(options.context || reply
+          ...(options.context || reply || ((options.publishNow || readPublishNowRequestedAt(first.sendTarget)) && action === 'POST')
             ? {
-                context: sendJson(
-                  options.context ?? {
-                    channel: reply!.opportunity.channelId,
-                    matchedKeywords:
-                      replyState?.matchedKeywords ?? reply!.matchedKeywords,
-                  }
-                ),
+                context: sendJson({
+                  ...(options.context ?? (reply ? {
+                    channel: reply.opportunity.channelId,
+                    matchedKeywords: replyState?.matchedKeywords ?? reply.matchedKeywords,
+                  } : {})),
+                  ...((options.publishNow || readPublishNowRequestedAt(first.sendTarget)) && action === 'POST' ? { manualPostNow: true } : {}),
+                }),
               }
             : {}),
       };
       const intent = handedOver
         ? await tx.sendIntent.update({ where: { id: existing!.id }, data: { ...intentData, revision: { increment: 1 } } })
         : await tx.sendIntent.create({ data: intentData });
-      const queued = await tx.post.updateMany({
-        where: {
-          organizationId: org,
-          id: { in: posts.map((p) => p.id) },
-          sendIntentId: null,
-          releaseId: null,
-        },
-        data: {
-          contentUnitId: unit,
-          sendIntentId: intent.id,
-          integrationId: route?.integrationId ?? null,
-          executionProtocol: 'ACCOUNT_BOUND_V1',
-          sendTarget: route ? sendJson(route.targetAccount) : Prisma.DbNull,
-          accountResolution: route ? 'RESOLVED' : 'AWAITING_CURRENT_ACTOR',
-          bindingSource: route?.bindingSource ?? 'CURRENT_SESSION',
-          bindingSourceRevision: route?.bindingRevision ?? null,
-          routeRevision: first.routeRevision,
-          state: 'QUEUE',
-          ...(options.publishDate ? { publishDate: options.publishDate } : {}),
-          sendOrigin: origin,
-          // The legacy request field remains accepted; new intents execute through the plugin only.
-          publishMethod: 'EXTENSION',
-          accountSelectionMode: !route
-            ? 'CURRENT_SESSION'
-            : options.explicitIntegrationId ||
-              first.accountSelectionMode === 'EXPLICIT'
-            ? 'EXPLICIT'
-            : 'INHERIT',
-        },
-      });
-      if (queued.count !== posts.length) reject('SEND_CONTENT_CHANGED');
+      for (const post of posts) {
+        const queued = await tx.post.updateMany({
+          where: {
+            organizationId: org,
+            id: post.id,
+            sendIntentId: null,
+            releaseId: null,
+          },
+          data: {
+            contentUnitId: unit,
+            sendIntentId: intent.id,
+            integrationId: route?.integrationId ?? null,
+            executionProtocol: 'ACCOUNT_BOUND_V1',
+            sendTarget: withPublishNowRequestedAt(route?.targetAccount,
+              post.parentPostId ? null : options.publishNow && action === 'POST' ? requestedAt
+                : options.publishDate ? null : readPublishNowRequestedAt(post.sendTarget)),
+            accountResolution: route ? 'RESOLVED' : 'AWAITING_CURRENT_ACTOR',
+            bindingSource: route?.bindingSource ?? 'CURRENT_SESSION',
+            bindingSourceRevision: route?.bindingRevision ?? null,
+            routeRevision: first.routeRevision,
+            state: 'QUEUE',
+            ...(options.publishNow && action === 'POST'
+              ? { publishDate: requestedAt! }
+              : options.publishDate ? { publishDate: options.publishDate } : {}),
+            sendOrigin: origin,
+            // The legacy request field remains accepted; new intents execute through the plugin only.
+            publishMethod: 'EXTENSION',
+            accountSelectionMode: !route
+              ? 'CURRENT_SESSION'
+              : options.explicitIntegrationId ||
+                first.accountSelectionMode === 'EXPLICIT'
+              ? 'EXPLICIT'
+              : 'INHERIT',
+          },
+        });
+        if (queued.count !== 1) reject('SEND_CONTENT_CHANGED');
+      }
       if (receiptRequestId) await tx.sendMutationReceipt.create({
         data: { ...receiptKey, requestHash: fingerprint, result: { rootPostId: rootId, sendIntentId: intent.id } },
       });
@@ -848,22 +916,24 @@ export class SendCoordinatorService {
       },
     });
     if (saved.count !== 1) reject('SEND_INTENT_CHANGED');
-    const changed = await tx.post.updateMany({
-      where: {
-        organizationId: org,
-        sendIntentId: intent.id,
-        integrationId: null,
-        routeRevision: intent.routeRevision,
-      },
-      data: {
-        integrationId: route.integrationId,
-        sendTarget: sendJson(route.targetAccount),
-        accountResolution: 'RESOLVED',
-        bindingSource: 'CURRENT_SESSION',
-        routeRevision: revision,
-      },
-    });
-    if (changed.count !== posts.length) reject('SEND_CONTENT_CHANGED');
+    for (const post of posts) {
+      const changed = await tx.post.updateMany({
+        where: {
+          id: post.id, organizationId: org,
+          sendIntentId: intent.id,
+          integrationId: null,
+          routeRevision: intent.routeRevision,
+        },
+        data: {
+          integrationId: route.integrationId,
+          sendTarget: preserveDispatchTarget(post.sendTarget, route.targetAccount),
+          accountResolution: 'RESOLVED',
+          bindingSource: 'CURRENT_SESSION',
+          routeRevision: revision,
+        },
+      });
+      if (changed.count !== 1) reject('SEND_CONTENT_CHANGED');
+    }
     return tx.sendIntent.findUniqueOrThrow({ where: { id: intent.id } });
   }
 
@@ -1026,7 +1096,8 @@ export class SendCoordinatorService {
     }>;
     try { items = JSON.parse(image || '[]'); }
     catch { reject('CONTROLLED_MEDIA_NOT_RESOLVED'); }
-    if (!Array.isArray(items) || items.some(item => !item || typeof item !== 'object'))
+    if (!Array.isArray(items) || items.some(item => !item || typeof item !== 'object' || Array.isArray(item) ||
+        [item.id, item.path, item.url].some(value => value != null && typeof value !== 'string')))
       reject('CONTROLLED_MEDIA_NOT_RESOLVED');
     return Promise.all(
       items.map(async (item) => {
@@ -1127,7 +1198,7 @@ export class SendCoordinatorService {
         contentHash: postSendHash(p),
       }))
     );
-    const admission = await this.replyAdmissionIntent(tx, intent);
+    const admission = await this.admissionIntent(tx, intent);
     const context = (admission.sendOrigin !== intent.sendOrigin ? this.manualReplyRetryContext(intent) : undefined) ?? intent.context;
     const execution = await tx.sendExecution.create({
       data: {
@@ -1211,7 +1282,12 @@ export class SendCoordinatorService {
         },
       },
     });
-    if (account) account = await releaseExpiredAccountWriterIn(tx, account, now);
+    if (account) {
+      const previousWriter = account.activeExecutionId;
+      account = await releaseExpiredAccountWriterIn(tx, account, now);
+      if (previousWriter === execution.id && !account.activeExecutionId)
+        return { granted: false as const, status: 'RECONCILING' };
+    }
     if (!account?.rolloutReady) reject('ACCOUNT_COORDINATION_AUDIT_REQUIRED');
     // A revision update obtains the account lock before any intent or quota row.
     const locked = await tx.accountWriteState.updateMany({
@@ -1327,7 +1403,7 @@ export class SendCoordinatorService {
       if (parent?.status !== 'CONFIRMED')
         reject('PREVIOUS_SEGMENT_NOT_CONFIRMED');
     }
-    const plan = await this.quotas.resolve(tx, await this.replyAdmissionIntent(tx, intent), account, index, now);
+    const plan = await this.quotas.resolve(tx, await this.admissionIntent(tx, intent), account, index, now);
     const next = accountWriteNotBefore(account, plan.gapMs);
     if (next && next > now) reject('ACCOUNT_WRITE_INTERVAL');
     const submitBefore = new Date(
@@ -1413,7 +1489,7 @@ export class SendCoordinatorService {
     index: number,
     outcome: SendOutcome,
     now: Date,
-    verifiedReply = false
+    { verifiedReply = false, verifiedXDraft = false } = {}
   ) {
     if (
       outcome.url &&
@@ -1517,6 +1593,18 @@ export class SendCoordinatorService {
         !['RESERVED', 'SENDING'].includes(execution.status))
     )
       reject('SEND_NOT_AUTHORIZED');
+    const unpermittedXConfirmation = outcome.status === 'confirmed' && segment.status !== 'CONFIRMED' &&
+      execution.kind === 'EXTENSION' && execution.platform === 'x' &&
+      !segment.authorizedAt && !segment.permitHash && !segment.submitBefore;
+    let confirmationGapMs = execution.gapMs ?? 0;
+    if (unpermittedXConfirmation) {
+      const plan = await this.quotas.resolve(tx, intent, account, index, now, { recordingConfirmation: true });
+      confirmationGapMs = Math.max(confirmationGapMs, plan.gapMs);
+      // Both original-node and attended receipts record a completed write, even over budget.
+      await this.quotas.reserve(tx, org, execution.id, index,
+        plan.budgets.map(budget => ({ ...budget, enforce: false })), now);
+      await tx.sendExecution.update({ where: { id: execution.id }, data: { gapMs: confirmationGapMs } });
+    }
     if (conflict) {
       if (unpermittedUnknown || (superseded && outcome.status === 'unknown' && segment.status !== 'CONFIRMED')) await tx.sendSegment.update({ where: { id: segment.id }, data: { status: 'UNKNOWN', result: sendJson(outcome) } });
       // Persist conflicting evidence and freeze the current owner; never roll this back by throwing inside the transaction.
@@ -1550,7 +1638,7 @@ export class SendCoordinatorService {
           index,
           now
         );
-        else await this.quotas.settle(tx, org, execution.id, index, true, now);
+        await this.quotas.settle(tx, org, execution.id, index, true, now);
         await tx.sendSegment.update({
           where: { id: segment.id },
           data: {
@@ -1578,7 +1666,7 @@ export class SendCoordinatorService {
           data: {
             firstConfirmedAt: account.firstConfirmedAt ?? now,
             lastConfirmedAt: now,
-            nextWriteNotBefore: new Date(now.getTime() + execution.gapMs),
+            nextWriteNotBefore: confirmationCooldown(account, now, confirmationGapMs),
           },
         });
       }
@@ -1646,7 +1734,7 @@ export class SendCoordinatorService {
       } else {
         if (segment.status === 'NOT_SUBMITTED')
           await this.quotas.correctLateConfirmation(tx, org, execution.id, index, now);
-        else await this.quotas.settle(tx, org, execution.id, index, true, now);
+        await this.quotas.settle(tx, org, execution.id, index, true, now);
         await tx.sendSegment.update({
           where: { id: segment.id },
           data: {
@@ -1696,7 +1784,7 @@ export class SendCoordinatorService {
         const complete = remaining === 0;
         const status = complete
           ? 'SUCCEEDED'
-          : execution.status === 'RECONCILING'
+          : execution.status === 'RECONCILING' || verifiedXDraft
           ? 'RECONCILING'
           : 'SENDING';
         await tx.sendIntent.update({
@@ -1717,7 +1805,7 @@ export class SendCoordinatorService {
           data: {
             firstConfirmedAt: account.firstConfirmedAt ?? now,
             lastConfirmedAt: now,
-            nextWriteNotBefore: new Date(now.getTime() + execution.gapMs),
+            nextWriteNotBefore: confirmationCooldown(account, now, confirmationGapMs),
             ...(complete && account.activeExecutionId === execution.id
               ? { activeExecutionId: null }
               : {}),
@@ -1903,7 +1991,7 @@ export class SendCoordinatorService {
         reject('SEND_REPLY_VERIFICATION_NOT_SETTLED');
       if (body.status === 'definitely_not_submitted' && intent.hasConfirmedSegments)
         reject('SEND_RETRY_UNSAFE');
-      const result = await this.outcomeIn(tx, execution, 0, event, now, true);
+      const result = await this.outcomeIn(tx, execution, 0, event, now, { verifiedReply: true });
       if (result.conflict) reject('SEND_OUTCOME_CONFLICT_REQUIRES_RECONCILIATION');
       const settled = await tx.sendIntent.findUniqueOrThrow({ where: { id: intent.id } });
       if (body.status === 'definitely_not_submitted' &&
@@ -2025,13 +2113,18 @@ export class SendCoordinatorService {
         return prior.result as { sendIntentId: string; status: 'QUEUED' };
       }
       if (reply && (originalIntent.activeExecutionId !== executionId || original.leaseExpiresAt > new Date() ||
-          ['RESERVED', 'SENDING'].includes(original.status)))
+          original.status === 'RESERVED'))
         return { status: 'waiting' as const };
       await this.projects.assertProjectActive(org, original.projectId);
-      const account = await tx.accountWriteState.findUniqueOrThrow({ where: { organizationId_canonicalAccountKey: {
+      let account = await tx.accountWriteState.findUniqueOrThrow({ where: { organizationId_canonicalAccountKey: {
         organizationId: org, canonicalAccountKey: original.canonicalAccountKey,
       } } });
       if (!account.rolloutReady) reject('ACCOUNT_COORDINATION_AUDIT_REQUIRED');
+      const recoveringReply = reply && original.status === 'SENDING';
+      if (recoveringReply && account.activeExecutionId !== executionId) return { status: 'waiting' as const };
+      if (account.activeExecutionId === executionId && (recoveringReply || original.status === 'RECONCILING'))
+        account = await releaseExpiredAccountWriterIn(tx, account, new Date());
+      if (recoveringReply && account.activeExecutionId === executionId) return { status: 'waiting' as const };
       const { execution, intent, segment } = await this.singleSendReviewScope(tx, org, user, executionId, rootPostId, reply ? 'REPLY' : 'POST');
       if (execution.resolutionRevision !== body.expectedResolutionRevision) reject('SEND_RESOLUTION_REVISION_CONFLICT');
       const now = new Date();
@@ -2039,7 +2132,8 @@ export class SendCoordinatorService {
           account.activeExecutionId && account.activeExecutionId !== executionId))
         return { status: 'waiting' as const };
       await this.assertPostReviewStopped(tx, execution, intent, segment, now);
-      if (reply && (segment.authorizedAt || segment.submitBefore || segment.permitHash) && body.confirmDuplicateRisk !== true)
+      if (reply && (segment.authorizedAt || segment.submitBefore || segment.permitHash ||
+          this.xDraftRequiresReview(execution, segment)) && body.confirmDuplicateRisk !== true)
         return { status: 'review-required' as const, reason: 'The previous attempt may already have posted this reply. Retrying could create a duplicate.' };
       // Read-only retry decisions do not need to update the shared sending mode rows.
       await this.assertControlledIn(tx, org);
@@ -2147,7 +2241,7 @@ export class SendCoordinatorService {
     executionId: string,
     index: number,
     expectedRevision: number,
-    outcome: SendOutcome
+    outcome: SendOutcome & { verifiedAccountId?: string }
   ) {
     const result = await sendTransaction(this.db, async (tx) => {
       const user = await tx.user.findUnique({ where: { id: administrator } });
@@ -2181,12 +2275,39 @@ export class SendCoordinatorService {
         reject('SEND_RESOLUTION_REVISION_CONFLICT');
       if (!outcome.evidence?.trim())
         throw new BadRequestException('SEND_RECONCILIATION_EVIDENCE_REQUIRED');
+      const now = new Date();
+      let verifiedXDraft = false;
+      if (!prior) {
+        const segment = await tx.sendSegment.findUnique({
+          where: { executionId_segmentIndex: { executionId, segmentIndex: index } },
+        });
+        if (segment && this.xDraftRequiresReview(execution, segment) && outcome.status !== 'unknown') {
+          const intent = await tx.sendIntent.findUniqueOrThrow({ where: { id: execution.sendIntentId } });
+          if (execution.leaseExpiresAt > now || intent.activeExecutionId !== execution.id ||
+              intent.fencingVersion !== execution.fencingVersion)
+            reject('SEND_X_DRAFT_REVIEW_NOT_SETTLED');
+          if (outcome.status === 'confirmed') {
+            const target = execution.target as { id?: string; idNamespace?: string; handle?: string | null };
+            const match = /^https:\/\/x\.com\/([a-z0-9_]{1,15})\/status\/([1-9][0-9]*)$/i.exec(outcome.url ?? '');
+            const matchesAuthor = target.idNamespace === 'x.rest_id' &&
+              typeof outcome.verifiedAccountId === 'string' && /^[1-9][0-9]{0,19}$/.test(outcome.verifiedAccountId) &&
+              outcome.verifiedAccountId === target.id;
+            if (!match || !matchesAuthor || match[2] !== outcome.platformId)
+              throw new BadRequestException('INVALID_X_DRAFT_PUBLICATION_RECEIPT');
+            verifiedXDraft = true;
+          }
+          // An exposed draft is uncertain, even when the browser never reported that state.
+          if (segment.status === 'PENDING')
+            await tx.sendSegment.update({ where: { id: segment.id }, data: { status: 'UNKNOWN' } });
+        }
+      }
       const recorded = await this.outcomeIn(
         tx,
         execution,
         index,
         event,
-        new Date()
+        now,
+        { verifiedXDraft }
       );
       if (!prior)
         await tx.sendExecution.update({
@@ -2200,7 +2321,8 @@ export class SendCoordinatorService {
     return result;
   }
 
-  async retry(org: string, rootId: string, userId: string, now = new Date()) {
+  async retry(org: string, rootId: string, userId: string, now = new Date(), publishNow = false) {
+    if (publishNow) now = new Date();
     await this.assertMember(this.db, org, userId);
     await this.enabled(org);
     const scope = await this.db.post.findFirst({ where: { id: rootId, organizationId: org, deletedAt: null } });
@@ -2230,11 +2352,13 @@ export class SendCoordinatorService {
         reject('SEND_RETRY_UNSAFE');
       await tx.sendIntent.update({
         where: { id: intent.id },
-        data: { status: 'QUEUED', revision: { increment: 1 }, context: this.manualReplyRetryContext(intent) },
+        data: { status: 'QUEUED', revision: { increment: 1 }, context: publishNow && intent.action === 'POST' ? sendJson({ ...(intent.context as Record<string, unknown> | null), manualPostNow: true }) : this.manualReplyRetryContext(intent) },
       });
-      await tx.post.updateMany({
-        where: { organizationId: org, sendIntentId: intent.id },
-        data: { state: 'QUEUE', error: null, publishDate: now },
+      const posts = await tx.post.findMany({ where: { organizationId: org, sendIntentId: intent.id } });
+      for (const item of posts) await tx.post.updateMany({
+        where: { organizationId: org, id: item.id, sendIntentId: intent.id },
+        data: { state: 'QUEUE', error: null, publishDate: now, ...(publishNow && intent.action === 'POST'
+          ? { sendTarget: withPublishNowRequestedAt(item.sendTarget, item.parentPostId ? null : now) } : {}) },
       });
       return { sendIntentId: intent.id, status: 'QUEUED' };
     });

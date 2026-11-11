@@ -1,6 +1,6 @@
 import { createHash, createHmac } from 'node:crypto';
 import { ServiceUnavailableException } from '@nestjs/common';
-import { AccountWriteState, Prisma, SendExecution } from '@prisma/client';
+import { AccountWriteState, Prisma, SendExecution, SendSegment } from '@prisma/client';
 
 export function sendHash(value: unknown): string {
   const normalize = (v: any): any =>
@@ -124,18 +124,39 @@ export async function sendTransaction<T>(
 }
 
 
-/** Reconciliation fences further starts; only persisted expired permits end its writer occupancy. */
+export const SEND_PREPARATION_LIMIT_MS = 30 * 60_000;
+
+function expiredUnexposedPartialThread(execution: SendExecution, segments: SendSegment[], now: Date): boolean {
+  return execution.kind === 'EXTENSION' && execution.leaseExpiresAt <= now &&
+    execution.createdAt.getTime() + SEND_PREPARATION_LIMIT_MS <= now.getTime() &&
+    segments.some(segment => segment.status === 'CONFIRMED') &&
+    segments.some(segment => segment.status === 'PENDING') &&
+    segments.every(segment => segment.status === 'CONFIRMED' || (segment.status === 'PENDING' &&
+      !segment.authorizedAt && !segment.submitBefore && !segment.permitHash &&
+      (segment.result as { status?: string } | null)?.status !== 'draft_exposed'));
+}
+
+export function confirmationCooldown(account: AccountWriteState, now: Date, gapMs: number): Date {
+  return new Date(Math.max(account.nextWriteNotBefore?.getTime() ?? 0, now.getTime() + gapMs));
+}
+
+function expiredPermitSegments(segments: SendSegment[], now: Date): SendSegment[] {
+  if (segments.some(segment => segment.status === 'PENDING' &&
+      (segment.result as { status?: string } | null)?.status === 'draft_exposed')) return [];
+  const permits = segments.filter(segment => ['AUTHORIZED', 'UNKNOWN'].includes(segment.status));
+  return permits.every(segment => segment.submitBefore && segment.submitBefore <= now) ? permits : [];
+}
+
+/** Reconciliation fences further starts, but may still hold a permit or an exposed draft. */
 export async function uncertainWriterExpiredIn(
   tx: Prisma.TransactionClient, execution: SendExecution, now: Date
 ): Promise<boolean> {
   if (execution.status !== 'RECONCILING') return false;
   const segments = await tx.sendSegment.findMany({ where: {
     organizationId: execution.organizationId, executionId: execution.id,
-    status: { in: ['AUTHORIZED', 'UNKNOWN'] },
   } });
-  return segments.some(segment => segment.status === 'UNKNOWN') &&
-    segments.every(segment => segment.submitBefore &&
-      Number.isFinite(segment.submitBefore.getTime()) && segment.submitBefore <= now);
+  return expiredUnexposedPartialThread(execution, segments, now) ||
+    expiredPermitSegments(segments, now).some(segment => segment.status === 'UNKNOWN');
 }
 
 /** Clear only an expired reconciliation mutex, preserving the original task and held quota. */
@@ -147,16 +168,59 @@ export async function releaseExpiredAccountWriterIn(
     organizationId: account.organizationId, id: account.activeExecutionId,
     canonicalAccountKey: account.canonicalAccountKey,
   } });
-  if (!execution || !await uncertainWriterExpiredIn(tx, execution, now)) return account;
+  if (!execution) return account;
+
+  const expiredSender = execution.kind === 'EXTENSION' && execution.status === 'SENDING' &&
+    execution.leaseExpiresAt <= now;
+  if (!expiredSender && execution.status !== 'RECONCILING') return account;
+
+  const segments = await tx.sendSegment.findMany({
+    where: { organizationId: account.organizationId, executionId: execution.id },
+  });
+  const permits = expiredPermitSegments(segments, now);
+  const interruptedThread = expiredUnexposedPartialThread(execution, segments, now);
+  const unreportedPermitIds = expiredSender
+    ? permits.filter(segment => segment.status === 'AUTHORIZED').map(segment => segment.id) : [];
+  if (expiredSender) {
+    if (!interruptedThread && !unreportedPermitIds.length) return account;
+    const intent = await tx.sendIntent.findFirst({
+      where: { id: execution.sendIntentId, organizationId: account.organizationId,
+        activeExecutionId: execution.id, fencingVersion: execution.fencingVersion, status: 'SENDING' },
+      select: { id: true },
+    });
+    if (!intent) return account;
+  } else if (!interruptedThread && !permits.some(segment => segment.status === 'UNKNOWN')) return account;
+
+  // A submit may have happened just before the permit expired, regardless of how uncertainty was recorded.
+  const nextWriteNotBefore = permits.length
+    ? confirmationCooldown(account, new Date(Math.max(...permits.map(segment => segment.submitBefore!.getTime()))), execution.gapMs)
+    : account.nextWriteNotBefore;
   const changed = await tx.accountWriteState.updateMany({ where: {
     id: account.id, organizationId: account.organizationId,
     activeExecutionId: execution.id, revision: account.revision,
-  }, data: { activeExecutionId: null, revision: { increment: 1 } } });
+  }, data: { activeExecutionId: null, nextWriteNotBefore, revision: { increment: 1 } } });
   if (changed.count !== 1) throw Object.assign(new Error('ACCOUNT_WRITE_STATE_CHANGED'), { code: 'P2034' });
+  if (unreportedPermitIds.length) {
+    await tx.sendSegment.updateMany({
+      where: { id: { in: unreportedPermitIds }, executionId: execution.id, status: 'AUTHORIZED' },
+      data: { status: 'UNKNOWN', result: sendJson({
+        status: 'unknown',
+        evidence: 'The browser lease and submit permit expired before a result was reported. Phase: AUTHORIZED; code: SEND_RESULT_MISSING_AFTER_EXPIRY.',
+      }) },
+    });
+  }
+  if (expiredSender) {
+    await tx.sendExecution.update({
+      where: { id: execution.id }, data: { status: 'RECONCILING', lastProgressAt: now },
+    });
+    await tx.sendIntent.update({
+      where: { id: execution.sendIntentId }, data: { status: 'RECONCILING', revision: { increment: 1 } },
+    });
+  }
   console.log('[sending-writer] released expired reconciliation occupancy', {
     organizationId: account.organizationId, executionId: execution.id, accountId: account.id,
   });
-  return { ...account, activeExecutionId: null, revision: account.revision + 1 };
+  return { ...account, activeExecutionId: null, nextWriteNotBefore, revision: account.revision + 1 };
 }
 
 /** Both the persisted prior-write clock and the current operation floor must elapse. */

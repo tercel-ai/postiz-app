@@ -41,6 +41,8 @@ export class StopSendDto {
 
 export class ReconcileSendDto extends SendOutcomeDto {
   @IsInt() @Min(0) expectedResolutionRevision: number;
+  // Required for an administrator to confirm an X write that had no submit permit.
+  @IsOptional() @IsString() @Matches(/^[1-9][0-9]{0,19}$/) verifiedAccountId?: string;
 }
 
 export class QueueStoredReplyDto {

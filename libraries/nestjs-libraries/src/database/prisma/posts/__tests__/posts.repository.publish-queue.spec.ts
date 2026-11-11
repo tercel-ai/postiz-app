@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { describe, expect, it, vi } from 'vitest';
 import { PostsRepository } from '../posts.repository';
 
@@ -7,7 +8,7 @@ import { PostsRepository } from '../posts.repository';
 
 function createRepo(model: Record<string, any>) {
   return new PostsRepository(
-    { model: { post: model } } as any,
+    { model: { post: { findFirst: vi.fn().mockResolvedValue(null), findMany: vi.fn().mockResolvedValue([]), ...model } } } as any,
     {} as any,
     {} as any,
     {} as any,
@@ -25,7 +26,7 @@ describe('getDueExtensionPublishPosts', () => {
     // explicit-EXTENSION posts still have to be picked up.
     await repo.getDueExtensionPublishPosts('org-1', [], new Date(), 10);
 
-    expect(findMany).toHaveBeenCalledTimes(1);
+    expect(findMany).toHaveBeenCalledTimes(2);
     const where = findMany.mock.calls[0][0].where;
     expect(where.state).toBe('QUEUE');
     expect(where.parentPostId).toBeNull();
@@ -106,8 +107,9 @@ describe('claimDueExtensionPublishPosts (lease)', () => {
     const cutoff = new Date('2026-07-27T00:00:00.000Z');
     const findMany = vi
       .fn()
-      // 1st call: candidate id scan
-      .mockResolvedValueOnce([{ id: 'p1' }, { id: 'p2' }])
+      // Priority subset is empty; ordinary candidates retain their database order.
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 'p1', sendTarget: null }, { id: 'p2', sendTarget: null }])
       // 2nd call: read-back of rows carrying our token
       .mockResolvedValueOnce([{ id: 'p1', content: 'a', settings: '{}' }]);
     const updateMany = vi.fn().mockResolvedValue({ count: 1 });
@@ -132,22 +134,21 @@ describe('claimDueExtensionPublishPosts (lease)', () => {
     // racing puller can't steal an already-leased row.
     const claim = updateMany.mock.calls[0][0];
     expect(claim.where).toEqual({
-      AND: [candidateWhere.AND[0], candidateWhere.AND[1], { id: { in: ['p1', 'p2'] } }],
+      AND: [candidateWhere.AND[0], candidateWhere.AND[1], { id: 'p1' }, { sendTarget: { equals: Prisma.AnyNull } }],
     });
     expect(candidateWhere.AND[0].organizationId).toBe('org-1');
     expect(candidateWhere.AND[0].AND).toContainEqual({ OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] });
     expect(claim.data).toEqual({ releaseId: 'ext_token_123', claimedAt: now });
 
     // Read-back is scoped to OUR token — the rows we actually won.
-    expect(findMany.mock.calls[1][0].where).toEqual({
-      id: { in: ['p1', 'p2'] },
-      releaseId: 'ext_token_123',
-    });
+    expect(findMany.mock.calls[2][0].where).toEqual({ AND: [candidateWhere.AND[0], {
+      id: { in: ['p1', 'p2'] }, releaseId: 'ext_token_123',
+    }] });
     expect(res).toEqual([{ id: 'p1', content: 'a', settings: '{}' }]);
   });
 
   it('claims nothing (no update / no read-back) when there are no candidates', async () => {
-    const findMany = vi.fn().mockResolvedValueOnce([]);
+    const findMany = vi.fn().mockResolvedValue([]);
     const updateMany = vi.fn();
     const repo = createRepo({ findMany, updateMany });
 
@@ -162,7 +163,7 @@ describe('claimDueExtensionPublishPosts (lease)', () => {
 
     expect(res).toEqual([]);
     expect(updateMany).not.toHaveBeenCalled();
-    expect(findMany).toHaveBeenCalledTimes(1);
+    expect(findMany).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -353,7 +354,7 @@ describe('createOrUpdatePost — Post.title persistence', () => {
     // createOrUpdatePost also clears tag links, so this needs the tagsPosts
     // repo rather than the bare post model createRepo() provides.
     const repo = new PostsRepository(
-      { model: { post: { upsert } } } as any,
+      { model: { post: { upsert, findFirst: vi.fn().mockResolvedValue(null) } } } as any,
       {} as any,
       {} as any,
       {} as any,
@@ -370,6 +371,19 @@ describe('createOrUpdatePost — Post.title persistence', () => {
       ...(providerIdentifier ? { providerIdentifier } : {}),
     } as any;
   }
+
+  it('sets priority only on the root and clears it when returning to draft', async () => {
+    const { repo, upsert } = repoWithUpsert();
+    const input = body({ __type: 'x' });
+    input.value.push({ id: 'child', content: 'thread' });
+    const now = '2026-11-11T12:00:00Z';
+    await repo.createOrUpdatePost('now', 'org-1', now, input, []);
+    expect(upsert.mock.calls[0][0].create.sendTarget).toEqual({dispatch:{mode:'now',requestedAt:new Date(now).toISOString()}});
+    expect(upsert.mock.calls[1][0].create.sendTarget).toBe(Prisma.DbNull);
+    upsert.mockClear();
+    await repo.createOrUpdatePost('draft', 'org-1', now, input, []);
+    expect(upsert.mock.calls[0][0].update.sendTarget).toBe(Prisma.DbNull);
+  });
 
   it('persists the reddit title from settings.subreddit[0].value', async () => {
     const { repo, upsert } = repoWithUpsert();
@@ -529,4 +543,26 @@ describe('countDueExtensionPublishPosts', () => {
       repo.countDueExtensionPublishPosts('org-1', [], NOW, CUTOFF)
     ).resolves.toEqual({ dueNow: 2, leased: 1, scheduledAhead: 7 });
   });
+});
+
+
+
+
+
+it('orders priority requests FIFO before ordinary due roots before limiting', async () => {
+  const findMany = vi.fn().mockResolvedValue([]);
+  const repo = createRepo({ findMany });
+  await repo.claimDueExtensionPublishPosts('org', ['x'], new Date(), 1, 'lease', new Date());
+  expect(findMany.mock.calls[0][0].take).toBe(100);
+  expect(findMany.mock.calls[0][0].where.AND).toContainEqual({sendTarget:{path:['dispatch','mode'],equals:'now'}});
+  expect(findMany.mock.calls[1][0].take).toBe(1);
+  expect(findMany.mock.calls[1][0].orderBy).toEqual([{publishDate:'asc'},{id:'asc'}]);
+});
+
+
+it('clears priority on an explicit calendar reschedule', async () => {
+  const update = vi.fn().mockResolvedValue({});
+  const repo = createRepo({ update });
+  await repo.changeDate('org', 'p', '2099-01-01T00:00:00Z');
+  expect(update.mock.calls[0][0].data.sendTarget).toBe(Prisma.DbNull);
 });

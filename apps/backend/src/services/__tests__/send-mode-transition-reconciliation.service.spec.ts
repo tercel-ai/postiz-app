@@ -15,7 +15,7 @@ describe('sending mode transition reconciliation lifecycle', () => {
     };
     const service = new SendModeTransitionReconciliationService(
       modes as any,
-      {} as any,
+      { recoverExpiredAccountWriters: vi.fn().mockResolvedValue(undefined) } as any,
       identities as any
     );
     service.onApplicationBootstrap();
@@ -45,13 +45,12 @@ describe('sending mode transition reconciliation lifecycle', () => {
           })
       ),
     };
-    const service = new SendModeTransitionReconciliationService(
-      modes as any,
-      {} as any
-    );
+    const coordinator = { recoverExpiredAccountWriters: vi.fn().mockResolvedValue(undefined) };
+    const service = new SendModeTransitionReconciliationService(modes as any, coordinator as any);
     service.onApplicationBootstrap();
     await vi.advanceTimersByTimeAsync(30_000);
     expect(modes.reconcilePendingTransitions).toHaveBeenCalledTimes(1);
+    expect(coordinator.recoverExpiredAccountWriters).toHaveBeenCalledTimes(3);
     complete();
     await vi.advanceTimersByTimeAsync(15_000);
     expect(modes.reconcilePendingTransitions).toHaveBeenCalledTimes(2);
@@ -69,6 +68,7 @@ describe('sending mode transition reconciliation lifecycle', () => {
       recordReallocationIssues: vi.fn(),
     };
     const coordinator = {
+      recoverExpiredAccountWriters: vi.fn().mockResolvedValue(undefined),
       reallocateUnsentLegacy: vi.fn().mockResolvedValue([]),
     };
     const identities = {
@@ -108,7 +108,7 @@ describe('sending mode transition reconciliation lifecycle', () => {
     };
     const service = new SendModeTransitionReconciliationService(
       modes as any,
-      {} as any,
+      { recoverExpiredAccountWriters: vi.fn().mockResolvedValue(undefined) } as any,
       identities as any
     );
 
@@ -134,6 +134,7 @@ it('reallocates pending organizations after mode reconciliation and persists the
     recordReallocationIssues: vi.fn(),
   };
   const coordinator = {
+      recoverExpiredAccountWriters: vi.fn().mockResolvedValue(undefined),
     reallocateUnsentLegacy: vi.fn().mockResolvedValue(issues),
   };
   const service = new SendModeTransitionReconciliationService(
@@ -166,6 +167,7 @@ it('keeps processing other organizations when one reallocation fails', async () 
     recordReallocationIssues: vi.fn(),
   };
   const coordinator = {
+      recoverExpiredAccountWriters: vi.fn().mockResolvedValue(undefined),
     reallocateUnsentLegacy: vi.fn(async (org: string) => {
       if (org === 'broken') throw new Error('temporarily unavailable');
       return [];

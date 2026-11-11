@@ -1,3 +1,4 @@
+import { isCurrentSessionHandover } from '../extension/send-mode-handover';
 import { SendModeService } from '../extension/send-mode.service';
 import { sendTransaction } from '../extension/send-coordination.utils';
 import { isLegacyExecution, legacyExecutionWhere } from '../extension/legacy-execution';
@@ -6751,10 +6752,10 @@ export class EngageRepository {
     if (engageAuthor || opts.markPublished || (platform === 'x' && url)) {
       const post = await this._post.model.post.findUnique({
         where: { id: reply.postId },
-        select: { integrationId: true, settings: true },
+        select: { integrationId: true, settings: true, executionProtocol: true, sendIntentId: true, sendTarget: true, publishMethod: true, providerIdentifier: true },
       });
 
-      if (!post?.integrationId) {
+      if (!post?.integrationId && !(post && isCurrentSessionHandover(post))) {
         // X ONLY: an OAuth account can be matched back from the reply URL's
         // own handle, which is the strongest evidence available on that
         // platform — it names the account the permalink belongs to.

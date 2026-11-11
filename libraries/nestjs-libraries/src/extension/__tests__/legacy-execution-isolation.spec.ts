@@ -91,9 +91,10 @@ describe('legacy execution isolation', () => {
     const post = {
       findMany: vi
         .fn()
+        .mockResolvedValueOnce([])
         .mockResolvedValueOnce([{ id: 'post' }])
         .mockResolvedValueOnce([]),
-      updateMany: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({count:1}),
     };
     Object.assign(repo, { _post: { model: { post } } });
     await repo.claimDueExtensionPublishPosts(

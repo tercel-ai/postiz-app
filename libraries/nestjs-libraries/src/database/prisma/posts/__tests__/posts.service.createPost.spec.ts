@@ -599,3 +599,18 @@ describe('PostsService.createPost — draft ceiling', () => {
     expect(mocks.postRepository.createOrUpdatePost).not.toHaveBeenCalled();
   });
 });
+
+
+it('promotes an existing queued root without deleting or rewriting its thread', async () => {
+  const mocks = createMocks();
+  mocks.postRepository.getPostById.mockResolvedValue({ id: 'root', state: 'QUEUE', group: 'g', publishMethod: 'EXTENSION' } as any);
+  const softDeleteGroupPosts = vi.fn();
+  Object.assign(mocks.postRepository, { softDeleteGroupPosts });
+  const service = createService(mocks);
+  vi.spyOn(service, 'schedulePosts').mockResolvedValue({ scheduled: [{ id: 'root', publishMethod: 'extension' }], failed: [] });
+  const input = makeBody({ type: 'now' });
+  input.posts[0].group = 'g'; input.posts[0].value[0].id = 'root';
+  await service.createPost('org-1', input, 'owner');
+  expect(mocks.postRepository.createOrUpdatePost).not.toHaveBeenCalled();
+  expect(softDeleteGroupPosts).not.toHaveBeenCalled();
+});

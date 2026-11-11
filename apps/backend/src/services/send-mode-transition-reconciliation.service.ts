@@ -18,6 +18,8 @@ export class SendModeTransitionReconciliationService
   );
   private timer?: NodeJS.Timeout;
   private running = false;
+  private writerRecoveryTimer?: NodeJS.Timeout;
+  private writerRecoveryRunning = false;
   private identityTimer?: NodeJS.Timeout;
   private identityRunning = false;
 
@@ -65,6 +67,24 @@ export class SendModeTransitionReconciliationService
     this.timer = setInterval(() => void run(), 15_000);
     this.timer.unref();
 
+    const recoverWriters = async () => {
+      if (this.writerRecoveryRunning) return;
+      this.writerRecoveryRunning = true;
+      try {
+        await this.coordinator.recoverExpiredAccountWriters();
+      } catch (error) {
+        this.logger.error(
+          'Expired sending writer recovery failed',
+          error instanceof Error ? error.stack : error
+        );
+      } finally {
+        this.writerRecoveryRunning = false;
+      }
+    };
+    void recoverWriters();
+    this.writerRecoveryTimer = setInterval(() => void recoverWriters(), 15_000);
+    this.writerRecoveryTimer.unref();
+
     const identities = this.identities;
     if (identities) {
       const reconcileIdentities = async () => {
@@ -92,6 +112,7 @@ export class SendModeTransitionReconciliationService
 
   onApplicationShutdown(): void {
     if (this.timer) clearInterval(this.timer);
+    if (this.writerRecoveryTimer) clearInterval(this.writerRecoveryTimer);
     if (this.identityTimer) clearInterval(this.identityTimer);
   }
 }

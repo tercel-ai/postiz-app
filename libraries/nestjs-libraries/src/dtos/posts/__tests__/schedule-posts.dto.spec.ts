@@ -43,3 +43,10 @@ describe('SchedulePostsDto validation', () => {
     expect(check({ planId: 'plan-1', platforms: ['x'] })).toEqual(['posts']);
   });
 });
+
+
+it('accepts optional Post now intent and rejects unrelated scheduling types', () => {
+  expect(check({ posts: [{ id: 'p', type: 'now' }] })).toEqual([]);
+  expect(check({ posts: [{ id: 'p', type: 'schedule' }] })).toEqual([]);
+  expect(check({ posts: [{ id: 'p', type: 'draft' }] })).toEqual(['posts']);
+});

@@ -1,3 +1,4 @@
+import { preserveDispatchTarget } from './send-dispatch';
 import { SendModeService } from './send-mode.service';
 import {
   BadRequestException,
@@ -320,6 +321,7 @@ export class PlanExecutionService {
             deletedAt: null,
           },
         });
+        const routeData = this.postRoute(route, platform);
         for (const node of chain) {
           const settings = node.settings ? JSON.parse(node.settings) : {};
           const written = await tx.post.updateMany({
@@ -335,7 +337,8 @@ export class PlanExecutionService {
               deletedAt: null,
             },
             data: {
-              ...this.postRoute(route, platform),
+              ...routeData,
+              sendTarget: preserveDispatchTarget(node.sendTarget, routeData.sendTarget),
               settings: JSON.stringify({
                 ...settings,
                 __type: route?.providerIdentifier ?? platform,

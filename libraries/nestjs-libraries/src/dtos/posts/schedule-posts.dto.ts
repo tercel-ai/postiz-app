@@ -21,6 +21,10 @@ export class SchedulePostItemDto {
   @IsString()
   id!: string;
 
+  @IsOptional()
+  @IsIn(['now', 'schedule'])
+  type?: 'now' | 'schedule';
+
   // Lowercase to match the public PublishMethod contract; the backend maps it to
   // the Prisma enum. A choice the post cannot honour (e.g. 'api' with no bound
   // account) fails that item individually, not the whole batch.
@@ -60,4 +64,11 @@ export class SchedulePostsDto {
   @ValidateNested({ each: true })
   @Type(() => SchedulePostItemDto)
   posts!: SchedulePostItemDto[];
+}
+
+/** Optional scheduling intent for the existing failed-post retry endpoint. */
+export class RetryPostScheduleDto {
+  @IsOptional()
+  @IsIn(['now', 'schedule'])
+  type?: 'now' | 'schedule';
 }

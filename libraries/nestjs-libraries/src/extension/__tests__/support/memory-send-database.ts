@@ -63,7 +63,8 @@ export function memorySendDatabase() {
       if (Array.isArray(value.path)) actual = value.path.reduce((current:any,part:string)=>current?.[part],actual);
       return Object.entries(value).every(([op, expected]: [string, any]) => {
         if (op === 'path') return true;
-        if (op === 'equals') return JSON.stringify(actual) === JSON.stringify(expected === Prisma.JsonNull ? null : expected);
+        if (op === 'equals') return expected === Prisma.AnyNull || expected === Prisma.DbNull || expected === Prisma.JsonNull
+          ? actual == null : JSON.stringify(actual) === JSON.stringify(expected);
         if (op === 'startsWith') return typeof actual === 'string' && actual.startsWith(expected);
         if (op === 'in') return expected.includes(actual);
         if (op === 'notIn') return !expected.includes(actual);
@@ -80,7 +81,7 @@ export function memorySendDatabase() {
   function update(row: any, data: any) {
     for (const [key, value] of Object.entries(data)) {
       if (value === undefined) continue;
-      if (value === Prisma.JsonNull) { row[key] = null; continue; }
+      if (value === Prisma.JsonNull || value === Prisma.DbNull) { row[key] = null; continue; }
       if (key === 'integration' && (value as any)?.disconnect === true) {
         row.integrationId = null;
         row.integration = null;
@@ -180,7 +181,7 @@ export function memorySendDatabase() {
               ...(name === 'sendExecution' ? { status: 'RESERVED' } : {}),
               ...(name === 'integration' ? {disabled:false,inBetweenSteps:false,refreshNeeded:false} : {}),
               ...(name === 'extensionNode' ? {status:'ACTIVE',credentialVersion:1,revision:1,lastReportSequence:0,lastSeenAt:new Date()} : {}),
-              ...structuredClone(Object.fromEntries(Object.entries(data).map(([key,value]) => [key, value === Prisma.JsonNull ? null : value]))),
+              ...structuredClone(Object.fromEntries(Object.entries(data).map(([key,value]) => [key, value === Prisma.JsonNull || value === Prisma.DbNull ? null : value]))),
             };
             rows(name).push(row);
             return output(row);
