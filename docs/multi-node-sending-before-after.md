@@ -371,3 +371,20 @@ An unpermitted X draft stops holding the entire account after both its browser l
 The next independent Post or Reply still waits through the stored pacing interval measured from the latest lease, preparation, or permit boundary. Draft exposure captures that interval using the existing policy read. Historical executions whose stored interval is zero remain bounded; the next operation still performs its own policy and account checks. Late outcomes for the original attempt do not clear a newer account owner.
 
 The expired application permissions prevent the original worker from renewing or obtaining a new permit. They cannot prevent a person from manually clicking an external composer left open in the browser; its original content therefore remains quarantined until its outcome is resolved.
+
+
+## Explicit owner retry without backend human approval
+
+An expired uncertain extension Post can be retried by its owner through the
+scoped execution retry API, including Medium and a thread with zero confirmed
+segments. The extension initiates this user action; backend eligibility and
+transaction checks are automatic. This does not change a confirmed fact to
+unsent. The original Post/SendIntent and segment evidence remain, the old executor
+becomes RETRY_REQUESTED, and a higher-fenced executor can later claim the same
+intent. All current posts, frozen hashes, revisions, expired authority and any
+historical confirmed segment are checked before admission. Held quota and pacing
+are preserved. Late positive or uncertain outcomes quarantine the replacement.
+Medium checks the original executor status before the native operation; it does
+not add backend calls while filling or submitting. Legacy absence review remains
+single-segment. See `multi-node-sending-api-ownership.md` for compatibility and
+`organization-sending-modes.md` for CONTROLLED/AUTONOMOUS boundaries.

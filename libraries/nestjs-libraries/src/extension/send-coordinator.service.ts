@@ -2018,8 +2018,8 @@ export class SendCoordinatorService {
     });
   }
 
-  /** Resolve only the original single-post scope; never grant general execution access. */
-  private async singleSendReviewScope(tx: Prisma.TransactionClient, org: string, user: string, executionId: string, rootPostId: string, action: 'POST' | 'REPLY' = 'POST') {
+  /** Resolve the exact frozen original post chain; never grant general execution access. */
+  private async sendReviewScope(tx: Prisma.TransactionClient, org: string, user: string, executionId: string, rootPostId: string, action: 'POST' | 'REPLY' = 'POST') {
     await this.assertMember(tx, org, user);
     const execution = await this.execution(tx, org, executionId);
     const intent = await tx.sendIntent.findFirst({ where: { id: execution.sendIntentId, organizationId: org } });
@@ -2038,36 +2038,49 @@ export class SendCoordinatorService {
         intent.fencingVersion !== execution.fencingVersion || post.releaseId || intent.hasConfirmedSegments)
       reject('SEND_POST_REVIEW_NOT_SETTLED');
     await this.projects.assertProjectAccess(org, execution.projectId);
-    const payload = execution.payload as Array<{ id?: string }>;
-    const segments = await tx.sendSegment.findMany({ where: { executionId, organizationId: org }, take: 2 });
-    const segment = segments[0];
-    if (!Array.isArray(payload) || payload.length !== 1 || payload[0]?.id !== rootPostId || segments.length !== 1 ||
-        segment.segmentIndex !== 0 || segment.postId !== rootPostId ||
+    const payload = execution.payload as Array<{ id?: string; contentHash?: string }>;
+    const segments = await tx.sendSegment.findMany({ where: { executionId, organizationId: org }, orderBy: { segmentIndex: 'asc' } });
+    const posts = await this.chain(tx, org, rootPostId);
+    if (!Array.isArray(payload) || !payload.length || payload.length !== segments.length || posts.length !== payload.length ||
+        (action === 'REPLY' && payload.length !== 1) || new Set(payload.map(row => row?.id)).size !== payload.length ||
+        posts.some((row, index) => payload[index]?.id !== row.id || segments[index]?.segmentIndex !== index ||
+          segments[index]?.postId !== row.id || payload[index]?.contentHash !== postSendHash(row) ||
+          segments[index]?.contentHash !== payload[index]?.contentHash || row.sendIntentId !== intent.id ||
+          row.integrationId !== execution.integrationId || row.routeRevision !== execution.routeRevision ||
+          row.contentRevision !== execution.contentRevision || row.releaseId || row.releaseURL || row.state === 'PUBLISHED') ||
         await tx.sendSegment.count({ where: { organizationId: org, status: 'CONFIRMED', execution: { sendIntentId: intent.id } } }))
       reject('SEND_POST_REVIEW_NOT_SETTLED');
-    return { execution, intent, segment };
+    return { execution, intent, segments, segment: segments[0] };
   }
 
   private async assertPostReviewStopped(tx: Prisma.TransactionClient, execution: SendExecution, intent: SendIntent,
-    segment: { status: string; submitBefore: Date | null; authorizedAt: Date | null; permitHash: string | null; result: unknown }, now: Date) {
+    segments: Array<{ status: string; submitBefore: Date | null; authorizedAt: Date | null; permitHash: string | null; result: unknown }>, now: Date) {
     const account = await tx.accountWriteState.findUniqueOrThrow({ where: { organizationId_canonicalAccountKey: {
       organizationId: execution.organizationId, canonicalAccountKey: execution.canonicalAccountKey,
     } } });
-    const result = segment.result as { status?: string } | null;
-    const unpermitted = !segment.submitBefore && !segment.authorizedAt && !segment.permitHash;
-    const exposed = unpermitted && segment.status === 'PENDING' && result?.status === 'draft_exposed' &&
-      execution.status === 'SENDING' && intent.status === 'SENDING';
-    const uncertain = segment.status === 'UNKNOWN' && execution.status === 'RECONCILING' && intent.status === 'RECONCILING' &&
-      (segment.submitBefore ? segment.submitBefore <= now : unpermitted && result?.status === 'unknown');
-    if ((!exposed && !uncertain) || intent.activeExecutionId !== execution.id || execution.leaseExpiresAt > now ||
+    let uncertain = false;
+    for (const segment of segments) {
+      const result = segment.result as { status?: string; stopped?: boolean } | null;
+      const unpermitted = !segment.submitBefore && !segment.authorizedAt && !segment.permitHash;
+      const exposed = unpermitted && segment.status === 'PENDING' && result?.status === 'draft_exposed' &&
+        execution.status === 'SENDING' && intent.status === 'SENDING';
+      const unknown = segment.status === 'UNKNOWN' && execution.status === 'RECONCILING' && intent.status === 'RECONCILING' &&
+        (segment.submitBefore ? segment.submitBefore <= now : unpermitted && result?.status === 'unknown');
+      const untouched = segment.status === 'PENDING' && unpermitted && !segment.result;
+      const stopped = segment.status === 'NOT_SUBMITTED' && result?.status === 'definitely_not_submitted' && result.stopped === true;
+      if ((!exposed && !unknown && !untouched && !stopped) || (segment.submitBefore && !(segment.submitBefore <= now)))
+        reject('SEND_POST_REVIEW_NOT_SETTLED');
+      uncertain ||= exposed || unknown;
+    }
+    if (!uncertain || intent.activeExecutionId !== execution.id || execution.leaseExpiresAt > now ||
         (account.activeExecutionId && account.activeExecutionId !== execution.id))
       reject('SEND_POST_REVIEW_NOT_SETTLED');
   }
 
   async postReview(org: string, user: string, executionId: string, rootPostId: string) {
     return sendTransaction(this.db, async tx => {
-      const { execution, intent, segment } = await this.singleSendReviewScope(tx, org, user, executionId, rootPostId);
-      await this.assertPostReviewStopped(tx, execution, intent, segment, new Date());
+      const { execution, intent, segments, segment } = await this.sendReviewScope(tx, org, user, executionId, rootPostId);
+      await this.assertPostReviewStopped(tx, execution, intent, segments, new Date());
       const mode = await this.modes.stateIn(tx, org);
       const account = await tx.accountWriteState.findUnique({ where: { organizationId_canonicalAccountKey: {
         organizationId: org, canonicalAccountKey: execution.canonicalAccountKey,
@@ -2075,7 +2088,7 @@ export class SendCoordinatorService {
       const canRetryUnconfirmed = mode.mode === 'CONTROLLED' && !!account?.rolloutReady &&
         await this.claimProjectActive(org, execution.projectId);
       const target = execution.target as { id: string; idNamespace: string; handle?: string };
-      return { canReviewNotSent: true as const, canRetryUnconfirmed, expectedResolutionRevision: execution.resolutionRevision,
+      return { canReviewNotSent: segments.length === 1, canRetryUnconfirmed, expectedResolutionRevision: execution.resolutionRevision,
         targetAccount: { id: target.id, idNamespace: target.idNamespace, ...(target.handle ? { handle: target.handle } : {}) } };
     });
   }
@@ -2141,13 +2154,13 @@ export class SendCoordinatorService {
       if (account.activeExecutionId === executionId && (recoveringReply || original.status === 'RECONCILING'))
         account = await releaseExpiredAccountWriterIn(tx, account, new Date());
       if (recoveringReply && account.activeExecutionId === executionId) return { status: 'waiting' as const };
-      const { execution, intent, segment } = await this.singleSendReviewScope(tx, org, user, executionId, rootPostId, reply ? 'REPLY' : 'POST');
+      const { execution, intent, segments, segment } = await this.sendReviewScope(tx, org, user, executionId, rootPostId, reply ? 'REPLY' : 'POST');
       if (execution.resolutionRevision !== body.expectedResolutionRevision) reject('SEND_RESOLUTION_REVISION_CONFLICT');
       const now = new Date();
       if (reply && (segment.submitBefore && segment.submitBefore > now ||
           account.activeExecutionId && account.activeExecutionId !== executionId))
         return { status: 'waiting' as const };
-      await this.assertPostReviewStopped(tx, execution, intent, segment, now);
+      await this.assertPostReviewStopped(tx, execution, intent, segments, now);
       if (reply && (segment.authorizedAt || segment.submitBefore || segment.permitHash ||
           this.xDraftRequiresReview(execution, segment)) && body.confirmDuplicateRisk !== true)
         return { status: 'review-required' as const, reason: 'The previous attempt may already have posted this reply. Retrying could create a duplicate.' };
@@ -2184,7 +2197,8 @@ export class SendCoordinatorService {
       reject('SEND_POST_ABSENCE_REVIEW_REQUIRED');
     if (!body.eventId?.trim() || body.eventId.length > 128) throw new BadRequestException('INVALID_SEND_OUTCOME');
     return sendTransaction(this.db, async tx => {
-      const { execution, intent, segment } = await this.singleSendReviewScope(tx, org, user, executionId, rootPostId);
+      const { execution, intent, segments, segment } = await this.sendReviewScope(tx, org, user, executionId, rootPostId);
+      if (segments.length !== 1) reject('SEND_POST_REVIEW_NOT_SETTLED');
       const event: SendOutcome = {
         eventId: `post-review:${user}:${sendHash(body.eventId)}`, status: 'definitely_not_submitted', stopped: true,
         evidence: `Post reviewer ${user} verified the target account has no published post and closed all original drafts.`,
@@ -2201,7 +2215,7 @@ export class SendCoordinatorService {
       }
       if (!Number.isSafeInteger(body.expectedResolutionRevision) || body.expectedResolutionRevision !== execution.resolutionRevision)
         reject('SEND_RESOLUTION_REVISION_CONFLICT');
-      await this.assertPostReviewStopped(tx, execution, intent, segment, new Date());
+      await this.assertPostReviewStopped(tx, execution, intent, segments, new Date());
       const result = await this.outcomeIn(tx, execution, 0, event, new Date());
       if (result.conflict) reject('SEND_OUTCOME_CONFLICT_REQUIRES_RECONCILIATION');
       await tx.sendExecution.update({ where: { id: executionId }, data: { resolutionRevision: { increment: 1 } } });

@@ -97,12 +97,28 @@ any outcome report. Replies and partial threads retain administrator resolution.
 
 ## Explicit owner-requested retry of an uncertain post
 
-The extension can offer one-click **Retry** for an expired original single-post
-attempt. The scoped `GET /sending/executions/:id/posts/:rootPostId/review` adds
+The extension can offer one-click **Retry** for an expired original Post
+attempt, including a thread with zero confirmed segments. The scoped `GET /sending/executions/:id/posts/:rootPostId/review` adds
 `canRetryUnconfirmed` alongside `expectedResolutionRevision`. This admission flag
 requires controlled sending, an active project, a ready account, the original
 owner scope, settled execution and submit deadlines, and no confirmed or newer
 writer. It does not assert that the first attempt was unsent.
+
+This is an automatic eligibility decision, not a human approval or confirmation
+stage in the backend. The user initiates Retry in the extension. Medium is not
+excluded: the extension checks its live account and any matching publication,
+then uses this same endpoint if no confirmed publication was found. A positive
+local Medium receipt blocks requeue even if its report never reaches the backend;
+the extension requests result synchronization instead of trusting stale eligibility.
+
+The service validates every ordered post and segment against the frozen payload,
+content hashes, integration and route/content revisions. Any current or historical
+confirmed segment, release evidence, live permit, changed chain or competing
+writer blocks a whole-post retry. Untouched trailing PENDING segments are allowed
+only without authorization or result evidence; at least one stopped uncertain or
+exposed segment must remain. Reply retry and legacy absence review remain
+single-segment operations. The old absence-review response reports
+`canReviewNotSent:false` for threads, without blocking `canRetryUnconfirmed`.
 
 `POST /sending/executions/:id/posts/:rootPostId/retry` accepts only a stable
 `requestId` and `expectedResolutionRevision`. It returns
@@ -112,7 +128,13 @@ advances fencing and resolution revisions, releases only its account ownership,
 and queues the same original intent. A SendMutationReceipt audits the requesting
 member and makes transport retries idempotent, including after a newer claim.
 No absence acknowledgments, negative outcome, content copy, or quota release are
-implied. New authorization still enforces all ordinary account and quota checks.
+implied. A later Medium claim uses the existing authenticated executor-status
+read to observe the original RETRY_REQUESTED status before native operation,
+and checks a higher fence and the same frozen account/content scope. It preserves
+the original local UNKNOWN journal. No new request field or schema is needed.
+Deploy this backend change before the extension; older servers retain their
+single-post eligibility limits and cannot admit uncertain thread retries.
+New authorization still enforces all ordinary account and quota checks.
 
 Business status follows the current attempt; explicitly superseded uncertainty
 remains in history and quota accounting. Any new late positive or uncertain
@@ -206,13 +228,15 @@ first, then calling backend preflight/start. Implementation and the permitted jo
    report, start, lease renewal or auth-token refresh between fill and submission.
    For the new mode an AUTHORIZED segment already protects possible draft
    exposure, so no separate X draft-exposure backend request is sent after start.
-5. The existing `beforeSubmit` ticket boundary becomes local-only: check the cached
-   AIsee owner, browser cookie/session identity and bounded native composer state,
-   enforce the acknowledged deadline with both clocks, and durably consume the
-   one-shot command before the native click. Do not repeat server or platform
-   identity-discovery requests at this final boundary; perform those before the
-   native interval and use local cookie/DOM proofs during it. Native platform
-   uploads, preparation, publish requests and result readback remain necessary.
+5. The legacy-named `beforeSubmit` callback is local admission before native
+   filling/upload. It checks the cached owner/browser identity and durably
+   consumes the existing one-shot command. The original page writer checks its
+   bounded capability synchronously at its native click, without a separate
+   after-fill coordinator, backend request or identity-discovery request. Verified
+   Medium preview/Quora no-composer navigation may bind only the remaining budget
+   to the same-origin/session document, never renew it. Reddit retains its native
+   platform request after consumption. This client correction changes no backend
+   API, mode/account rules, quota, frequency limit or database schema.
 6. After the native operation completes, persist its result and any platform ID/URL
    before reporting the original execution outcome. Lost report acknowledgments
    replay only the same report/event; never replay the platform submission. Missing
@@ -269,3 +293,11 @@ Deploy the backend before repacking/reloading the extension. Older clients that 
 ## Direct local database diagnosis (2026-11-12)
 
 `diagnose-send-attempts.ts` runs locally against the configured PostgreSQL connection; it does not call the backend HTTP API. After validating `DATABASE_URL`, the script passes that exact URL as the Prisma datasource override. A generated client may contain an embedded test datasource, so its implicit default is not proof that the operator-selected remote database is used. The script performs bounded ORM reads only and never repairs, requeues or submits content. Initialization and query failures print safe Prisma error categories, including `errorCode` on initialization errors, without printing connection URLs, credentials or raw queries. Local TCP reachability and a client initialization failure can therefore describe different targets until this explicit override is applied. Verification: the repaired CLI completed a scoped read against the explicitly verified remote `aisee_postiz_dev` database. The focused diagnostic suite passed 36 tests; the full permitted backend suite passed 5483 tests with 0 failures and 15 existing skips. Frozen `apps/extension/**` and the two documented database-dependent test files remain excluded. The diagnostic script and tests passed their isolated TypeScript check. No business records were changed.
+
+The extension's [Chrome verification record](../../aisee-browser-extension/docs/native-browser-verification-2026-11-12.md)
+distinguishes a verified new LinkedIn Post from DOM-only checks and Medium's CDN
+403 failure. Medium now waits for its empty article editor before requesting
+backend preparation or consuming local permission; an absent editor settles via
+the existing PREPARED/NOT_SUBMITTED stop-proof path. No backend source, endpoint,
+quota or journal state contract changes are required for that readiness fix.
+Historical UNKNOWN records remain subject to their existing recovery rules.

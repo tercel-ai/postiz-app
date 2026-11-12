@@ -6,8 +6,10 @@ import { sendBusinessSummary } from '../send-business-summary';
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(sendNow); vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true'); });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 const request = () => ({ requestId: 'retry-one', expectedResolutionRevision: 0 });
-async function uncertainPost() {
+async function uncertainPost(segmentCount = 1) {
  const f=setupSend(); await f.create('root','EXTENSION');
+ for(let index=1;index<segmentCount;index++) f.db.seed('post',{...f.db.rows('post')[0],id:`child-${index}`,
+  parentPostId:index===1?'root':`child-${index-1}`,content:`thread segment ${index}`});
  const execution=await f.service.reserveApi('org','root','original',sendNow);
  await f.service.authorizeApiSegment('org',execution.id,0,{id:'123',idNamespace:'x.rest_id'},sendNow);
  await f.service.apiOutcome('org',execution.id,0,{eventId:'lost',status:'unknown',evidence:'Original network uncertainty'},sendNow);
@@ -306,4 +308,55 @@ describe('owner retry of a saved reply', () => {
     await expect(f.service.retryUnconfirmedReply('org', 'user', f.execution.id, 'reply', request())).rejects.toThrow();
     expect(f.db.rows('sendIntent')[0].status).toBe('RECONCILING');
   });
+});
+
+
+describe('owner retry of a zero-confirmed thread', () => {
+ it('requeues all four original posts while preserving the unknown root, trailing pending segments and held quota', async () => {
+  const f=await uncertainPost(4);
+  const evidence=structuredClone(f.db.rows('sendSegment'));
+  expect(await f.service.postReview('org','user',f.execution.id,'root')).toMatchObject({canRetryUnconfirmed:true,canReviewNotSent:false});
+  expect(await retry(f)).toEqual({sendIntentId:f.execution.sendIntentId,status:'QUEUED'});
+  expect(f.db.rows('sendSegment')).toEqual(evidence);
+  expect(f.db.rows('post').every(p=>p.state==='QUEUE'&&p.sendIntentId===f.execution.sendIntentId)).toBe(true);
+  expect(f.db.rows('sendExecution')[0]).toMatchObject({status:'RETRY_REQUESTED',resolutionRevision:1});
+  expect(f.db.rows('sendQuotaReservation')[0].state).toBe('HELD');
+  const next=await f.service.reserveApi('org','root','new-thread',new Date());
+  expect(next.payload.map(p=>p.id)).toEqual(['root','child-1','child-2','child-3']);
+  expect(await retry(f)).toEqual({sendIntentId:f.execution.sendIntentId,status:'QUEUED'});
+  expect(f.db.rows('sendIntent')[0].activeExecutionId).toBe(next.id);
+  await expect(f.service.authorizeApiSegment('org',next.id,0,{id:'123',idNamespace:'x.rest_id'},new Date())).rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+ });
+ it.each(['confirmed-child','historical-confirmation','child-release','live-child-permit','authorized-child','missing-segment','duplicate-payload','changed-child','foreign-child','reply-thread'])('rejects unsafe %s without superseding evidence', async kind => {
+  const f=await uncertainPost(4);const segments=f.db.rows('sendSegment');const child=segments[1];
+  if(kind==='confirmed-child')child.status='CONFIRMED';
+  if(kind==='historical-confirmation') {f.db.seed('sendExecution',{...f.db.rows('sendExecution')[0],id:'prior'});f.db.seed('sendSegment',{...child,id:'prior-segment',executionId:'prior',status:'CONFIRMED'});}
+  if(kind==='child-release')f.db.rows('post')[1].releaseId='already-posted';
+  if(kind==='live-child-permit')Object.assign(child,{status:'UNKNOWN',authorizedAt:new Date(),submitBefore:new Date(Date.now()+60000),permitHash:'child-permit',result:{status:'unknown'}});
+  if(kind==='authorized-child')Object.assign(child,{status:'AUTHORIZED',authorizedAt:new Date(),submitBefore:new Date(Date.now()-1000),permitHash:'child-permit'});
+  if(kind==='missing-segment')segments.splice(2,1);
+  if(kind==='duplicate-payload')f.db.rows('sendExecution')[0].payload[1].id='root';
+  if(kind==='changed-child')f.db.rows('post')[1].content='changed after execution';
+  if(kind==='foreign-child')f.db.rows('post')[1].integrationId='another-account';
+  if(kind==='reply-thread') {f.db.rows('sendExecution')[0].action='REPLY';f.db.rows('sendIntent')[0].action='REPLY';}
+  await expect(f.service.postReview('org','user',f.execution.id,'root')).rejects.toThrow();
+  await expect(retry(f)).rejects.toThrow();
+  expect(f.db.rows('sendIntent')[0]).toMatchObject({status:'RECONCILING',activeExecutionId:f.execution.id});
+  expect(f.db.rows('sendQuotaReservation')[0].state).toBe('HELD');
+ });
+ it('does not let legacy single-segment absence attestation clear a whole thread', async () => {
+  const f=await uncertainPost(4);
+  await expect(f.service.reviewPostNotSent('org','user',f.execution.id,'root', {eventId:'review',expectedResolutionRevision:0,reviewedNotSent:true,draftsClosed:true})).rejects.toThrow('SEND_POST_REVIEW_NOT_SETTLED');
+  expect(f.db.rows('sendSegment')[0].status).toBe('UNKNOWN');
+  expect(f.db.rows('sendQuotaReservation')[0].state).toBe('HELD');
+ });
+ it('fences a newer thread claim when an original positive result arrives late', async () => {
+  const f=await uncertainPost(4);await retry(f);const next=await f.service.reserveApi('org','root','next-thread',new Date());
+  const old=f.db.rows('sendExecution').find(e=>e.id===f.execution.id);
+  const result=await f.db.$transaction((tx:any)=>f.service.outcomeIn(tx,old,0,{eventId:'late-root',status:'confirmed',platformId:'old-root',url:'https://x.com/alice/status/old-root'},new Date()));
+  expect(result.conflict).toBe(true);
+  expect(f.db.rows('sendExecution').find(e=>e.id===next.id).status).toBe('RECONCILING');
+  expect(f.db.rows('accountWriteState')[0].rolloutReady).toBe(false);
+  expect(f.db.rows('sendSegment').find(s=>s.executionId===f.execution.id&&s.segmentIndex===0).status).toBe('CONFIRMED');
+ });
 });

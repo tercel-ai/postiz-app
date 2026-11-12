@@ -513,3 +513,20 @@ The extension displays waiting for an earlier attempt rather than implying that 
 ## Front-loaded native sends (2026-11-12)
 
 The user-approved NATIVE_FLOW_V1 contract in [API ownership](multi-node-sending-api-ownership.md#front-loaded-native-execution-contract-native_flow_v1-2026-11-12) moves backend preflight and authorization before native content mutation. CONTROLLED keeps its frozen actor, company composer proof and multi-node fencing; AUTONOMOUS keeps its current-browser actor. Already granted native work is bounded by the acknowledged execution deadline and is not interrupted by backend calls or lease renewals. Old client/API short permits remain unchanged when the opt-in mode is omitted. Implementation and permitted joint regression verification are complete. Live platform publication acceptance remains outstanding. Native permits are bounded to ten minutes and the original thirty-minute preparation/quota limits; already accepted work remains owned across mode handover and settles its original result.
+
+
+## Explicit retry of uncertain controlled publications
+
+A user clicking Retry in the extension requests automatic backend eligibility
+checks, not human approval. An expired uncertain Post or zero-confirmed thread
+may be queued on the same business record through the scoped owner-retry API.
+Every frozen segment, account, revision and deadline is rechecked; confirmed or
+partially published content cannot be replayed. Medium follows the same action
+with a live browser-account check. Original UNKNOWN evidence and HELD quotas stay
+preserved, and late receipts can quarantine the replacement executor.
+
+This recovery endpoint remains CONTROLLED-only. It does not change AUTONOMOUS
+current-session account selection or make uncertain controlled content eligible
+for automatic mode-handover replay. Mode changes, pauses, active writers, quota
+and pacing continue to be checked through their existing admission paths.
+See `multi-node-sending-api-ownership.md` for request and compatibility details.
