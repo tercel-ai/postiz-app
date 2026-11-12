@@ -1,4 +1,6 @@
 import { assertAutonomousAccountIn } from '../send-mode-handover';
+import { SEND_PREPARATION_LIMIT_MS } from '../send-coordination.utils';
+import { SendExecutionService } from '../send-execution.service';
 import { readPublishNowRequestedAt, withPublishNowRequestedAt } from '../send-dispatch';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SendModeService } from '../send-mode.service';
@@ -516,6 +518,59 @@ it('allows independent autonomous work after the controlled account cooldown whi
   expect(db.rows('sendIntent')[0]).toMatchObject({ status: 'RECONCILING', activeExecutionId: old.id });
   expect(db.rows('sendQuotaReservation')[0].state).toBe('HELD');
   expect(db.rows('sendSegment')[0].status).toBe('UNKNOWN');
+});
+
+
+
+it.each([
+  ['exposed', false], ['exposed', true], ['unknown', false], ['unknown', true],
+] as const)('releases an expired %s X draft across autonomous handover without replaying it (already swept: %s)', async (phase, swept) => {
+  vi.stubEnv('SEND_EXECUTION_CREDENTIAL_KEY', 'review-key-at-least-thirty-two-characters');
+  const { db, service, create, reverse, modes } = setup();
+  await create('root', 'EXTENSION');
+  await create('independent', 'EXTENSION');
+  db.seed('extensionNode', {
+    id: 'node', nodeId: 'node', organizationId: 'org', credentialVersion: 1,
+    capabilities: { x: { post: true, reply: true, strictAccountVerification: true } },
+  });
+  db.seed('extensionNodeSession', {
+    extensionNodeId: 'node', organizationId: 'org', platform: 'x',
+    integrationId: 'account', verificationStatus: 'VERIFIED',
+    verificationExpiresAt: new Date(sendNow.getTime() + 300_000), sessionRevision: 1,
+    probeId: 'initial', accountIdentity: { id: '123', namespace: 'x.rest_id' },
+  });
+  const nodes = { authenticateIn: vi.fn(async () => db.rows('extensionNode')[0]) };
+  const executions = new SendExecutionService(db as any, nodes as any, service);
+  const auth = { org: 'org', user: 'user', nodeId: 'node', token: 'token' };
+  const old = (await executions.claim(auth, { requestId: 'original', action: 'POST', rootPostId: 'root' })).items[0];
+  await executions.draftExposure(auth, old.executionId, 0, old.leaseToken);
+  if (phase === 'unknown') {
+    await executions.outcome(auth, old.executionId, 0, old.leaseToken, { status: 'unknown', eventId: 'lost' });
+  }
+  await reverse();
+  const begin = (requestId: string) => modes.beginBrowserWrite('org', 'user', {
+    ...owner, requestId, platform: 'x', postId: 'independent', contentHash: 'a'.repeat(64),
+  });
+  await expect(begin('not-expired')).rejects.toThrow('CONTROLLED_ACCOUNT_DRAIN_REQUIRED');
+  vi.setSystemTime(new Date(sendNow.getTime() + SEND_PREPARATION_LIMIT_MS + 1));
+  if (swept) await service.recoverExpiredAccountWriters();
+  const cooldown = new Date(sendNow.getTime() + SEND_PREPARATION_LIMIT_MS + 60_000);
+  await expect(begin('cooling')).rejects.toMatchObject({ response: {
+    code: 'ACCOUNT_WRITE_INTERVAL', nextSendNotBefore: cooldown.toISOString(),
+  } });
+  vi.setSystemTime(new Date(cooldown.getTime() + 1));
+  expect(await begin('ready')).toMatchObject({ admitted: true, accountSelectionMode: 'CURRENT_SESSION' });
+  expect(await service.legacyBlockedPlatforms('org')).not.toContain('x');
+  expect(db.rows('post').find(post => post.id === 'independent')).toMatchObject({
+    accountSelectionMode: 'CURRENT_SESSION', sendIntentId: null, executionProtocol: 'LEGACY',
+  });
+  const original = db.rows('sendIntent').find(intent => intent.rootPostId === 'root');
+  expect(original).toMatchObject({ status: 'RECONCILING', activeExecutionId: old.executionId });
+  expect(db.rows('post').find(post => post.id === 'root')).toMatchObject({
+    sendIntentId: original.id, executionProtocol: 'ACCOUNT_BOUND_V1',
+  });
+  expect(db.rows('sendSegment').find(segment => segment.executionId === old.executionId).status).toBe('UNKNOWN');
+  expect(db.rows('sendExecution')).toHaveLength(1);
 });
 
 

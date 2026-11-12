@@ -25,6 +25,7 @@ import {
   SendOutcomeDto,
   EnqueueSendDto,
   StopSendDto,
+  StartSendDto,
   ReconcileSendDto,
   VerifySavedReplyDto,
   ReviewPostNotSentDto,
@@ -103,13 +104,15 @@ export class SendExecutionsController {
     @GetUserFromRequest() user: User,
     @Headers() headers: Record<string, string>,
     @Param('id') id: string,
-    @Param('index', ParseIntPipe) index: number
+    @Param('index', ParseIntPipe) index: number,
+    @Body() body: StartSendDto = {}
   ) {
     return this.sends.start(
       this.auth(org, user, headers),
       id,
       index,
-      headers['x-send-lease-token']
+      headers['x-send-lease-token'],
+      body
     );
   }
   @Post('/:id/segments/:index/outcome')

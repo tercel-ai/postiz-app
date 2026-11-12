@@ -8,6 +8,7 @@ import { basename } from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import * as dotenv from 'dotenv';
 import { databaseNameFromUrl } from './lib/database-url';
+import { CONTROLLED_SEND_PLATFORMS } from '../libraries/nestjs-libraries/src/extension/controlled-platforms';
 
 export interface DiagnosisOptions {
   attempt?: string;
@@ -15,6 +16,8 @@ export interface DiagnosisOptions {
   user?: string;
   organization?: string;
   cursor?: string;
+  platform?: typeof CONTROLLED_SEND_PLATFORMS[number] | 'all';
+  action?: 'POST' | 'REPLY' | 'all';
   limit: number;
   details?: boolean;
 }
@@ -26,13 +29,20 @@ export function parseOptions(args: string[]): DiagnosisOptions {
     const key = args[index];
     if (key === '--details') { details = true; continue; }
     const value = args[++index];
-    if (!['--attempt', '--reply', '--user', '--organization', '--cursor', '--limit'].includes(key) || !value || value.startsWith('--'))
-      throw new Error('Expected --attempt ID, --reply ID, --user ID, --organization ID, --cursor ID, or --limit NUMBER; --details enables outcome diagnostics');
+    if (!['--attempt', '--reply', '--user', '--organization', '--cursor', '--limit', '--platform', '--action'].includes(key) || !value || value.startsWith('--'))
+      throw new Error('Expected --attempt ID, --reply ID, --user ID, --organization ID, --cursor ID, --limit NUMBER, --platform PLATFORM|all, or --action POST|REPLY|all; --details enables outcome diagnostics');
     values[key] = value;
   }
   const limit = Number(values['--limit'] ?? 100);
   if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error('Limit must be an integer from 1 to 1000');
-  return { attempt: values['--attempt'], reply: values['--reply'], user: values['--user'], organization: values['--organization'], cursor: values['--cursor'], limit, ...(details ? { details } : {}) };
+  const platform = values['--platform'] as DiagnosisOptions['platform'];
+  const action = values['--action'] as DiagnosisOptions['action'];
+  if (platform !== undefined && platform !== 'all' && !(CONTROLLED_SEND_PLATFORMS as readonly string[]).includes(platform))
+    throw new Error(`Platform must be one of ${CONTROLLED_SEND_PLATFORMS.join(', ')}, or all`);
+  if (action !== undefined && !['POST', 'REPLY', 'all'].includes(action))
+    throw new Error('Action must be POST, REPLY, or all');
+  if (values['--reply'] && action === 'POST') throw new Error('Reply scope requires REPLY or all');
+  return { platform, action, attempt: values['--attempt'], reply: values['--reply'], user: values['--user'], organization: values['--organization'], cursor: values['--cursor'], limit, ...(details ? { details } : {}) };
 }
 
 export function assertDiagnosisDatabase(databaseUrl: string | undefined) {
@@ -54,6 +64,8 @@ export function summarizeSendEvidence(value: unknown) {
 }
 
 export async function diagnoseSendAttempts(db: PrismaClient, options: DiagnosisOptions) {
+  const platform = options.platform ?? (options.user ? 'devto' : undefined);
+  const action = options.action ?? (options.user ? 'REPLY' : undefined);
   const nodesForUser = options.user ? await db.extensionNode.findMany({
     where: { registeredByUserId: options.user, organizationId: options.organization },
     select: { id: true },
@@ -66,8 +78,9 @@ export async function diagnoseSendAttempts(db: PrismaClient, options: DiagnosisO
       } } }),
       ...(options.organization ? { organizationId: options.organization } : {}),
       ...(options.reply ? { action: 'REPLY', intent: { rootPost: { engageSentReply: { id: options.reply } } } } : {}),
+      ...(platform && platform !== 'all' ? { platform } : {}),
+      ...(action && action !== 'all' ? { action } : {}),
       ...(options.user ? {
-        platform: 'devto', action: 'REPLY',
         OR: [
           { extensionNodeId: { in: nodesForUser.map(node => node.id) } },
           { intent: { policySnapshot: { path: ['policyOwnerUserId'], equals: options.user } } },
@@ -130,7 +143,9 @@ export async function diagnoseSendAttempts(db: PrismaClient, options: DiagnosisO
 
 async function main() {
   if (process.argv.includes('--help')) {
-    console.log('Usage: pnpm exec ts-node --project scripts/tsconfig.json scripts/diagnose-send-attempts.ts [--attempt ID] [--reply ID] [--user ID (Dev.to replies)] [--organization ID] [--cursor ID] [--limit 100] [--details]');
+    console.log('Usage: pnpm exec ts-node --project scripts/tsconfig.json scripts/diagnose-send-attempts.ts [--attempt ID] [--reply ID] [--user ID] [--platform x|reddit|linkedin|medium|quora|hackernews|devto|all] [--action POST|REPLY|all] [--organization ID] [--cursor ID] [--limit 100] [--details]');
+    console.log('User scans default to --platform devto --action REPLY when those selectors are omitted. Use all to remove each selector; --reply always retains its reply scope.');
+    console.log('Example: pnpm exec ts-node --project scripts/tsconfig.json scripts/diagnose-send-attempts.ts --user USER_ID --organization ORG_ID --platform linkedin --action POST --details');
     return;
   }
   const options = parseOptions(process.argv.slice(2));

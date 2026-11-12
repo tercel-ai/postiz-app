@@ -1,3 +1,6 @@
+import { validateSync } from 'class-validator';
+import { StartSendDto } from '@gitroom/nestjs-libraries/extension/send-execution.dto';
+import { SendExecutionsController } from '../send-executions.controller';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PostsController } from '../posts.controller';
 import { EngageController } from '../engage.controller';
@@ -83,4 +86,18 @@ describe('compatible due endpoint routing', () => {
       'ACCOUNT_BOUND_SEND_NOT_ENABLED'
     );
   });
+});
+
+it('forwards an optional native authorization request on the existing segment start route', async () => {
+ const start=vi.fn().mockResolvedValue({granted:true});
+ const controller=new SendExecutionsController({start} as any);
+ const body={authorizationMode:'NATIVE_FLOW_V1' as const};
+ await controller.start(org,user,{...headers,'x-send-lease-token':'lease'},'execution',0,body);
+ expect(start).toHaveBeenCalledWith({org:'org',user:'user',nodeId:'node',token:'node-token'},'execution',0,'lease',body);
+});
+
+it('validates native start opt-in while keeping an empty old-client request valid', () => {
+ expect(validateSync(Object.assign(new StartSendDto(),{}))).toEqual([]);
+ expect(validateSync(Object.assign(new StartSendDto(),{authorizationMode:'NATIVE_FLOW_V1'}))).toEqual([]);
+ for(const authorizationMode of ['unknown',true,1]) expect(validateSync(Object.assign(new StartSendDto(),{authorizationMode}))).not.toEqual([]);
 });

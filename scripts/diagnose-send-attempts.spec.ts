@@ -69,3 +69,50 @@ describe('detailed publish diagnosis', () => {
     expect(db.sendOutcomeEvent.findMany).toHaveBeenCalledTimes(1);
   });
 });
+
+
+describe('platform and action diagnostic filters', () => {
+  it.each(['x','reddit','linkedin','medium','quora','hackernews','devto','all'])('accepts the canonical %s platform', platform => {
+    expect(parseOptions(['--platform',platform,'--action','POST'])).toMatchObject({platform,action:'POST'});
+  });
+  it.each(['POST','REPLY','all'])('accepts the %s action selector', action => {
+    expect(parseOptions(['--action',action])).toMatchObject({action});
+  });
+  it.each([['--platform','linkedin-page'],['--platform','LinkedIn'],['--platform','unknown'],['--action','post'],['--action','DELETE'],['--platform'],['--action']])('rejects invalid selector arguments %j', (...args) => {
+    expect(()=>parseOptions(args)).toThrow();
+  });
+  it('rejects a POST selector for a reply scope before reading any records', () => {
+    expect(()=>parseOptions(['--reply','reply-id','--action','POST'])).toThrow('Reply scope requires REPLY or all');
+    expect(parseOptions(['--reply','reply-id','--action','all'])).toMatchObject({reply:'reply-id',action:'all'});
+  });
+  const fixture = () => ({
+    extensionNode:{findMany:vi.fn(async()=>[{id:'owned-node'}])},
+    sendExecution:{findMany:vi.fn(async()=>[])},
+    integration:{findMany:vi.fn(async()=>[])},post:{findMany:vi.fn(async()=>[])},
+  });
+  it('preserves the existing user-only Dev.to REPLY selection', async () => {
+    const db=fixture(); await diagnoseSendAttempts(db as any,parseOptions(['--user','user','--organization','org']));
+    expect(db.sendExecution.findMany).toHaveBeenCalledWith(expect.objectContaining({where:{kind:'EXTENSION',organizationId:'org',platform:'devto',action:'REPLY',OR:[
+      {extensionNodeId:{in:['owned-node']}},{intent:{policySnapshot:{path:['policyOwnerUserId'],equals:'user'}}},
+    ]}}));
+  });
+  it('selects LinkedIn POST attempts using the same owner scope, organization and cursor', async () => {
+    const db=fixture();
+    await diagnoseSendAttempts(db as any,parseOptions(['--user','user','--organization','org','--platform','linkedin','--action','POST','--cursor','previous','--limit','20','--details']));
+    expect(db.extensionNode.findMany).toHaveBeenCalledWith({where:{registeredByUserId:'user',organizationId:'org'},select:{id:true}});
+    expect(db.sendExecution.findMany).toHaveBeenCalledWith(expect.objectContaining({where:{kind:'EXTENSION',organizationId:'org',platform:'linkedin',action:'POST',OR:[
+      {extensionNodeId:{in:['owned-node']}},{intent:{policySnapshot:{path:['policyOwnerUserId'],equals:'user'}}},
+    ]},cursor:{id:'previous'},skip:1,take:20}));
+  });
+  it('removes both legacy filters only when all platforms and actions are explicit', async () => {
+    const db=fixture(); await diagnoseSendAttempts(db as any,parseOptions(['--user','user','--platform','all','--action','all','--organization','org']));
+    const args=db.sendExecution.findMany.mock.calls[0] as unknown as [{where:Record<string,unknown>}];
+    expect(args[0].where).toEqual({kind:'EXTENSION',organizationId:'org',OR:[
+      {extensionNodeId:{in:['owned-node']}},{intent:{policySnapshot:{path:['policyOwnerUserId'],equals:'user'}}},
+    ]});
+  });
+  it('keeps attempt and reply bounds when all selectors are explicit', async () => {
+    const db=fixture(); await diagnoseSendAttempts(db as any,parseOptions(['--attempt','attempt','--reply','reply','--organization','org','--platform','all','--action','all']));
+    expect(db.sendExecution.findMany).toHaveBeenCalledWith(expect.objectContaining({where:{kind:'EXTENSION',id:'attempt',organizationId:'org',action:'REPLY',intent:{rootPost:{engageSentReply:{id:'reply'}}}}}));
+  });
+});

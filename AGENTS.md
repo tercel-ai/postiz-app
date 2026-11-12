@@ -4,7 +4,7 @@
 
 - Do not read, modify, or review any files under this directory.
 
-- If a task appears to be related to the extension, directly inform the user that the directory is frozen and do not proceed.
+- If a task specifically targets `apps/extension/`, inform the user that this directory is frozen and do not proceed in that directory. This restriction does not freeze backend extension APIs or the active standalone `../aisee-browser-extension` repository.
 
 ## Forbidden Operations: Direct Database Writes
 
@@ -17,3 +17,35 @@
 - Schema changes may only reach the database through: (a) the user running the command themselves, or (b) the project's own deployment/migration pipeline. An agent's job stops at preparing the code — the updated `schema.prisma`, a migration SQL file under `libraries/nestjs-libraries/src/database/prisma/migrations/` documenting the change — and then explicitly telling the user what needs to be applied and how, never applying it itself.
 
 - This applies regardless of which database the task is aimed at (dev, staging, or otherwise) and regardless of how low-risk the specific schema change looks in isolation.
+
+## Post and Reply State Changes
+
+These rules are mandatory for changes affecting Post or Reply state, scheduling, Post Now, claim/admission, sending modes, account selection, retry, reconciliation, history, or status-dependent UI.
+
+### Before changing code
+
+- Read the relevant sections of the documents below and follow their references to API and state contracts. Read the affected implementation and its callers across all three repositories before editing; previous chat summaries, method names, UI labels, or passing mocks are not sufficient evidence of behavior.
+- Explain the current flow and proposed transition before implementation: website action -> backend business record/SendIntent -> execution/segment -> extension journal -> platform result -> status/history response. Distinguish these state layers and identify which component owns each transition.
+- Check both CONTROLLED and AUTONOMOUS, including mode handover, actual browser account selection, automation versus manual actions, Post versus Reply, platform pacing, and existing quota policy. Preserve CONTROLLED account verification and AUTONOMOUS current-session account behavior.
+- Identify the affected APIs, request/response fields, allowedActions, timing reasons, and consumers. Trace authorization, lease/permit expiry, account occupancy, content deduplication, late outcomes, and recovery through their callees rather than changing one condition in isolation.
+- Define concrete regression cases and the intended before/after behavior. If documents contradict the implementation or current user requirements, resolve and record that discrepancy before changing state semantics; do not silently invent a new business rule.
+
+### During implementation and verification
+
+- Keep temporary waiting/queued states distinct from failure, and distinguish an account occupancy lease from the original content's confirmation state. Expiring occupancy does not prove non-submission or authorize replay of the original content.
+- Preserve the original business record and its audit evidence during recovery. Confirmed content must not be sent again; UNKNOWN must not be automatically replayed. An explicit user retry must use the documented recovery path and re-check current server decisions, account identity and pacing.
+- Verify both modes and Post/Reply paths, including concurrency, restart, lost responses, expired authorization, late receipts, and mixed client/server versions when relevant. Do not bypass platform frequency limits to implement Post Now or retry.
+- Add meaningful regressions for changed behavior and run the full permitted test suite after source-code changes. Report passed, failed, skipped and excluded tests, plus type-check results; do not present mocks as proof of live platform publication.
+
+### After changing code
+
+- Update the relevant state/flow/API documentation in every affected repository in the same change, including status meanings, timing, button behavior and deployment compatibility. Keep request/response contracts and user-facing state mappings aligned.
+- Report the root cause, changed transitions, verification evidence, remaining issues or uncertainty, and any deployment or historical-record recovery steps. Clearly distinguish code/test verification from live browser or production verification.
+
+### Required reference documents
+
+- [Sending modes and handover](docs/organization-sending-modes.md)
+- [Backend API ownership and contracts](docs/multi-node-sending-api-ownership.md)
+- [Backend states and coordination flow](docs/multi-node-sending-before-after.md)
+- [Extension journal, permits, results and recovery](../aisee-browser-extension/docs/account-bound-send-protocol.md)
+- [Website actions and status consumers](../aisee-app/docs/multi-node-sending-before-after.md)

@@ -71,18 +71,22 @@ After a successful explicit Post now or retry, the aisee-app page wakes the stan
 
 ## Durable X draft exposure
 
-Before opening any controlled X post or reply composer, the standalone executor
-records local draft exposure and obtains
+For older clients without NATIVE_FLOW_V1, before opening a controlled X post or reply composer the executor records local draft exposure and obtains
 `POST /extension/send-attempts/:id/segments/:index/draft-exposure`. The authenticated
 original node and lease are required. The acknowledgment persists the existing
 PENDING segment result as `draft_exposed`, keeps the execution and intent SENDING,
 and retains account occupancy without allocating a submit permit or quota. An
-expired exposed draft cannot be reclaimed or renewed into another sender. A
-missing acknowledgment prevents the browser from opening the draft. Deploy this
-backend endpoint before loading a new executor that requires it.
+expired exposed draft cannot be reclaimed or renewed into another sender for the
+same content. Account occupancy is separate: after lease, the existing 30-minute
+preparation deadline and all permits expire, a fenced release retains the original
+content as UNKNOWN/RECONCILING while independent tasks wait through account pacing.
+The preparation gap is captured by the existing policy read at exposure. A missing
+acknowledgment prevents the browser from opening the draft. Content/media validation
+and downloads run before exposure; opening X is already an exposure boundary because
+it can restore a draft before injection. Deploy this backend endpoint before loading
+a new executor that requires it. No new HTTP field or database migration is needed.
 
-A later X thread segment renews the original execution before exposing its next
-draft. Retained ownership, prior confirmation, account spacing, and the original
+An older client renews the original execution before exposing a later X thread draft. NATIVE_FLOW_V1 instead checks and authorizes each segment before native work, with no renewal during that segment. Retained ownership, prior confirmation, account spacing, and the original
 thirty-minute preparation cap remain enforced. An already exposed draft with an
 expired lease requires attended review instead of renewal. Original-node
 pre-permit UNKNOWN reports retain reconciliation; stale-owner reports preserve
@@ -140,3 +144,102 @@ timing projection reports the thirty-minute bound before a composer opens. A
 policy increase after reservation is rechecked at draft exposure, and the final
 permit still rechecks policy, quotas, identity, account ownership, and deadlines
 atomically. Timing projections allocate no quota and are not send permits.
+
+
+## Seven-platform browser parity and diagnosis (2026-11-11)
+
+The native baseline comparison and per-platform corrections are documented in
+[`aisee-browser-extension/docs/account-bound-send-protocol.md`](../../aisee-browser-extension/docs/account-bound-send-protocol.md#seven-platform-native-flow-comparison-with-1209-2026-11-11).
+LinkedIn comment-scope and stable profile-photo handling are browser-side fixes;
+they add no API request or sending step. Final account, content, cookie, permit
+and one-shot checks remain authoritative. A true local input rejection before any
+tab or write settles NOT_SUBMITTED; missing or ambiguous post-dispatch evidence
+continues to require reconciliation. These browser compatibility fixes do not
+change CONTROLLED account binding or AUTONOMOUS current-session handover.
+
+The existing read-only diagnosis script now accepts explicit platform and action
+selectors. For example, run in the deployed backend checkout:
+
+```sh
+pnpm exec ts-node --project scripts/tsconfig.json scripts/diagnose-send-attempts.ts --user USER_ID --platform linkedin --action REPLY --details --limit 100
+```
+
+Use `--platform all --action all` to inspect both actions across all seven
+platforms. For compatibility, a user scan without those selectors still defaults
+to Dev.to replies. `--reply` always retains reply scope; `--organization`,
+`--attempt`, pagination and output limits remain available. Output summarizes
+stored stage/error codes rather than tokens, content or raw platform evidence.
+The script does not repair or resend anything. Its help and mocked-query tests do
+not connect to a database; an operator must verify the deployment database before
+running a live diagnosis. A manually submitted comment needs positive verification
+against its original record, not another send.
+
+
+## Front-loaded native execution contract: NATIVE_FLOW_V1 (2026-11-12)
+
+This user-approved contract supersedes the earlier controlled ordering of filling
+first, then calling backend preflight/start. Implementation and joint verification
+are in progress. The reference native flow is the actual 1.20.9 sibling checkout.
+
+1. Before the native operation, recover old receipts, check the original business
+   identity, negotiate ownership, and atomically claim the original task. Validate
+   content/media and fetch assets before authorization where possible. Prepare an
+   empty native composer, select its intended persona and identify its own author
+   without filling or attaching content. X authorizes before opening a composer
+   because opening it can restore an existing human-sendable draft.
+2. Complete fresh backend preflight and actor reporting, then call the existing
+   segment start route with `authorizationMode: NATIVE_FLOW_V1`. Existing frozen
+   actor, project/organization membership, revision, fencing, pacing and quota
+   checks remain. LinkedIn company sends still require live COMPOSER evidence for
+   the organization identity; a controlling personal account is not sufficient.
+3. The acknowledged grant must echo `authorizationMode: NATIVE_FLOW_V1` and
+   `executionDeadline`, equal to `submitBefore`. Its deadline is bounded by ten
+   minutes from authorization, the original thirty-minute preparation cap and the
+   applicable quota-window ends. The execution lease covers that same native
+   window without renewal. An absent or mismatched echo must stop the new client
+   before any native content mutation; it must not silently fall back to the old
+   after-fill backend round trip. Old clients and API executors retain their
+   existing short-permit behavior when the mode is omitted.
+4. Persist and verify the grant in the local journal before allowing native work.
+   `beforePrepare` performs the front-loaded server exchanges. After it returns,
+   all backend interaction by the send path is deferred until the native operation
+   returns a result or stops. In particular, there is no AIsee preflight, identity
+   report, start, lease renewal or auth-token refresh between fill and submission.
+   For the new mode an AUTHORIZED segment already protects possible draft
+   exposure, so no separate X draft-exposure backend request is sent after start.
+5. The existing `beforeSubmit` ticket boundary becomes local-only: check the cached
+   AIsee owner, browser cookie/session identity and bounded native composer state,
+   enforce the acknowledged deadline with both clocks, and durably consume the
+   one-shot command before the native click. Do not repeat server or platform
+   identity-discovery requests at this final boundary; perform those before the
+   native interval and use local cookie/DOM proofs during it. Native platform
+   uploads, preparation, publish requests and result readback remain necessary.
+6. After the native operation completes, persist its result and any platform ID/URL
+   before reporting the original execution outcome. Lost report acknowledgments
+   replay only the same report/event; never replay the platform submission. Missing
+   URLs or ambiguous outcomes remain uncertain instead of being invented as failed.
+7. Worker loss, lost grant acknowledgments and expired native windows never
+   recreate a usable permit. Retain the original content and ledger, apply existing
+   fenced reconciliation/account cooldown rules, and preserve late receipts without
+   stealing newer occupancy. Authorization is not permission to repeat a send.
+8. Each thread segment is an individual platform write. Backend checks may occur
+   between completed segments, before the next native operation; none may interrupt
+   a segment already executing. Website status/history shapes and original IDs are
+   unchanged. AUTONOMOUS retains current-browser identity, pre-work admission and
+   post-work outcome reporting; its in-work owner checks must not refresh AIsee auth.
+
+Required regressions include zero AIsee calls/renewals/auth refresh during native
+work, denied/unsupported authorization before fill, preserved old-client defaults,
+long native preparation within the actual deadline, local owner/session/persona
+changes and expired-command rejection, restart without replay, idempotent outcome
+replay, account pacing/quota boundaries, and all seven platforms' Post/Reply paths.
+
+### Native media, worker lifetime and user-facing errors
+
+All requested media bytes are prepared before content mutation and downloaded before authorization where the platform permits it. Native uploads and platform-side processing remain inside the platform operation. Requested media must reach the platform's completed-upload/readiness condition before publication; a local preview is insufficient. X, LinkedIn and Dev.to stop when their attachment preparation fails instead of continuing with missing images. A stop after a page can contain a draft is not proof of non-submission and must not set `neverSent` or trigger automatic replay.
+
+LinkedIn prepares the empty own-author scope before authorization. The original author snapshot is retained through filling and image-driven editor remounts; read-only marker restoration on the new editor does not authorize a different persona. Non-author media toolbar links do not change that identity proof.
+
+The extension uses `chrome.runtime.getPlatformInfo()` every twenty seconds only during active native work, stopping in `finally` or after ten minutes. This makes no network request and is not a backend lease renewal. Chrome documents that extension API calls reset the worker idle timer; bounded local activity reduces idle suspension but cannot guarantee survival across browser shutdown, OS sleep or every worker execution limit. See [Chrome service-worker lifecycle](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle) and [service-worker migration guidance](https://developer.chrome.com/docs/extensions/develop/migrate/to-service-workers). The journal remains authoritative after worker loss.
+
+History, publish activity and compose results map internal sending codes to actionable English at presentation boundaries. Raw stored errors, evidence, allowedActions and state decisions remain unchanged. Unsupported server authorization asks the user to update the backend/extension before retrying; unknown results ask for status review rather than claiming that nothing was sent.

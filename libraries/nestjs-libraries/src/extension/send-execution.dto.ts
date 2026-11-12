@@ -14,6 +14,9 @@ export class ClaimSendDto {
   @IsIn(['POST', 'REPLY']) action: 'POST' | 'REPLY';
   @IsOptional() @IsString() @Matches(/\S/) @MaxLength(128) rootPostId?: string;
 }
+export class StartSendDto {
+  @IsOptional() @IsIn(['NATIVE_FLOW_V1']) authorizationMode?: 'NATIVE_FLOW_V1';
+}
 export class SendOutcomeDto {
   @IsString() @MaxLength(200) eventId: string;
   @IsIn(['confirmed', 'unknown', 'definitely_not_submitted']) status:

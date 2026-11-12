@@ -1,6 +1,6 @@
 import { claimControlledSend } from './send-claim';
 import { hashSecret, sessionActorKey } from './extension-node.protocol';
-import { StopSendDto } from './send-execution.dto';
+import { StartSendDto, StopSendDto } from './send-execution.dto';
 import {
   BadRequestException,
   ConflictException,
@@ -163,11 +163,11 @@ export class SendExecutionService {
         throw new ConflictException('SEND_DRAFT_EXPOSURE_UNSAFE');
       if (await tx.sendSegment.count({ where: { executionId: id, segmentIndex: { lt: index }, status: { not: 'CONFIRMED' } } }))
         throw new ConflictException('PREVIOUS_SEGMENT_NOT_CONFIRMED');
-      const next = await this.sends.accountWriteNotBeforeIn(tx, intent, account, index, now);
-      if (next && next > now)
+      const timing = await this.sends.preparationTimingIn(tx, intent, account, index, now);
+      if (timing.notBefore && timing.notBefore > now)
         throw new ConflictException('ACCOUNT_SEND_INTERVAL_REQUIRED');
       await tx.sendSegment.update({ where: { id: segment.id }, data: { result: { status: 'draft_exposed' } } });
-      await tx.sendExecution.update({ where: { id }, data: { status: 'SENDING', lastProgressAt: now } });
+      await tx.sendExecution.update({ where: { id }, data: { status: 'SENDING', lastProgressAt: now, gapMs: Math.max(execution.gapMs ?? 0, timing.gapMs) } });
       await tx.sendIntent.update({ where: { id: intent.id }, data: { status: 'SENDING', revision: { increment: 1 } } });
       await tx.accountWriteState.update({ where: { id: account.id }, data: { activeExecutionId: id } });
       return { exposed: true as const, serverNow: now.toISOString() };
@@ -236,8 +236,11 @@ export class SendExecutionService {
     auth: NodeAuthentication,
     id: string,
     index: number,
-    lease: string
+    lease: string,
+    body: StartSendDto = {}
   ) {
+    if (body.authorizationMode !== undefined && body.authorizationMode !== 'NATIVE_FLOW_V1')
+      throw new BadRequestException('INVALID_SEND_AUTHORIZATION_MODE');
     await this.sends.enabled(auth.org);
     await this.sends.assertProjectSendActive(auth.org, id);
     return sendTransaction(this.db, async (tx) => {
@@ -287,7 +290,8 @@ export class SendExecutionService {
         execution,
         index,
         { id: identity.id!, idNamespace: identity.namespace! },
-        now
+        now,
+        body.authorizationMode
       );
     });
   }

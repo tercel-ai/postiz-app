@@ -28,6 +28,7 @@ import {
   canonicalSendAccount,
   confirmationCooldown,
   releaseExpiredAccountWriterIn,
+  SEND_PREPARATION_LIMIT_MS,
   matchesSendActor,
   postSendHash,
   sendHash,
@@ -324,10 +325,15 @@ export class SendCoordinatorService {
       });
   }
 
-  async accountWriteNotBeforeIn(tx: Prisma.TransactionClient, intent: SendIntent,
+  async preparationTimingIn(tx: Prisma.TransactionClient, intent: SendIntent,
     account: AccountWriteState, index: number, now: Date) {
     const plan = await this.quotas.resolve(tx, await this.admissionIntent(tx, intent), account, index, now);
-    return accountWriteNotBefore(account, plan.gapMs);
+    return { notBefore: accountWriteNotBefore(account, plan.gapMs), gapMs: plan.gapMs };
+  }
+
+  async accountWriteNotBeforeIn(tx: Prisma.TransactionClient, intent: SendIntent,
+    account: AccountWriteState, index: number, now: Date) {
+    return (await this.preparationTimingIn(tx, intent, account, index, now)).notBefore;
   }
 
   async claimabilityReasonIn(
@@ -1267,8 +1273,11 @@ export class SendCoordinatorService {
     execution: SendExecution,
     index: number,
     observed: SendActor,
-    now: Date
+    now: Date,
+    authorizationMode?: 'NATIVE_FLOW_V1'
   ) {
+    const nativeFlow = authorizationMode === 'NATIVE_FLOW_V1';
+    if (nativeFlow && execution.kind !== 'EXTENSION') reject('INVALID_SEND_AUTHORIZATION_MODE');
     const org = execution.organizationId;
     await this.assertControlledIn(tx, org, { executionId: execution.id });
     await this.verifyPolicyIn(tx);
@@ -1408,7 +1417,8 @@ export class SendCoordinatorService {
     if (next && next > now) reject('ACCOUNT_WRITE_INTERVAL');
     const submitBefore = new Date(
       Math.min(
-        now.getTime() + 30_000,
+        now.getTime() + (nativeFlow ? 10 * 60_000 : 30_000),
+        ...(nativeFlow ? [execution.createdAt.getTime() + SEND_PREPARATION_LIMIT_MS] : []),
         ...plan.budgets.map((b) => b.windowEnd.getTime() - 1_000)
       )
     );
@@ -1423,6 +1433,10 @@ export class SendCoordinatorService {
         permitHash: hashSecret(permit),
         submitBefore,
         authorizedAt: now,
+        ...(nativeFlow ? { result: sendJson({
+          ...(segment.result && typeof segment.result === 'object' && !Array.isArray(segment.result) ? segment.result : {}),
+          authorizationMode, executionDeadline: submitBefore.toISOString(),
+        }) } : {}),
       },
     });
     if (changed.count !== 1) reject('SEND_SEGMENT_CHANGED');
@@ -1433,6 +1447,7 @@ export class SendCoordinatorService {
         startedAt: execution.startedAt ?? now,
         lastProgressAt: now,
         gapMs: plan.gapMs,
+        ...(nativeFlow ? { leaseExpiresAt: new Date(Math.max(execution.leaseExpiresAt.getTime(), submitBefore.getTime())) } : {}),
       },
     });
     await tx.sendIntent.update({
@@ -1454,6 +1469,7 @@ export class SendCoordinatorService {
       targetAccount: execution.target,
       permit,
       submitBefore: submitBefore.toISOString(),
+      ...(nativeFlow ? { authorizationMode: 'NATIVE_FLOW_V1' as const, executionDeadline: submitBefore.toISOString() } : {}),
       serverNow: now.toISOString(),
     };
   }

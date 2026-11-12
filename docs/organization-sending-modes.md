@@ -334,7 +334,7 @@ attestations described above.
 
 `controlledDrain` 是 Settings 内的版本化收尾快照，记录切换前非终态 Intent ID、请求者和核实问题。它只授权原执行续期、身份预检和最终发送；不授予新受控入队或新领取。回执、身份、租约、fencingVersion、策略、项目激活和配额校验仍有效。后台每 15 秒清理已完成收尾，清理不递增模式修订。
 
-从未形成执行的 Intent 转为终态 `HANDED_OVER` 并解除 Post 的 V1 执行绑定，保留审计、原账号、内容、线程、来源和日期。再次切受控会经过原入队校验后复用该 Intent。交接账号在 Post.sendTarget 中保留 `handoverMode=AUTONOMOUS`；浏览器准入要求新客户端声明账号验证能力并返回原 `targetAccount`。旧插件收到 `HANDOVER_EXTENSION_UPGRADE_REQUIRED`，不得发送。
+从未形成执行且符合交接条件的浏览器 Intent 转为终态 `HANDED_OVER` 并解除 Post 的 V1 执行绑定，保留审计、原内容、线程、来源和日期。浏览器交接使用 `accountSelectionMode=CURRENT_SESSION`，由当前浏览器实际登录账号发送，不再要求匹配原受控绑定；旧绑定证据保留供审计。`Post.sendTarget` 保留 `handoverMode=AUTONOMOUS` 及交接语义。再次切受控会经过原入队校验后复用该 Intent。客户端仍需声明支持交接和账号验证；旧插件收到 `HANDOVER_EXTENSION_UPGRADE_REQUIRED`，不得发送。API 任务和不支持的公司身份保持各自的交接边界。
 
 LinkedIn 公司账号的 `EXTENSION` 队列和未绑定 Intent 的草稿暂不交接自主执行，保留原受控绑定并在 `controlledDrain.issues` 返回 `HANDOVER_LINKEDIN_COMPANY_UNSUPPORTED`，直到自主执行器支持公司身份；公司账号的 API 路径和个人 LinkedIn 交接保持原有行为。
 
@@ -499,3 +499,17 @@ Before connecting for apply, it checks for both the prepared plan and evidence
 file and reports the specific missing path. An unsuccessful preparation cannot
 be followed by apply; review preparation output and create the evidence file only
 from actual executor-stop/no-pending-submit checks.
+
+
+## Bounded X draft occupancy (2026-11-11)
+
+X text/media validation and asset downloads complete before draft exposure. The extension then persists local exposure and obtains the backend acknowledgment before opening the composer: X may restore an old draft before any injected script runs. Prevalidation failures can use structured non-submission proof; failures after exposure remain uncertain.
+
+For an unpermitted exposed or UNKNOWN EXTENSION X attempt, account occupancy may expire only after both the browser lease and the original 30-minute preparation deadline have elapsed and no segment has a live permit. The fenced release keeps the original intent/execution RECONCILING and the original content UNKNOWN. It does not mark the original content unsent or requeue it. Independent controlled tasks or autonomous browser writes remain subject to the stored cooldown and their own admission checks. A controlled-to-autonomous handover does not convert the original uncertain content into a fresh autonomous task. The same rule applies when occupancy was already swept before the mode transition.
+
+The extension displays waiting for an earlier attempt rather than implying that the entire social account requires administrator review. Original-content reconciliation and explicit retry retain their own eligibility checks; automatic release of occupancy does not grant either action.
+
+
+## Front-loaded native sends (2026-11-12)
+
+The user-approved NATIVE_FLOW_V1 contract in [API ownership](multi-node-sending-api-ownership.md#front-loaded-native-execution-contract-native_flow_v1-2026-11-12) moves backend preflight and authorization before native content mutation. CONTROLLED keeps its frozen actor, company composer proof and multi-node fencing; AUTONOMOUS keeps its current-browser actor. Already granted native work is bounded by the acknowledged execution deadline and is not interrupted by backend calls or lease renewals. Old client/API short permits remain unchanged when the opt-in mode is omitted. The implementation and joint regression verification are in progress.

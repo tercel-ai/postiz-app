@@ -1,3 +1,4 @@
+import { SEND_PREPARATION_LIMIT_MS, releaseExpiredAccountWriterIn, uncertainWriterExpiredIn } from '../send-coordination.utils';
 import { withPublishNowRequestedAt } from '../send-dispatch';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ForbiddenException } from '@nestjs/common';
@@ -801,4 +802,54 @@ it('reads one priority snapshot for an entire polling claim across both scan lan
  const priorityReads=findMany.mock.calls.filter(([args])=>args.where?.sendTarget?.path?.[0]==='dispatch');
  expect(priorityReads).toHaveLength(1);
  expect(priorityReads[0][0]).not.toHaveProperty('take');
+});
+
+it.each(['exposed','unknown'])('releases the account after the X preparation deadline while quarantining the original %s content', async phase => {
+ const f=fixture(); await f.create('old'); await f.create('independent');
+ const old=(await f.claim('old','old')).items[0];
+ await f.executions.draftExposure(auth,old.executionId,0,old.leaseToken);
+ expect(f.db.rows('sendExecution')[0].gapMs).toBe(60_000);
+ if(phase==='unknown') await f.executions.outcome(auth,old.executionId,0,old.leaseToken,{status:'unknown',eventId:'lost'});
+ const move=(offset:number)=>{
+  vi.setSystemTime(new Date(sendNow.getTime()+offset));
+  f.db.rows('extensionNodeSession')[0].verificationExpiresAt=new Date(Date.now()+60_000);
+ };
+ move(SEND_PREPARATION_LIMIT_MS-1);
+ expect(await f.claim('too-early','independent')).toMatchObject({items:[],reason:'ACCOUNT_REVIEW_REQUIRED'});
+ move(SEND_PREPARATION_LIMIT_MS+1);
+ await f.service.rescheduleQueuedPost('org','independent','user',new Date(),0,1,true);
+ expect(await f.claim('cooldown','independent')).toMatchObject({items:[],reason:'ACCOUNT_COOLDOWN_ACTIVE'});
+ const cooldown=new Date(sendNow.getTime()+SEND_PREPARATION_LIMIT_MS+60_000);
+ expect(f.db.rows('accountWriteState')[0]).toMatchObject({activeExecutionId:null,nextWriteNotBefore:cooldown});
+ const original=f.db.rows('sendExecution').find(e=>e.id===old.executionId);
+ expect(original.status).toBe('RECONCILING');
+ expect(f.db.rows('sendIntent').find(i=>i.rootPostId==='old')).toMatchObject({status:'RECONCILING',activeExecutionId:old.executionId});
+ expect(f.db.rows('sendSegment').find(s=>s.executionId===old.executionId).status).toBe('UNKNOWN');
+ for(const key of ['authorizedAt','submitBefore','permitHash']) expect(f.db.rows('sendSegment').find(s=>s.executionId===old.executionId)[key]).toBeFalsy();
+ expect(await uncertainWriterExpiredIn(f.db,original,new Date())).toBe(true);
+ await expect(f.executions.renew(auth,old.executionId,old.leaseToken)).rejects.toThrow('SEND_LEASE_NOT_RENEWABLE');
+ expect(await f.service.authorizeIn(f.db,original,0,{id:'123',idNamespace:'x.rest_id'},new Date())).toMatchObject({granted:false,status:'UNKNOWN'});
+ expect(await f.executions.start(auth,old.executionId,0,old.leaseToken)).toMatchObject({granted:false,status:'UNKNOWN'});
+ move(SEND_PREPARATION_LIMIT_MS+60_001);
+ const next=(await f.claim('independent-ready','independent')).items[0];
+ expect(next?.segments[0].id).toBe('independent');
+ await f.proof(next);
+ expect(await f.executions.start(auth,next.executionId,0,next.leaseToken)).toMatchObject({granted:true});
+ expect((await f.claim('old-stays-quarantined','old')).items).toEqual([]);
+ await f.executions.outcome(auth,old.executionId,0,old.leaseToken,{status:'unknown',eventId:'late-unknown'});
+ expect(f.db.rows('accountWriteState')[0].activeExecutionId).toBe(next.executionId);
+ await f.executions.outcome(auth,old.executionId,0,old.leaseToken,{status:'confirmed',eventId:'late-found',platformId:'321',url:'https://x.com/alice/status/321'});
+ expect(f.db.rows('accountWriteState')[0].activeExecutionId).toBe(next.executionId);
+ expect(f.db.rows('post').find(p=>p.id==='old').state).toBe('PUBLISHED');
+});
+
+it.each(['lease','permit'])('retains an old exposed X account while its %s is still valid at the preparation deadline', async live => {
+ const f=fixture(); await f.create('old');
+ const old=(await f.claim('old','old')).items[0];
+ await f.executions.draftExposure(auth,old.executionId,0,old.leaseToken);
+ const now=new Date(sendNow.getTime()+SEND_PREPARATION_LIMIT_MS+1);
+ const execution=f.db.rows('sendExecution')[0],segment=f.db.rows('sendSegment')[0];
+ if(live==='lease') execution.leaseExpiresAt=new Date(now.getTime()+60_000);
+ else Object.assign(segment,{status:'AUTHORIZED',authorizedAt:sendNow,permitHash:'valid',submitBefore:new Date(now.getTime()+60_000)});
+ expect((await releaseExpiredAccountWriterIn(f.db,f.db.rows('accountWriteState')[0],now)).activeExecutionId).toBe(old.executionId);
 });

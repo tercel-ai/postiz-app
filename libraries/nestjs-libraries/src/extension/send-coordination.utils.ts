@@ -136,6 +136,21 @@ function expiredUnexposedPartialThread(execution: SendExecution, segments: SendS
       (segment.result as { status?: string } | null)?.status !== 'draft_exposed'));
 }
 
+/** Expiring app authority releases the account, never the uncertain content. */
+function expiredXDraftBoundary(execution: SendExecution, segments: SendSegment[], now: Date): Date | null {
+  if (execution.kind !== 'EXTENSION' || execution.platform !== 'x' || execution.leaseExpiresAt > now ||
+      execution.createdAt.getTime() + SEND_PREPARATION_LIMIT_MS > now.getTime()) return null;
+  const unpermitted = (segment: SendSegment) => !segment.authorizedAt && !segment.submitBefore && !segment.permitHash;
+  if (!segments.some(segment => unpermitted(segment) && (segment.status === 'UNKNOWN' ||
+      segment.status === 'PENDING' && (segment.result as { status?: string } | null)?.status === 'draft_exposed'))) return null;
+  if (!segments.every(segment => segment.status === 'CONFIRMED' || segment.status === 'NOT_SUBMITTED' ||
+      unpermitted(segment) && ['PENDING', 'UNKNOWN'].includes(segment.status) ||
+      ['AUTHORIZED', 'UNKNOWN'].includes(segment.status) && segment.submitBefore &&
+        Number.isFinite(segment.submitBefore.getTime()) && segment.submitBefore <= now)) return null;
+  return new Date(Math.max(execution.leaseExpiresAt.getTime(), execution.createdAt.getTime() + SEND_PREPARATION_LIMIT_MS,
+    ...segments.filter(segment => segment.submitBefore && Number.isFinite(segment.submitBefore.getTime())).map(segment => segment.submitBefore!.getTime())));
+}
+
 export function confirmationCooldown(account: AccountWriteState, now: Date, gapMs: number): Date {
   return new Date(Math.max(account.nextWriteNotBefore?.getTime() ?? 0, now.getTime() + gapMs));
 }
@@ -155,7 +170,7 @@ export async function uncertainWriterExpiredIn(
   const segments = await tx.sendSegment.findMany({ where: {
     organizationId: execution.organizationId, executionId: execution.id,
   } });
-  return expiredUnexposedPartialThread(execution, segments, now) ||
+  return !!expiredXDraftBoundary(execution, segments, now) || expiredUnexposedPartialThread(execution, segments, now) ||
     expiredPermitSegments(segments, now).some(segment => segment.status === 'UNKNOWN');
 }
 
@@ -177,22 +192,29 @@ export async function releaseExpiredAccountWriterIn(
   const segments = await tx.sendSegment.findMany({
     where: { organizationId: account.organizationId, executionId: execution.id },
   });
-  const permits = expiredPermitSegments(segments, now);
+  const draftBoundary = expiredXDraftBoundary(execution, segments, now);
+  const permits = draftBoundary
+    ? segments.filter(segment => ['AUTHORIZED', 'UNKNOWN'].includes(segment.status) && segment.submitBefore)
+    : expiredPermitSegments(segments, now);
   const interruptedThread = expiredUnexposedPartialThread(execution, segments, now);
-  const unreportedPermitIds = expiredSender
+  const unreportedPermitIds = expiredSender || draftBoundary
     ? permits.filter(segment => segment.status === 'AUTHORIZED').map(segment => segment.id) : [];
   if (expiredSender) {
-    if (!interruptedThread && !unreportedPermitIds.length) return account;
+    if (!interruptedThread && !draftBoundary && !unreportedPermitIds.length) return account;
     const intent = await tx.sendIntent.findFirst({
       where: { id: execution.sendIntentId, organizationId: account.organizationId,
         activeExecutionId: execution.id, fencingVersion: execution.fencingVersion, status: 'SENDING' },
       select: { id: true },
     });
     if (!intent) return account;
-  } else if (!interruptedThread && !permits.some(segment => segment.status === 'UNKNOWN')) return account;
+  } else if (!interruptedThread && !draftBoundary && !permits.some(segment => segment.status === 'UNKNOWN')) return account;
+  if (draftBoundary && !expiredSender && !await tx.sendIntent.findFirst({ where: {
+    id: execution.sendIntentId, organizationId: account.organizationId, activeExecutionId: execution.id,
+    fencingVersion: execution.fencingVersion, status: 'RECONCILING',
+  }, select: { id: true } })) return account;
 
   // A submit may have happened just before the permit expired, regardless of how uncertainty was recorded.
-  const nextWriteNotBefore = permits.length
+  const nextWriteNotBefore = draftBoundary ? confirmationCooldown(account, draftBoundary, execution.gapMs ?? 0) : permits.length
     ? confirmationCooldown(account, new Date(Math.max(...permits.map(segment => segment.submitBefore!.getTime()))), execution.gapMs)
     : account.nextWriteNotBefore;
   const changed = await tx.accountWriteState.updateMany({ where: {
@@ -200,6 +222,16 @@ export async function releaseExpiredAccountWriterIn(
     activeExecutionId: execution.id, revision: account.revision,
   }, data: { activeExecutionId: null, nextWriteNotBefore, revision: { increment: 1 } } });
   if (changed.count !== 1) throw Object.assign(new Error('ACCOUNT_WRITE_STATE_CHANGED'), { code: 'P2034' });
+  if (draftBoundary) {
+    const exposed = segments.filter(segment => segment.status === 'PENDING' &&
+      (segment.result as { status?: string } | null)?.status === 'draft_exposed').map(segment => segment.id);
+    if (exposed.length) await tx.sendSegment.updateMany({
+      where: { id: { in: exposed }, executionId: execution.id, status: 'PENDING' },
+      data: { status: 'UNKNOWN', result: sendJson({ status: 'unknown',
+        evidence: 'The X draft exceeded the browser lease and preparation deadline. Account occupancy expired; publication remains unconfirmed. Code: SEND_X_DRAFT_PREPARATION_EXPIRED.',
+      }) },
+    });
+  }
   if (unreportedPermitIds.length) {
     await tx.sendSegment.updateMany({
       where: { id: { in: unreportedPermitIds }, executionId: execution.id, status: 'AUTHORIZED' },

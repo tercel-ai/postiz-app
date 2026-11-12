@@ -357,8 +357,17 @@ Boundaries and operational notes:
 | Account matching | A node whose actual actor differs from the frozen integration cannot obtain a permit |
 | Content uniqueness | Account, node, publishing-method changes, and retries reuse the original SendIntent |
 | Crash recovery | Network loss or restart after a platform call preserves the journal; recovery replays the outcome without resubmitting to the platform |
-| UNKNOWN | The Web app displays a pending-reconciliation state, while the backend retains account/content protection and issues no automatic new authorization |
+| UNKNOWN | The original content remains quarantined for reconciliation and receives no automatic new authorization. Account occupancy has a bounded lifetime when all app authority expires, as described below. |
 | Mode changes | The new mode takes effect immediately; drain and reallocation progress are independent, and historical tasks are preserved |
 | Identity changes | Organization/user changes invalidate Web caches and extension node sessions; old credentials cannot cross scopes |
 | System pause | New tasks and permits stop; late outcomes and recovery queries can still settle existing work |
 | Quota | Each platform write settles once; autonomous, controlled, and historically confirmed facts contribute to the same effective baseline |
+
+
+### Expired X draft account occupancy
+
+An unpermitted X draft stops holding the entire account after both its browser lease and the existing 30-minute preparation deadline have elapsed, provided no segment still has a live submission permit. Recovery converts an exposed pending segment to UNKNOWN, retains the original execution and intent in RECONCILING, and clears only the account occupancy through a fenced update. It does not record non-submission or retry the original content.
+
+The next independent Post or Reply still waits through the stored pacing interval measured from the latest lease, preparation, or permit boundary. Draft exposure captures that interval using the existing policy read. Historical executions whose stored interval is zero remain bounded; the next operation still performs its own policy and account checks. Late outcomes for the original attempt do not clear a newer account owner.
+
+The expired application permissions prevent the original worker from renewing or obtaining a new permit. They cannot prevent a person from manually clicking an external composer left open in the browser; its original content therefore remains quarantined until its outcome is resolved.
