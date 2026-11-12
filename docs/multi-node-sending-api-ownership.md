@@ -178,8 +178,7 @@ against its original record, not another send.
 ## Front-loaded native execution contract: NATIVE_FLOW_V1 (2026-11-12)
 
 This user-approved contract supersedes the earlier controlled ordering of filling
-first, then calling backend preflight/start. Implementation and joint verification
-are in progress. The reference native flow is the actual 1.20.9 sibling checkout.
+first, then calling backend preflight/start. Implementation and the permitted joint regression suites are complete; live platform publication acceptance remains outstanding. The reference native flow is the actual 1.20.9 sibling checkout.
 
 1. Before the native operation, recover old receipts, check the original business
    identity, negotiate ownership, and atomically claim the original task. Validate
@@ -236,10 +235,32 @@ replay, account pacing/quota boundaries, and all seven platforms' Post/Reply pat
 
 ### Native media, worker lifetime and user-facing errors
 
-All requested media bytes are prepared before content mutation and downloaded before authorization where the platform permits it. Native uploads and platform-side processing remain inside the platform operation. Requested media must reach the platform's completed-upload/readiness condition before publication; a local preview is insufficient. X, LinkedIn and Dev.to stop when their attachment preparation fails instead of continuing with missing images. A stop after a page can contain a draft is not proof of non-submission and must not set `neverSent` or trigger automatic replay.
+File attachments are downloaded before content mutation and before authorization where the platform permits it. Native URL embeds, such as non-cover Dev.to Markdown images, retain their original URLs and do not introduce a separate file-upload step. Native uploads and platform-side processing remain inside the platform operation. Requested media must reach the platform's completed-upload/readiness condition before publication; a local preview is insufficient. X, LinkedIn and Dev.to stop when their attachment preparation fails instead of continuing with missing images. A stop after a page can contain a draft is not proof of non-submission and must not set `neverSent` or trigger automatic replay.
 
 LinkedIn prepares the empty own-author scope before authorization. The original author snapshot is retained through filling and image-driven editor remounts; read-only marker restoration on the new editor does not authorize a different persona. Non-author media toolbar links do not change that identity proof.
 
 The extension uses `chrome.runtime.getPlatformInfo()` every twenty seconds only during active native work, stopping in `finally` or after ten minutes. This makes no network request and is not a backend lease renewal. Chrome documents that extension API calls reset the worker idle timer; bounded local activity reduces idle suspension but cannot guarantee survival across browser shutdown, OS sleep or every worker execution limit. See [Chrome service-worker lifecycle](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle) and [service-worker migration guidance](https://developer.chrome.com/docs/extensions/develop/migrate/to-service-workers). The journal remains authoritative after worker loss.
 
 History, publish activity and compose results map internal sending codes to actionable English at presentation boundaries. Raw stored errors, evidence, allowedActions and state decisions remain unchanged. Unsupported server authorization asks the user to update the backend/extension before retrying; unknown results ask for status review rather than claiming that nothing was sent.
+
+### Cross-mode maintenance and crash context
+
+Native activity is shared by CONTROLLED and AUTONOMOUS so automatic recovery, queue polling, scan/reply maintenance and scheduled session/auth maintenance defer while native work is active. Deferral must preserve one-shot alarms and recurring cadence rather than dropping pending work. Explicit user sign-in/sign-out remains available, and local owner/session checks still reject changed identities. A scheduler alarm must not refresh the AIsee token or negotiate another sending mode before checking this boundary.
+
+X opens its composer after front-loaded authorization and immediately binds the new tab to the existing authorized journal using local storage only, before filling. The stored tab identity survives worker restart; failure to persist it stops native filling. This is not another start request or proof of non-submission. Existing original-record retry/reconciliation rules remain unchanged; this change does not add automatic replay or redesign explicit reply retry cleanup.
+
+### Joint verification and rollout
+
+Fresh final verification on 2026-11-12:
+
+| Repository | Passed | Failed | Skipped | Scope |
+| --- | ---: | ---: | ---: | --- |
+| Standalone extension | 4096 | 0 | 0 | Full suite, 214 test files |
+| Backend | 5478 | 0 | 15 | Full permitted suite, 329 test files |
+| Website | 482 | 0 | 5 | All existing Node, PM2 startup and Python tests, run serially |
+
+Type checks passed for all three repositories. Backend excludes the frozen `apps/extension/**`, `billing-records.query.sql.spec.ts` and `engage-normalize-sql-parity.spec.ts`; no database operation was performed. Website serial execution avoids the previously observed fixed-delay Bing test contention; it does not omit that collection. Backend and website skips are existing test declarations.
+
+Acceptance evidence includes `native-prepare-boundary.spec.ts` for all fourteen Post/Reply entry points, `runtime.spec.ts` for the no-backend native interval and per-thread-segment ordering, `runtime-platforms.spec.ts` for durable one-shot consumption, `native-alarms.spec.ts` and `scheduler-native-boundary.spec.ts` for maintenance deferral, and `native-worker-lifetime.spec.ts` for bounded local-only keepalive. The backend `send-execution.service.spec.ts` verifies old-client defaults, native deadline bounds, company evidence, expiry/late ownership fencing, and successful 180-second Post/Reply work across actual CONTROLLED-to-AUTONOMOUS handover with exactly-once quota settlement. Media regression cases reject incomplete uploads; Dev.to also rejects a failed requested cover download before opening a page.
+
+Deploy the backend before repacking/reloading the extension. Older clients that omit native opt-in retain their old short-permit behavior. A new extension against an old or inconsistent server stops before filling instead of silently reverting to after-fill authorization. This change needs no schema migration and keeps original business IDs and outcome events. It does not automatically repair historical UNKNOWN records or claim that a closed page proves non-submission. No real social post/reply was submitted during this verification.
