@@ -49,6 +49,29 @@ export function assertDiagnosisDatabase(databaseUrl: string | undefined) {
   databaseNameFromUrl(databaseUrl);
 }
 
+/** Override generated test datasources with the explicitly validated operator configuration. */
+export function createDiagnosisClient(databaseUrl: string | undefined): PrismaClient {
+  assertDiagnosisDatabase(databaseUrl);
+  return new PrismaClient({ datasources: { db: { url: databaseUrl! } } });
+}
+
+/** Report actionable error categories without printing URLs, credentials or raw Prisma queries. */
+export function formatDiagnosisFailure(error: unknown): { code?: string; message: string } {
+  const failure = error as { code?: unknown; errorCode?: unknown } | null;
+  const value = failure?.code ?? failure?.errorCode;
+  const code = typeof value === 'string' && /^P\d{4}$/.test(value) ? value : undefined;
+  const messages: Record<string, string> = {
+    P1000: 'Database authentication failed. Verify the configured database credentials.',
+    P1001: 'Cannot reach the configured PostgreSQL server from this computer. Check the database address and network access.',
+    P1002: 'The configured PostgreSQL server did not respond in time. Check connectivity and server availability.',
+    P1011: 'The database TLS connection failed. Check the configured certificate and SSL requirements.',
+    P2021: 'A required database table is missing. Verify the selected database and deployed schema.',
+    P2022: 'A required database column is missing. Verify the selected database and deployed schema.',
+  };
+  return { ...(code ? { code } : {}), message: code && messages[code] ||
+    'Diagnosis failed. Check arguments, DATABASE_URL and database connectivity. No records were changed.' };
+}
+
 /** Extract only the credential-free stage and code written by the extension. */
 export function summarizeSendEvidence(value: unknown) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
@@ -151,12 +174,11 @@ async function main() {
   const options = parseOptions(process.argv.slice(2));
   dotenv.config();
   // Validate the target before constructing a database client. All queries use ORM reads.
-  assertDiagnosisDatabase(process.env.DATABASE_URL);
-  const db = new PrismaClient();
+  const db = createDiagnosisClient(process.env.DATABASE_URL);
   try { console.log(JSON.stringify(await diagnoseSendAttempts(db, options), null, 2)); }
   finally { await db.$disconnect(); }
 }
-if (basename(process.argv[1] ?? '') === 'diagnose-send-attempts.ts') void main().catch(() => {
-  console.error('Diagnosis failed. Check arguments, database name, and database connectivity.');
+if (basename(process.argv[1] ?? '') === 'diagnose-send-attempts.ts') void main().catch(error => {
+  console.error(JSON.stringify(formatDiagnosisFailure(error), null, 2));
   process.exitCode = 1;
 });
