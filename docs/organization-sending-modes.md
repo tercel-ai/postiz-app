@@ -651,6 +651,8 @@ accepts the complete normal editor payload (body, media, settings, thread and
 root tags/schedule/account), retaining the original root/group and SendIntent.
 An existing coordinated Post requires one original root, a stable top-level
 `requestId`, and per-Post `expectedRouteRevision` and `expectedContentRevision`.
+Expected Post revisions are nonnegative and may be zero; preserve the server's
+exact value. See the [revision validation contract](multi-node-sending-api-ownership.md#full-original-post-editing-before-sending-authority-2026-11-13).
 `allowedActions.edit` is the explicit full-editor permission; `selectAccount`
 remains for older account-only consumers. Unclaimed API originals are editable;
 any API execution remains immutable. Existing recurring controlled admission

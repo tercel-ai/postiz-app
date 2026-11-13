@@ -1378,7 +1378,7 @@ export class SendCoordinatorService {
       options.expectedRouteRevision !== undefined || options.expectedContentRevision !== undefined;
     if (versioned && (!options.requestId?.trim() || options.requestId.length > 128 ||
         !Number.isSafeInteger(options.expectedRouteRevision) || options.expectedRouteRevision! < 0 ||
-        !Number.isSafeInteger(options.expectedContentRevision) || options.expectedContentRevision! < 1 ||
+        !Number.isSafeInteger(options.expectedContentRevision) || options.expectedContentRevision! < 0 ||
         (options.integrationId != null && !options.integrationId.trim())))
       throw new BadRequestException('SEND_SELECTION_VERSION_REQUIRED');
     if (options.integrationId != null &&

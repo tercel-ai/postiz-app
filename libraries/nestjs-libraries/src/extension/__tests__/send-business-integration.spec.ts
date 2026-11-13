@@ -84,6 +84,17 @@ describe('saved reply enqueue contract', () => {
     expect(db.rows('sendMutationReceipt')).toHaveLength(0);
     expect(db.rows('post')[0].state).toBe('DRAFT');
   });
+  it('admits a version-zero saved Reply and still rejects zero when the current version is newer', async () => {
+    const initial = await draft();
+    initial.db.rows('post')[0].contentRevision = 0;
+    await initial.service.enqueueSavedReply('org', 'user', 'reply', { ...selection, expectedContentRevision: 0 });
+    expect(initial.db.rows('sendIntent')[0]).toMatchObject({ rootPostId: 'root', contentRevision: 0 });
+    expect(initial.db.rows('sendExecution')).toEqual([]);
+    const newer = await draft();
+    await expect(newer.service.enqueueSavedReply('org', 'user', 'reply', { ...selection, expectedContentRevision: 0 }))
+      .rejects.toThrow('SEND_CONTENT_REVISION_CONFLICT');
+    expect(newer.db.rows('sendIntent')).toEqual([]);
+  });
   it('requires complete metadata only when a legacy caller supplies a request id', async () => {
     const { service } = await draft();
     await expect(service.enqueueSavedReply('org', 'user', 'reply', { sentReplyId: 'reply', integrationId: 'account', requestId: 'partial-legacy' })).rejects.toThrow('SEND_SELECTION_VERSION_REQUIRED');
@@ -868,4 +879,29 @@ describe('queued send timing projection', () => {
       serverNow: sendNow, nextSendNotBefore: null, reason: null,
     } });
   });
+});
+
+
+it('reschedules and edits a version-zero controlled original without weakening stale-write protection', async () => {
+  const f = setupSend();
+  await f.create('root', 'EXTENSION');
+  f.db.rows('post')[0].contentRevision = 0;
+  f.db.rows('sendIntent')[0].contentRevision = 0;
+  await f.service.rescheduleQueuedPost('org', 'root', 'user', sendNow, 0, 0, true);
+  expect(f.db.rows('post')[0].contentRevision).toBe(0);
+  expect(f.db.rows('sendExecution')).toEqual([]);
+  const body: any = { requestId: 'zero-controlled-edit', projectId: 'project', type: 'draft',
+    date: sendNow.toISOString(), posts: [{ expectedRouteRevision: 0, expectedContentRevision: 0,
+      value: [{ id: 'root', content: 'Edited initial controlled content' }] }], tags: [] };
+  const write = async (tx: any) => [await tx.post.update({ where: { id: 'root' },
+    data: { content: 'Edited initial controlled content', state: 'DRAFT' } })];
+  await f.service.editUnsentPost('org', 'user', body, write);
+  expect(f.db.rows('post')[0]).toMatchObject({ id: 'root', state: 'DRAFT', contentRevision: 1, routeRevision: 1 });
+  expect(f.db.rows('sendIntent')[0]).toMatchObject({ status: 'CANCELLED', contentRevision: 1 });
+  await f.service.editUnsentPost('org', 'user', body, write);
+  expect(f.db.rows('post')[0].contentRevision).toBe(1);
+  const before = structuredClone(f.db.rows('post'));
+  await expect(f.service.editUnsentPost('org', 'user', { ...body, requestId: 'stale-zero-controlled-edit' }, write))
+    .rejects.toThrow('SEND_EDIT_UNSAFE');
+  expect(f.db.rows('post')).toEqual(before);
 });

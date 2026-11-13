@@ -431,6 +431,23 @@ it.each(['now','schedule','draft'] as const)('fully edits an unclaimed autonomou
  await f.repo.editAutonomousQueuedPost('org',input);
  expect(f.db.rows('post')[0].contentRevision).toBe(2);expect(f.db.rows('sendIntent')).toHaveLength(0);
 });
+it('edits a version-zero autonomous original once and rejects a stale version-zero request', async () => {
+  const f = fixture();
+  f.db.rows('settings')[0].value = { mode: 'AUTONOMOUS', revision: 2 };
+  Object.assign(f.db.rows('post')[0], { routeRevision: 0, contentRevision: 0 });
+  const request = f.body();
+  Object.assign(request.posts[0], { expectedRouteRevision: 0, expectedContentRevision: 0 });
+  request.posts[0].value[0].content = 'Edited initial original';
+  const input = { state: 'now' as const, date: request.date, body: request.posts[0], tags: [],
+    inter: 0, projectId: 'project', userId: 'user', requestId: 'initial-edit' };
+  const saved = await f.repo.editAutonomousQueuedPost('org', input);
+  expect(saved.posts[0]).toMatchObject({ id: 'root', contentRevision: 1, routeRevision: 1, content: 'Edited initial original' });
+  expect((await f.repo.editAutonomousQueuedPost('org', input)).posts[0].contentRevision).toBe(1);
+  const before = structuredClone(f.db.rows('post'));
+  await expect(f.repo.editAutonomousQueuedPost('org', { ...input, requestId: 'stale-initial-edit' }))
+    .rejects.toThrow('SEND_CONTENT_REVISION_CONFLICT');
+  expect(f.db.rows('post')).toEqual(before);
+});
 it.each([{claimedAt:new Date()},{releaseId:'captured'},{releaseURL:'https://x.com/live'},{sendIntentId:'intent'},{state:'PUBLISHED'}])('refuses unsafe autonomous full edits: %j',async change=>{
  const f=fixture();f.db.rows('settings')[0].value={mode:'AUTONOMOUS',revision:2};Object.assign(f.db.rows('post')[0],change);
  const before=structuredClone(f.db.rows('post'));const request=f.body();Object.assign(request.posts[0],{expectedRouteRevision:0,expectedContentRevision:1});

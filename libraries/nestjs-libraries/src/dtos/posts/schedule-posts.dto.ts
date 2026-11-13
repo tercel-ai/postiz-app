@@ -46,7 +46,7 @@ export class SchedulePostItemDto {
   @IsOptional() @IsString() @MinLength(1) @MaxLength(128) requestId?: string;
 
   @IsOptional() @IsInt() @Min(0) expectedRouteRevision?: number;
-  @IsOptional() @IsInt() @Min(1) expectedContentRevision?: number;
+  @IsOptional() @IsInt() @Min(0) expectedContentRevision?: number;
 }
 
 /**

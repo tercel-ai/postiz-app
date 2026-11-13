@@ -419,6 +419,14 @@ accepts the complete normal editor payload (body, media, settings, thread and
 root tags/schedule/account), retaining the original root/group and SendIntent.
 An existing coordinated Post requires one original root, a stable top-level
 `requestId`, and per-Post `expectedRouteRevision` and `expectedContentRevision`.
+Both expected revisions accept nonnegative integers, including zero: the stored
+Post content revision starts at zero, and enqueue copies the saved Post revision
+into its SendIntent. The full editor, scheduling and optional versioned saved
+Reply inputs must retain that exact value; clients must not clamp it to one or
+omit it to bypass conflicts. The transaction still compares current revisions,
+checks send evidence and advances versions only on an accepted edit. This input
+validation correction requires a backend deployment only, without a schema change.
+
 `allowedActions.edit` is the explicit full-editor permission; `selectAccount`
 remains for older account-only consumers. Unclaimed API originals are editable;
 any API execution remains immutable. Existing recurring controlled admission

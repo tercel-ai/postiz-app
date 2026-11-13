@@ -67,7 +67,7 @@ export class Post {
   @IsOptional() @IsInt() @Min(0) @Max(2147483646)
   expectedRouteRevision?: number;
 
-  @IsOptional() @IsInt() @Min(1)
+  @IsOptional() @IsInt() @Min(0)
   expectedContentRevision?: number;
 
   // Optional: `Post.integrationId` is nullable, and operation-plan posts for a
