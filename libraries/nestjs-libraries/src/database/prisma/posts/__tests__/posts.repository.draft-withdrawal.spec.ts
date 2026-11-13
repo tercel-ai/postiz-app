@@ -418,3 +418,53 @@ it.each(['user', 'other-member'])(
     expect(db.rows('post')).toEqual(before);
   }
 );
+
+
+it.each(['now','schedule','draft'] as const)('fully edits an unclaimed autonomous original as %s with the existing field mapper',async state=>{
+ const f=fixture();f.db.rows('settings')[0].value={mode:'AUTONOMOUS',revision:2};
+ const request=f.body();Object.assign(request.posts[0],{expectedRouteRevision:0,expectedContentRevision:1});
+ request.posts[0].value[0].content='Edited original';request.posts[0].settings={__type:'x',quote_tweet_url:'https://x.com/alice/status/2'};
+ const input={state,date:request.date,body:request.posts[0],tags:[],inter:0,projectId:'project',publishMethod:'EXTENSION' as const,userId:'user',requestId:'full-edit'};
+ const result=await f.repo.editAutonomousQueuedPost('org',input);
+ expect(result.posts[0]).toMatchObject({id:'root',content:'Edited original',state:state==='draft'?'DRAFT':'QUEUE',contentRevision:2,routeRevision:1,intervalInDays:null});
+ expect(JSON.parse(result.posts[0].settings).quote_tweet_url).toBe('https://x.com/alice/status/2');
+ await f.repo.editAutonomousQueuedPost('org',input);
+ expect(f.db.rows('post')[0].contentRevision).toBe(2);expect(f.db.rows('sendIntent')).toHaveLength(0);
+});
+it.each([{claimedAt:new Date()},{releaseId:'captured'},{releaseURL:'https://x.com/live'},{sendIntentId:'intent'},{state:'PUBLISHED'}])('refuses unsafe autonomous full edits: %j',async change=>{
+ const f=fixture();f.db.rows('settings')[0].value={mode:'AUTONOMOUS',revision:2};Object.assign(f.db.rows('post')[0],change);
+ const before=structuredClone(f.db.rows('post'));const request=f.body();Object.assign(request.posts[0],{expectedRouteRevision:0,expectedContentRevision:1});
+ await expect(f.repo.editAutonomousQueuedPost('org',{state:'now',date:request.date,body:request.posts[0],tags:[],projectId:'project',userId:'user',requestId:'unsafe'})).rejects.toThrow();
+ expect(f.db.rows('post')).toEqual(before);
+});
+
+it('edits autonomous thread membership without deleting another root and rejects stale writes',async()=>{
+ const f=fixture();f.db.rows('settings')[0].value={mode:'AUTONOMOUS',revision:2};
+ f.db.seed('post',{...f.db.rows('post')[0],id:'old-child',parentPostId:'root'});f.db.seed('post',{...f.db.rows('post')[0],id:'sibling',parentPostId:null});
+ const request=f.body();Object.assign(request.posts[0],{expectedRouteRevision:0,expectedContentRevision:1});request.posts[0].value.push({id:'new-child',content:'New segment',image:[]});
+ const input={state:'schedule' as const,date:request.date,body:request.posts[0],tags:[],projectId:'project',userId:'user',requestId:'thread-edit'};
+ await f.repo.editAutonomousQueuedPost('org',input);
+ expect(f.db.rows('post').find(p=>p.id==='old-child').deletedAt).toBeTruthy();expect(f.db.rows('post').find(p=>p.id==='old-child').content).toBe('<p>Preserved content</p>');
+ expect(f.db.rows('post').find(p=>p.id==='sibling')).toMatchObject({state:'QUEUE',contentRevision:1,deletedAt:null});
+ expect(f.db.rows('post').find(p=>p.id==='new-child')).toMatchObject({parentPostId:'root',content:'New segment',contentRevision:2,routeRevision:1});
+ await expect(f.repo.editAutonomousQueuedPost('org',{...input,requestId:'stale'})).rejects.toThrow('SEND_CONTENT_REVISION_CONFLICT');
+});
+it.each(['AUTHORIZED','UNKNOWN','CONFIRMED'])('an autonomous %s receipt keeps its original content immutable',async status=>{
+ const f=fixture();f.db.rows('settings')[0].value={mode:'AUTONOMOUS',revision:2};
+ f.db.seed('sendMutationReceipt',{organizationId:'org',operation:'autonomous-side-effect',result:{postIds:['root'],status}});
+ const request=f.body();Object.assign(request.posts[0],{expectedRouteRevision:0,expectedContentRevision:1});const before=structuredClone(f.db.rows('post'));
+ await expect(f.repo.editAutonomousQueuedPost('org',{state:'now',date:request.date,body:request.posts[0],tags:[],projectId:'project',userId:'user',requestId:'held'})).rejects.toThrow();
+ expect(f.db.rows('post')).toEqual(before);
+});
+
+it('replays the raw autonomous editor request before repeating nondeterministic short-link conversion',async()=>{
+ const f=fixture();f.db.rows('settings')[0].value={mode:'AUTONOMOUS',revision:2};const request=f.body();
+ Object.assign(request.posts[0],{expectedRouteRevision:0,expectedContentRevision:1});request.posts[0].value[0].content='https://example.test/original';
+ const prepare=vi.fn(async body=>({...body,value:body.value.map(value=>({...value,content:`https://short.test/${prepare.mock.calls.length}`}))}));
+ const input={state:'draft' as const,date:request.date,body:request.posts[0],tags:[],projectId:'project',userId:'user',requestId:'lost-shortlink'};
+ const first=await (f.repo.editAutonomousQueuedPost as any)('org',input,prepare);
+ const replay=await (f.repo.editAutonomousQueuedPost as any)('org',structuredClone(input),prepare);
+ expect(prepare).toHaveBeenCalledTimes(1);expect(first.posts[0].content).toBe('https://short.test/1');expect(replay.posts[0].content).toBe(first.posts[0].content);
+ expect(f.db.rows('post')[0].contentRevision).toBe(2);
+ await expect((f.repo.editAutonomousQueuedPost as any)('org',{...input,shortLink:true},prepare)).rejects.toThrow('SEND_IDEMPOTENCY_CONFLICT');
+});

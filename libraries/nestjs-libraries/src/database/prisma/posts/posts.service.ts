@@ -1921,6 +1921,12 @@ export class PostsService {
     }
   }
 
+  private async editorContent(orgId: string, values: CreatePostDto['posts'][number]['value'], shortLink: boolean) {
+    const messages = values.map(value => value.content);
+    const content = shortLink ? await this._shortLinkService.convertTextToShortLinks(orgId, messages) : messages;
+    return values.map((value,index) => ({...value,content:content[index]}));
+  }
+
   async createPost(orgId: string, body: CreatePostDto, userId?: string, sendContext?: Pick<EnqueueSend, 'contentUnitId' | 'context' | 'origin'>): Promise<any[]> {
     this.logger.log(
       `createPost: orgId=${orgId} userId=${userId ?? 'N/A'} type=${body.type} postsCount=${body.posts?.length ?? 0}`
@@ -1953,7 +1959,8 @@ export class PostsService {
       );
     }
 
-    const coordinated = (await this.isControlled(orgId)) && body.type !== 'draft';
+    const controlledMode = await this.isControlled(orgId);
+    const coordinated = controlledMode && body.type !== 'draft';
     if (coordinated && (!this._sendCoordinator || !userId)) throw new BadRequestException('SEND_POLICY_OWNER_REQUIRED');
     if (coordinated && new Set(body.posts.map((p, i) => p.itemKey ?? String(i))).size !== body.posts.length) throw new BadRequestException('DUPLICATE_SEND_ITEM_KEY');
     const suppliedRoots = body.posts.map(p => p.value?.[0]?.id).filter(Boolean);
@@ -1965,6 +1972,25 @@ export class PostsService {
     const preservedQueuedGroups = new Set<string>();
     let withdrewSchedule = false;
     for (const [itemIndex, post] of body.posts.entries()) {
+      const autonomousOriginal = !controlledMode && !existingDraftsOnly && post.value[0]?.id && body.requestId && post.expectedContentRevision !== undefined
+        ? await this._postRepository.getPostById(post.value[0].id, orgId) : null;
+      const autonomousEdit = !!autonomousOriginal && !autonomousOriginal.sendIntentId && ['DRAFT','QUEUE'].includes(autonomousOriginal.state);
+      const editingOriginal = post.value[0]?.id ? await this._postRepository.getPostById(post.value[0].id, orgId) : null;
+      if (editingOriginal?.sendIntentId) {
+        if (!this._sendCoordinator || !userId || body.posts.length !== 1) throw new BadRequestException('SEND_EDIT_UNSAFE');
+        let editMethod = editingOriginal.publishMethod ?? undefined;
+        if (post.publishMethod) {
+          try { editMethod = resolvePublishMethod({platform:post.providerIdentifier || (post.settings as any).__type,hasBoundIntegration:!!(post.integration?.id ?? editingOriginal.integrationId),choice:post.publishMethod}) === 'api' ? 'API' : 'EXTENSION'; }
+          catch(error) { throw new BadRequestException((error as Error).message); }
+        }
+        const result = await this._sendCoordinator.editUnsentPost(orgId, userId, body, async (tx, root) => {
+          const saved = await this._postRepository.createOrUpdatePost(body.type, orgId, body.type === 'now' ? new Date().toISOString() : body.date,
+            {...post, value: await this.editorContent(orgId, post.value, body.shortLink), group: root.group}, body.tags, body.inter, body.source, root.projectId!, editMethod, tx, 'CONTROLLED',
+            {userId, requestId:body.requestId, intentEditId:root.sendIntentId!});
+          return saved.posts;
+        });
+        return [result];
+      }
       if (coordinated) {
         const originalId = post.value[0]?.id;
         const rootId = body.requestId
@@ -1982,7 +2008,7 @@ export class PostsService {
         }
         post.value = post.value.map((value, index) => ({ ...value, id: index === 0 ? rootId : value.id || sendUuid(`${rootId}:${index}`, sendUuid.URL) }));
       }
-      if (!coordinated && body.type === 'now' && post.value[0]?.id) {
+      if (!coordinated && !autonomousEdit && body.type === 'now' && post.value[0]?.id) {
         const existing = await this._postRepository.getPostById(post.value[0].id, orgId);
         if (existing && existing.state !== 'DRAFT') {
           if (body.projectId !== undefined && existing.projectId !== body.projectId) throw new BadRequestException('POST_PROJECT_MISMATCH');
@@ -1994,15 +2020,7 @@ export class PostsService {
           continue;
         }
       }
-      const messages = (post.value || []).map((p) => p.content);
-      const updateContent = !body.shortLink
-        ? messages
-        : await this._shortLinkService.convertTextToShortLinks(orgId, messages);
-
-      post.value = (post.value || []).map((p, i) => ({
-        ...p,
-        content: updateContent[i],
-      }));
+      if (!autonomousEdit) post.value = await this.editorContent(orgId, post.value, body.shortLink);
 
       // Explicit send-path choice on the editor: validate + resolve against the
       // post's platform + bound account, so an impossible choice (e.g. 'api' on
@@ -2025,7 +2043,12 @@ export class PostsService {
         }
       }
 
-      const saved = await this._postRepository.createOrUpdatePost(
+      const saved = autonomousEdit ? await this._postRepository.editAutonomousQueuedPost(orgId, {
+        state: body.type, date: body.type === 'now' ? new Date().toISOString() : body.date,
+        body: post, tags: body.tags, inter: body.inter, source: body.source, projectId: body.projectId,
+        publishMethod: resolvedMethod === 'api' ? 'API' : resolvedMethod === 'extension' ? 'EXTENSION' : undefined,
+        userId: userId!, requestId: body.requestId!, shortLink: body.shortLink,
+      }, async original => ({ ...original, value: await this.editorContent(orgId, original.value, body.shortLink) })) : await this._postRepository.createOrUpdatePost(
         coordinated ? 'draft' : body.type,
         orgId,
         body.type === 'now' ? new Date().toISOString() : body.date,
@@ -2039,6 +2062,7 @@ export class PostsService {
         { userId, existingOnly: existingDraftsOnly, requestId: body.requestId }
       );
       const { posts } = saved;
+      if (autonomousEdit && post.group) preservedQueuedGroups.add(post.group);
       withdrewSchedule ||= saved.withdrewSchedule === true;
 
       if (!posts?.length) {

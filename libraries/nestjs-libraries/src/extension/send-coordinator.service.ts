@@ -528,7 +528,7 @@ export class SendCoordinatorService {
       if (selection) {
         const executions = await tx.sendExecution.findMany({ where: { organizationId: org, sendIntentId: intent.id } });
         const segments = await tx.sendSegment.findMany({ where: { organizationId: org, execution: { sendIntentId: intent.id } } });
-        if (!canChangePostAccount(root, intent, executions, segments) || executions.some(execution => {
+        if (!canChangePostAccount(root, intent, executions, segments) || executions.filter(execution => !isAccountChangeRevokedExecution(execution)).some(execution => {
           const payload = execution.payload as Array<{ id?: string; contentHash?: string }>;
           return payload.length !== posts.length || posts.some((post,index) => payload[index]?.id !== post.id || payload[index]?.contentHash !== postSendHash(post));
         })) reject('SEND_ACCOUNT_CHANGE_UNSAFE');
@@ -540,24 +540,7 @@ export class SendCoordinatorService {
         await this.enrollAccountIn(tx, org, route.integrationId, route.canonicalAccountKey);
       }
       const revision = root.routeRevision + (route ? 1 : 0);
-      for (const execution of revocable.sort((a,b) => a.canonicalAccountKey.localeCompare(b.canonicalAccountKey))) {
-        const account = await tx.accountWriteState.findUniqueOrThrow({ where: { organizationId_canonicalAccountKey: { organizationId: org, canonicalAccountKey: execution.canonicalAccountKey } } });
-        const locked = await tx.accountWriteState.updateMany({ where: { id: account.id, revision: account.revision },
-          data: { revision: { increment: 1 }, ...(account.activeExecutionId === execution.id ? { activeExecutionId: null } : {}) } });
-        if (locked.count !== 1) reject('ACCOUNT_WRITE_STATE_CHANGED');
-        const canceled = await tx.sendExecution.updateMany({ where: { id: execution.id, organizationId: org, status: execution.status, startedAt: null, routeRevision: execution.routeRevision, contentRevision: execution.contentRevision },
-          data: { status: 'CANCELLED', resolutionRevision: { increment: 1 }, lastProgressAt: requestedAt!, context: sendJson({ ...(execution.context as Record<string, unknown> | null),
-            accountChangeRevocation: { reason: ACCOUNT_CHANGE_CANCELLATION, requestId: selection!.requestId, at: requestedAt!.toISOString(), routeRevision: revision } }) } });
-        if (canceled.count !== 1) reject('SEND_INTENT_CHANGED');
-        const segments = await tx.sendSegment.findMany({ where: { organizationId: org, executionId: execution.id } });
-        for (const segment of segments) {
-          // Preserve the original authenticated no-permit stop receipt.
-          if (segment.status === 'NOT_SUBMITTED') continue;
-          const changed = await tx.sendSegment.updateMany({ where: { id: segment.id, status: 'PENDING', authorizedAt: null, permitHash: null, submitBefore: null, confirmedAt: null, result: { equals: Prisma.AnyNull } },
-            data: { status: 'NOT_SUBMITTED', result: { status: ACCOUNT_CHANGE_CANCELLATION, requestId: selection!.requestId } } });
-          if (changed.count !== 1) reject('SEND_ACCOUNT_CHANGE_UNSAFE');
-        }
-      }
+      await this.revokePreparationsIn(tx, org, revocable, requestedAt!, selection?.requestId ?? '', revision);
       const saved = await tx.sendIntent.updateMany({ where: { id: intent.id, organizationId: org, revision: intent.revision, activeExecutionId: intent.activeExecutionId, status: intent.status, fencingVersion: intent.fencingVersion },
         data: { ...(selection ? { activeExecutionId: null, status: 'QUEUED', ...(revocable.length ? { fencingVersion: { increment: 1 } } : {}) } : {}), revision: { increment: 1 }, context: sendJson({ ...(intent.context as Record<string, unknown> | null), manualPostNow: publishNow }),
           ...(route ? { integrationId: route.integrationId, canonicalAccountKey: route.canonicalAccountKey, target: sendJson(route.targetAccount), routeRevision: revision } : {}) } });
@@ -573,6 +556,381 @@ export class SendCoordinatorService {
           previousIntegrationId: intent.integrationId, previousRouteRevision: intent.routeRevision, previousTarget: intent.target, revokedExecutionIds: revocable.map(execution => execution.id) } } });
       console.log('[post-now] original queued post updated', { rootPostId: rootId, sendIntentId: intent.id, requestId: selection?.requestId, integrationId: route?.integrationId ?? intent.integrationId, routeRevision: revision, publishNow });
       return tx.post.findUniqueOrThrow({ where: { id: rootId } });
+    });
+  }
+
+  /** Shared atomic revocation; immutable attempt payload and positive/unknown receipt handling remain unchanged. */
+  private async revokePreparationsIn(
+    tx: Prisma.TransactionClient,
+    org: string,
+    revocable: SendExecution[],
+    now: Date,
+    requestId: string,
+    revision: number
+  ) {
+    for (const execution of revocable.sort((a, b) =>
+      a.canonicalAccountKey.localeCompare(b.canonicalAccountKey)
+    )) {
+      const account = await tx.accountWriteState.findUniqueOrThrow({
+        where: {
+          organizationId_canonicalAccountKey: {
+            organizationId: org,
+            canonicalAccountKey: execution.canonicalAccountKey,
+          },
+        },
+      });
+      const locked = await tx.accountWriteState.updateMany({
+        where: { id: account.id, revision: account.revision },
+        data: {
+          revision: { increment: 1 },
+          ...(account.activeExecutionId === execution.id
+            ? { activeExecutionId: null }
+            : {}),
+        },
+      });
+      if (locked.count !== 1) reject('ACCOUNT_WRITE_STATE_CHANGED');
+      const canceled = await tx.sendExecution.updateMany({
+        where: {
+          id: execution.id,
+          organizationId: org,
+          status: execution.status,
+          startedAt: null,
+          routeRevision: execution.routeRevision,
+          contentRevision: execution.contentRevision,
+        },
+        data: {
+          status: 'CANCELLED',
+          resolutionRevision: { increment: 1 },
+          lastProgressAt: now,
+          context: sendJson({
+            ...(execution.context as Record<string, unknown> | null),
+            accountChangeRevocation: {
+              reason: ACCOUNT_CHANGE_CANCELLATION,
+              requestId: requestId,
+              at: now.toISOString(),
+              routeRevision: revision,
+            },
+          }),
+        },
+      });
+      if (canceled.count !== 1) reject('SEND_INTENT_CHANGED');
+      const segments = await tx.sendSegment.findMany({
+        where: { organizationId: org, executionId: execution.id },
+      });
+      for (const segment of segments) {
+        // Preserve the original authenticated no-permit stop receipt.
+        if (segment.status === 'NOT_SUBMITTED') continue;
+        const changed = await tx.sendSegment.updateMany({
+          where: {
+            id: segment.id,
+            status: 'PENDING',
+            authorizedAt: null,
+            permitHash: null,
+            submitBefore: null,
+            confirmedAt: null,
+            result: { equals: Prisma.AnyNull },
+          },
+          data: {
+            status: 'NOT_SUBMITTED',
+            result: {
+              status: ACCOUNT_CHANGE_CANCELLATION,
+              requestId: requestId,
+            },
+          },
+        });
+        if (changed.count !== 1) reject('SEND_ACCOUNT_CHANGE_UNSAFE');
+      }
+    }
+  }
+
+  /** Full original editor submission, using the repository's existing field mapping in this transaction. */
+  async editUnsentPost(
+    org: string,
+    user: string,
+    body: import('../dtos/posts/create.post.dto').CreatePostDto,
+    write: (
+      tx: Prisma.TransactionClient,
+      root: import('@prisma/client').Post
+    ) => Promise<import('@prisma/client').Post[]>
+  ) {
+    const item = body.posts[0],
+      rootId = item?.value[0]?.id;
+    if (
+      body.posts.length !== 1 ||
+      !rootId ||
+      !body.requestId?.trim() ||
+      body.requestId.length > 128 ||
+      !Number.isSafeInteger(item.expectedRouteRevision) ||
+      !Number.isSafeInteger(item.expectedContentRevision)
+    )
+      reject('INVALID_SEND_EDIT_REQUEST');
+    if (body.inter) reject('CONTROLLED_RECURRING_OCCURRENCE_REQUIRED');
+    await this.enabled(org);
+    await this.assertMember(this.db, org, user);
+    const scope = await this.db.post.findFirst({
+      where: {
+        id: rootId,
+        organizationId: org,
+        deletedAt: null,
+        parentPostId: null,
+      },
+    });
+    if (!scope?.projectId || body.projectId !== scope.projectId)
+      reject('POST_PROJECT_MISMATCH');
+    await this.projects.assertProjectActive(org, scope.projectId);
+    return sendTransaction(this.db, async (tx) => {
+      await this.assertControlledIn(tx, org);
+      await this.assertMember(tx, org, user);
+      const posts = await this.chain(tx, org, rootId),
+        root = posts[0];
+      const key = {
+        organizationId: org,
+        userId: user,
+        operation: `post-edit:${rootId}`,
+        requestId: body.requestId!,
+      };
+      const fingerprint = sendHash(body);
+      const prior = await tx.sendMutationReceipt.findUnique({
+        where: { organizationId_userId_operation_requestId: key },
+      });
+      if (prior) {
+        if (prior.requestHash !== fingerprint) reject('REQUEST_ID_CONFLICT');
+        return prior.result as any;
+      }
+      const intent = root.sendIntentId
+        ? await tx.sendIntent.findFirst({
+            where: {
+              id: root.sendIntentId,
+              organizationId: org,
+              rootPostId: rootId,
+              projectId: scope.projectId,
+            },
+          })
+        : null;
+      const executions = intent
+        ? await tx.sendExecution.findMany({
+            where: { organizationId: org, sendIntentId: intent.id },
+          })
+        : [];
+      const segments = executions.length
+        ? await tx.sendSegment.findMany({
+            where: {
+              organizationId: org,
+              executionId: { in: executions.map((e) => e.id) },
+            },
+          })
+        : [];
+      if (
+        !intent ||
+        !canChangePostAccount(root, intent, executions, segments) ||
+        root.routeRevision !== item.expectedRouteRevision ||
+        root.contentRevision !== item.expectedContentRevision ||
+        (item.group && item.group !== root.group) ||
+        canonicalControlledPlatform(
+          item.providerIdentifier ??
+            (item.settings as any)?.__type ??
+            root.providerIdentifier!
+        ) !== intent.platform
+      )
+        reject('SEND_EDIT_UNSAFE');
+      if (
+        body.type !== 'draft' &&
+        (item.publishMethod === 'api' ||
+          (!item.publishMethod && root.publishMethod === 'API'))
+      )
+        reject('API_PUBLISHING_UNSUPPORTED_USE_EXTENSION');
+      const protectedIds = new Set(
+        await this.modes.activeLegacyPostIdsIn(tx, org)
+      );
+      if (
+        posts.some(
+          (p) =>
+            p.releaseId || p.releaseURL || p.claimedAt || protectedIds.has(p.id)
+        )
+      )
+        reject('SEND_EDIT_UNSAFE');
+      for (const value of item.value)
+        if (
+          value.id &&
+          !posts.some((p) => p.id === value.id) &&
+          (await tx.post.findUnique({ where: { id: value.id } }))
+        )
+          reject('SEND_EDIT_SEGMENT_SCOPE_MISMATCH');
+      if (
+        new Set(item.value.map((v) => v.id).filter(Boolean)).size !==
+        item.value.filter((v) => v.id).length
+      )
+        reject('INVALID_SEND_CHAIN');
+      if (
+        executions
+          .filter((e) => !isAccountChangeRevokedExecution(e))
+          .some((e) => {
+            const payload = e.payload as Array<{
+              id?: string;
+              contentHash?: string;
+            }>;
+            return (
+              payload.length !== posts.length ||
+              posts.some(
+                (p, i) =>
+                  payload[i]?.id !== p.id ||
+                  payload[i]?.contentHash !== postSendHash(p)
+              )
+            );
+          })
+      )
+        reject('SEND_EDIT_UNSAFE');
+      const revocable = executions.filter(
+        (e) => !isAccountChangeRevokedExecution(e)
+      );
+      if (
+        revocable.length &&
+        (await tx.sendQuotaReservation.count({
+          where: {
+            organizationId: org,
+            executionId: { in: revocable.map((e) => e.id) },
+          },
+        }))
+      )
+        reject('SEND_EDIT_UNSAFE');
+      const selected =
+        item.accountSelectionMode === 'INHERIT'
+          ? undefined
+          : item.integration?.id ?? root.integrationId ?? undefined;
+      const allowUnbound =
+        body.type === 'draft' ||
+        !this.policies.requiresPreselection(
+          intent.policySnapshot as any,
+          await this.policies.lockSystemInTransaction(tx)
+        );
+      const route = await this.bindings.resolveForEnqueueInTransaction(
+        tx,
+        org,
+        root.projectId!,
+        intent.platform,
+        'POST',
+        selected,
+        allowUnbound
+      );
+      if (!route && !allowUnbound) reject('SEND_BINDING_REQUIRED');
+      if (
+        root.providerIdentifier === 'linkedin-page' &&
+        route &&
+        route.providerIdentifier !== 'linkedin-page'
+      )
+        reject('LINKEDIN_COMPANY_ACCOUNT_REQUIRED');
+      if (route)
+        await this.enrollAccountIn(
+          tx,
+          org,
+          route.integrationId,
+          route.canonicalAccountKey
+        );
+      const now = new Date(),
+        routeRevision = root.routeRevision + 1,
+        contentRevision = root.contentRevision + 1;
+      await this.revokePreparationsIn(
+        tx,
+        org,
+        revocable,
+        now,
+        body.requestId!,
+        routeRevision
+      );
+      const written = await write(tx, root);
+      if (!written.length || written[0].id !== rootId)
+        reject('INVALID_SEND_CHAIN');
+      const removed = posts.filter((p) => !written.some((w) => w.id === p.id));
+      for (const post of removed)
+        await tx.post.update({
+          where: { id: post.id },
+          data: { deletedAt: now },
+        });
+      const state = body.type === 'draft' ? 'DRAFT' : 'QUEUE';
+      for (const post of written)
+        await tx.post.update({
+          where: { id: post.id },
+          data: {
+            sendIntentId: intent.id,
+            state,
+            routeRevision,
+            contentRevision,
+            integrationId: route?.integrationId ?? null,
+            sendTarget: withPublishNowRequestedAt(
+              route?.targetAccount ?? null,
+              body.type === 'now' && post.id === rootId ? now : null
+            ),
+            accountSelectionMode: selected ? 'EXPLICIT' : 'INHERIT',
+            accountResolution: route ? 'RESOLVED' : 'DRAFT',
+            bindingSource: route?.bindingSource ?? null,
+            bindingSourceRevision: route?.bindingRevision ?? null,
+          },
+        });
+      const saved = await tx.sendIntent.updateMany({
+        where: {
+          id: intent.id,
+          revision: intent.revision,
+          status: intent.status,
+          activeExecutionId: intent.activeExecutionId,
+          fencingVersion: intent.fencingVersion,
+        },
+        data: {
+          status: state === 'DRAFT' ? 'CANCELLED' : 'QUEUED',
+          activeExecutionId: null,
+          revision: { increment: 1 },
+          fencingVersion: { increment: revocable.length ? 1 : 0 },
+          routeRevision,
+          contentRevision,
+          integrationId: route?.integrationId ?? null,
+          canonicalAccountKey: route?.canonicalAccountKey ?? null,
+          target: route ? sendJson(route.targetAccount) : Prisma.DbNull,
+          context: sendJson({
+            ...(intent.context as any),
+            editableDraft: state === 'DRAFT',
+            manualPostNow: body.type === 'now',
+          }),
+        },
+      });
+      if (saved.count !== 1) reject('SEND_INTENT_CHANGED');
+      const updated = await tx.post.findUniqueOrThrow({
+          where: { id: rootId },
+        }),
+        updatedIntent = await tx.sendIntent.findUniqueOrThrow({
+          where: { id: intent.id },
+        });
+      const result = {
+        postId: rootId,
+        integration: updated.integrationId,
+        state,
+        publishMethod: updated.publishMethod,
+        sending: sendBusinessSummary(
+          updated,
+          updatedIntent,
+          await tx.sendExecution.findMany({
+            where: { sendIntentId: intent.id },
+          }),
+          await tx.sendSegment.findMany({
+            where: {
+              organizationId: org,
+              execution: { sendIntentId: intent.id },
+            },
+          }),
+          null,
+          true
+        ),
+      };
+      await tx.sendMutationReceipt.create({
+        data: { ...key, requestHash: fingerprint, result: sendJson(result) },
+      });
+      console.log('[post-edit] original saved', {
+        rootPostId: rootId,
+        sendIntentId: intent.id,
+        requestId: body.requestId,
+        routeRevision,
+        contentRevision,
+        state,
+      });
+      return result;
     });
   }
 

@@ -5,7 +5,7 @@ import { Post, SendIntent, SendExecution, SendSegment } from '@prisma/client';
 type PublicPost = Partial<Pick<Post, 'id' | 'executionProtocol' | 'releaseId' | 'state' | 'integrationId' |
   'releaseURL' | 'claimedAt' | 'accountSelectionMode' | 'routeRevision' | 'contentRevision' | 'publishDate' | 'sendIntentId' | 'publishMethod'>>;
 type PublicIntent = Partial<Pick<SendIntent, 'id' | 'status' | 'activeExecutionId' | 'hasConfirmedSegments' |
-  'rootPostId' | 'target' | 'integrationId' | 'revision' | 'action' | 'routeRevision' | 'contentRevision'>>;
+  'rootPostId' | 'target' | 'integrationId' | 'revision' | 'action' | 'routeRevision' | 'contentRevision' | 'context'>>;
 type PublicExecution = Partial<Pick<SendExecution, 'id' | 'status' | 'resolutionRevision' | 'kind' | 'action' | 'context' | 'startedAt' | 'payload' | 'routeRevision' | 'contentRevision'>>;
 type PublicSegment = Partial<Pick<SendSegment, 'executionId' | 'status' | 'result' | 'segmentIndex' | 'postId' | 'confirmedAt' | 'authorizedAt' | 'permitHash' | 'submitBefore' | 'contentHash'>>;
 
@@ -44,7 +44,7 @@ export function sendBusinessSummary(post: PublicPost, intent: PublicIntent | nul
     rootPostId: post.id,
     sendIntentId: intent?.id ?? null,
     intentStatus: intent?.status ?? null,
-    status: uncertain ? 'RECONCILING' : confirmed && intent?.status !== 'SUCCEEDED' ? 'PARTIAL_SUCCESS' : intent?.status ?? post.state,
+    status: post.state === 'DRAFT' && intent?.status === 'CANCELLED' && accountChangeSafe ? 'DRAFT' : uncertain ? 'RECONCILING' : confirmed && intent?.status !== 'SUCCEEDED' ? 'PARTIAL_SUCCESS' : intent?.status ?? post.state,
     integrationId: intent?.integrationId ?? post.integrationId ?? null,
     accountSelectionMode: post.accountSelectionMode,
     routeRevision: post.routeRevision,
@@ -60,6 +60,7 @@ export function sendBusinessSummary(post: PublicPost, intent: PublicIntent | nul
         confirmedAt: s.confirmedAt, platformId: result?.platformId ?? null, url: result?.url ?? null };
     }),
     allowedActions: {
+      edit: decision(actionable && (!frozen || accountChangeSafe), operationBlockCode ?? 'SEND_EDIT_UNSAFE'),
       enqueue: decision(actionable && enqueueable, operationBlockCode ?? (intent ? 'SEND_INTENT_IMMUTABLE' : !enabled ? 'ACCOUNT_BINDINGS_NOT_ENABLED' : queuedReplyEnqueue?.reason ?? 'CONTENT_NOT_ENQUEUEABLE')),
       selectAccount: decision(actionable && (!frozen || accountChangeSafe), operationBlockCode ?? (intent ? 'SEND_INTENT_IMMUTABLE' : !enabled ? 'ACCOUNT_BINDINGS_NOT_ENABLED' : 'CONTENT_NOT_ENQUEUEABLE')),
       reschedule: decision(actionable && rescheduleSafe, operationBlockCode ?? (intent ? 'SEND_INTENT_REQUIRES_CONTROLLED_RESCHEDULE' : 'CONTROLLED_RESCHEDULE_NOT_SUPPORTED')),

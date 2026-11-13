@@ -2190,6 +2190,63 @@ export class PostsRepository {
     });
   }
 
+  /** Save the editor's complete original autonomous chain under the existing admission fences. */
+  async editAutonomousQueuedPost(organizationId: string, input: {
+    state: 'draft' | 'schedule' | 'now'; date: string; body: PostBody;
+    tags: { value: string; label: string }[]; inter?: number; source?: PostSource;
+    projectId?: string; publishMethod?: PublishMethod; userId: string; requestId: string; shortLink?: boolean;
+  }, prepare?: (body: PostBody) => Promise<PostBody>): Promise<{ previousPost: string | undefined; posts: Post[]; withdrewSchedule?: boolean }> {
+    if (!this._tx || !this._sendModes) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
+    return sendTransaction(this._tx.model, async tx => {
+      await this._sendModes!.assertAutonomousIn(tx, organizationId);
+      const member = await tx.userOrganization.findUnique({ where: { userId_organizationId: { userId: input.userId, organizationId } } });
+      if (!member || member.disabled) throw new ForbiddenException('ORGANIZATION_MEMBERSHIP_REQUIRED');
+      const rootId = input.body.value[0]?.id;
+      const root = rootId ? await tx.post.findFirst({ where: { id: rootId, organizationId, parentPostId: null, deletedAt: null } }) : null;
+      if (!root || !input.requestId || root.projectId !== input.projectId || (input.body.group && input.body.group !== root.group)) throw new ConflictException('SEND_CONTENT_CHANGED');
+      const key = { organizationId, userId: input.userId, operation: `autonomous-post-edit:${root.id}`, requestId: input.requestId };
+      const hash = sendHash({ ...input, date: input.state === 'now' ? null : input.date });
+      const receipt = await tx.sendMutationReceipt.findUnique({ where: { organizationId_userId_operation_requestId: key } });
+      if (receipt) {
+        if (receipt.requestHash !== hash) throw new ConflictException('SEND_IDEMPOTENCY_CONFLICT');
+        return receipt.result as unknown as { previousPost: string; posts: Post[] };
+      }
+      if (!Number.isSafeInteger(input.body.expectedRouteRevision) || !Number.isSafeInteger(input.body.expectedContentRevision) || root.routeRevision !== input.body.expectedRouteRevision || root.contentRevision !== input.body.expectedContentRevision) throw new ConflictException('SEND_CONTENT_REVISION_CONFLICT');
+      const protectedIds = new Set(await this._sendModes!.activeLegacyPostIdsIn(tx, organizationId));
+      const rows = await tx.post.findMany({ where: { organizationId, group: root.group, deletedAt: null } });
+      const chain = [root];
+      while (true) {
+        const children = rows.filter(post => post.parentPostId === chain[chain.length - 1].id);
+        if (!children.length) break;
+        if (children.length !== 1 || chain.some(post => post.id === children[0].id)) throw new ConflictException('INVALID_SEND_CHAIN');
+        chain.push(children[0]);
+      }
+      if (chain.some(post => !['QUEUE','DRAFT'].includes(post.state) || !isLegacyExecution(post.executionProtocol) || post.sendIntentId || post.releaseId || post.releaseURL || post.claimedAt || protectedIds.has(post.id) || post.projectId !== root.projectId || post.providerIdentifier !== root.providerIdentifier)) throw new ConflictException('CONTENT_NOT_EDITABLE');
+      const sideEffects = await tx.sendMutationReceipt.findMany({ where: { organizationId, operation: 'autonomous-side-effect' } });
+      if (sideEffects.some(row => { const result = row.result as { postIds?: string[]; status?: string }; return result.postIds?.some(id => chain.some(post => post.id === id)) && result.status !== 'NOT_SUBMITTED'; })) throw new ConflictException('CONTENT_NOT_EDITABLE');
+      const ids = input.body.value.map(value => value.id);
+      if (ids.some(id => !id) || new Set(ids).size !== ids.length) throw new ConflictException('INVALID_SEND_CHAIN');
+      for (const id of ids) {
+        const existing = rows.find(post => post.id === id) ?? await tx.post.findUnique({ where: { id } });
+        if (existing && !chain.some(post => post.id === id)) throw new ConflictException('CONTENT_ROOT_CONFLICT');
+      }
+      for (const post of chain.filter(post => !ids.includes(post.id))) {
+        const changed = await tx.post.updateMany({ where: { id: post.id, organizationId, state: post.state, claimedAt: null, releaseId: null, releaseURL: null, sendIntentId: null, routeRevision: post.routeRevision, contentRevision: post.contentRevision }, data: { deletedAt: new Date(), parentPostId: null } });
+        if (changed.count !== 1) throw new ConflictException('SEND_CONTENT_CHANGED');
+      }
+      const saved = await this.createOrUpdatePost(input.state, organizationId, input.date,
+        { ...(prepare ? await prepare(input.body) : input.body), group: root.group }, input.tags, input.inter, input.source,
+        input.projectId, input.publishMethod, tx, 'AUTONOMOUS', { userId: input.userId, legacyEdit: chain });
+      for (const post of saved.posts) {
+        const changed = await tx.post.update({ where: { id: post.id, organizationId }, data: { routeRevision: root.routeRevision + 1, contentRevision: root.contentRevision + 1,
+          ...(input.body.accountSelectionMode === 'INHERIT' ? { integrationId: null, accountSelectionMode: 'INHERIT' } : {}) } });
+        Object.assign(post, changed);
+      }
+      await tx.sendMutationReceipt.create({ data: { ...key, requestHash: hash, result: JSON.parse(JSON.stringify(saved)) } });
+      return saved;
+    });
+  }
+
   async createOrUpdatePost(
     state: 'draft' | 'schedule' | 'now',
     orgId: string,
@@ -2202,7 +2259,7 @@ export class PostsRepository {
     publishMethod?: PublishMethod,
     tx?: Prisma.TransactionClient,
     admissionMode?: 'AUTONOMOUS' | 'CONTROLLED',
-    draftContext?: { userId?: string; existingOnly?: boolean; requestId?: string }
+    draftContext?: { userId?: string; existingOnly?: boolean; requestId?: string; intentEditId?: string; legacyEdit?: Array<Pick<Post, 'id' | 'routeRevision' | 'contentRevision'>> }
   ): Promise<{ previousPost: string | undefined; posts: Post[]; withdrewSchedule?: boolean }> {
     let restrictToUnclaimedDrafts = false;
     let protectedLegacyIds: string[] = [];
@@ -2227,7 +2284,7 @@ export class PostsRepository {
     if ((body.accountSelectionMode === 'INHERIT' && body.integration?.id) ||
         (body.accountSelectionMode === 'EXPLICIT' && !body.integration?.id))
       throw new BadRequestException('SEND_ACCOUNT_SELECTION_CONFLICT');
-    let clearSelection = body.accountSelectionMode === 'INHERIT' && body.value.some((value) => !!value.id);
+    let clearSelection = !draftContext?.intentEditId && !draftContext?.legacyEdit && body.accountSelectionMode === 'INHERIT' && body.value.some((value) => !!value.id);
     if (clearSelection && (!Number.isSafeInteger(body.expectedRouteRevision) ||
         body.expectedRouteRevision! < 0 || body.expectedRouteRevision! > 2147483646))
       throw new BadRequestException('SEND_ROUTE_REVISION_REQUIRED');
@@ -2243,7 +2300,7 @@ export class PostsRepository {
       requestHash: string;
     } | undefined;
     const withdrawalIds = new Set<string>();
-    if (state === 'draft' && !admissionMode && tx) {
+    if (state === 'draft' && !admissionMode && tx && !draftContext?.legacyEdit) {
       const rootId = body.value[0]?.id;
       const root = rootId ? await tx.post.findFirst({
         where: { id: rootId, organizationId: orgId },
@@ -2461,9 +2518,18 @@ export class PostsRepository {
               releaseId: null, releaseURL: null, claimedAt: null,
               projectId: projectId ?? undefined, group: uuid,
             } : {}),
+            ...(draftContext?.legacyEdit?.some(post => post.id === id) ? {
+              state: { in: ['QUEUE', 'DRAFT'] }, deletedAt: null, claimedAt: null,
+              releaseId: null, releaseURL: null, sendIntentId: null,
+              routeRevision: draftContext.legacyEdit.find(post => post.id === id)!.routeRevision,
+              contentRevision: draftContext.legacyEdit.find(post => post.id === id)!.contentRevision,
+              AND: [legacyExecutionWhere()],
+            } : {}),
             ...(clearSelection ? {
               state: 'DRAFT', sendIntentId: null, releaseId: null, routeRevision: body.expectedRouteRevision,
-            } : admissionMode === 'CONTROLLED'
+            } : draftContext?.intentEditId
+              ? { sendIntentId: draftContext.intentEditId, deletedAt: null, releaseId: null, releaseURL: null, claimedAt: null }
+              : admissionMode === 'CONTROLLED'
               ? { sendIntentId: null, state: 'DRAFT', releaseId: null }
               : { sendIntentId: null, AND: [legacyExecutionWhere()] }),
           },

@@ -410,3 +410,56 @@ other failure/UNKNOWN/authorization states do not grant replay. Website requires
 the exact account/revision acknowledgment and distinguishes account selection
 from frozen content/draft saving. Deploy backend before extension and website;
 no schema migration or historical opt-in is introduced.
+
+
+## Full original Post editing before sending authority (2026-11-13)
+
+This replaces the earlier account-only editor restriction. Existing `POST /posts`
+accepts the complete normal editor payload (body, media, settings, thread and
+root tags/schedule/account), retaining the original root/group and SendIntent.
+An existing coordinated Post requires one original root, a stable top-level
+`requestId`, and per-Post `expectedRouteRevision` and `expectedContentRevision`.
+`allowedActions.edit` is the explicit full-editor permission; `selectAccount`
+remains for older account-only consumers. Unclaimed API originals are editable;
+any API execution remains immutable. Existing recurring controlled admission
+restrictions and Reply immutability remain.
+
+The serializable coordinator transaction uses the shared evidence predicate and
+shared preparation revocation helper, then invokes the existing repository editor
+mapping in the same transaction. Native opted-in preparations may be revoked only
+with complete never-authorized/no-exposure evidence, including validated no-permit
+stop history after retry. Old clients, UNKNOWN, authorization or confirmed history
+remain blocked. Removed children are soft-deleted, preserving execution references.
+Audited revoked old payload/segment hashes remain self-consistent; they need not
+match subsequently edited current content. Unrevoked payloads must still match the
+current full chain before revocation. Original lease/receipt evidence, quota and
+account/platform pacing are preserved; late contradictory receipts quarantine the
+original intent/current owner rather than silently replaying content.
+
+Each accepted full-editor submission advances both contentRevision and
+routeRevision by one; exact request replay returns its durable transaction
+acknowledgement without another edit. The response includes original `postId`,
+`integration`, `state`, `publishMethod` and a transaction-snapshot `sending` summary
+with the same intent/root and accepted revisions. New claims hash the edited
+current payload; old execution payloads are never rewritten.
+
+`type:draft` retains the same Post as DRAFT and intent as existing CANCELLED with
+an audited `context.editableDraft:true`. Public status is DRAFT and edit remains
+available. It cannot dispatch or block active controlled drain. Only another
+explicit editor submission can resume the same intent as QUEUED; no new status,
+schema migration, business row replacement or automatic retry is introduced.
+Deploy backend support before the website full-editor client. No test is proof
+of browser rendering or live platform publication.
+
+AUTONOMOUS full editor submissions with stable request ID and both expected
+revisions use the existing repository mapper in a mode-locked transaction. Only
+complete live unclaimed legacy chains are editable; captured/claimed/result
+evidence remains blocked. Thread removal soft-deletes old rows and preserves
+independent roots. Old client scheduling requests keep their previous contract.
+Controlled API originals may be saved as drafts without changing method; an
+unsupported API dispatch is rejected before mutation unless an explicit valid
+extension choice is supplied. Full editor saves never silently change methods.
+
+Editor idempotency hashes the original request before short-link transformation;
+receipt replay returns the accepted snapshot without generating new links or
+advancing revisions again. Changed request bodies cannot reuse the same ID.

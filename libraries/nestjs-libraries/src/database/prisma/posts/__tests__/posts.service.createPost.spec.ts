@@ -614,3 +614,14 @@ it('promotes an existing queued root without deleting or rewriting its thread', 
   expect(mocks.postRepository.createOrUpdatePost).not.toHaveBeenCalled();
   expect(softDeleteGroupPosts).not.toHaveBeenCalled();
 });
+
+it('submits autonomous queued edits through full persistence before publishing instead of ignoring the edited body',async()=>{
+ const mocks=createMocks();
+ mocks.postRepository.getPostById.mockResolvedValue({id:'root',state:'QUEUE',group:'g',publishMethod:'EXTENSION'} as any);
+ const edit=vi.fn().mockResolvedValue({posts:[{id:'root',state:'QUEUE',group:'g'}]});Object.assign(mocks.postRepository,{editAutonomousQueuedPost:edit});
+ const service=createService(mocks);const schedule=vi.spyOn(service,'schedulePosts');
+ const input=makeBody({type:'now'});Object.assign(input,{requestId:'full-edit'});Object.assign(input.posts[0],{group:'g',expectedRouteRevision:0,expectedContentRevision:1});input.posts[0].value[0]={...input.posts[0].value[0],id:'root',content:'Edited body'};
+ await service.createPost('org-1',input,'owner');
+ expect(edit).toHaveBeenCalledTimes(1);expect(edit.mock.calls[0][1].body.value[0].content).toBe('Edited body');
+ expect(schedule).not.toHaveBeenCalled();expect(mocks.postRepository.createOrUpdatePost).not.toHaveBeenCalled();
+});

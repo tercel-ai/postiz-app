@@ -82,9 +82,14 @@ export function memorySendDatabase() {
     for (const [key, value] of Object.entries(data)) {
       if (value === undefined) continue;
       if (value === Prisma.JsonNull || value === Prisma.DbNull) { row[key] = null; continue; }
-      if (key === 'integration' && (value as any)?.disconnect === true) {
-        row.integrationId = null;
-        row.integration = null;
+      const foreignKey = ({ organization: 'organizationId', integration: 'integrationId', parentPost: 'parentPostId' } as Record<string,string>)[key];
+      if (foreignKey && value && typeof value === 'object' && 'connect' in value) {
+        row[foreignKey] = (value as any).connect.id;
+        continue;
+      }
+      if (foreignKey && (value as any)?.disconnect === true) {
+        row[foreignKey] = null;
+        row[key] = null;
         continue;
       }
       row[key] =
@@ -201,7 +206,7 @@ export function memorySendDatabase() {
             if (row) return update(row, data);
             if (name === 'post' && create.id && rows(name).some(row => row.id === create.id))
               throw Object.assign(new Error('Unique post identity conflict'), { code: 'P2002' });
-            const next = { ...defaults(), ...structuredClone(create) };
+            const next = name === 'post' ? update(defaults(), create) : { ...defaults(), ...structuredClone(create) };
             rows(name).push(next);
             return output(next);
           },

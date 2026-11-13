@@ -1,7 +1,7 @@
 import type { Post, SendIntent, SendExecution, SendSegment } from '@prisma/client';
 
 type PostScope = Partial<Pick<Post, 'id' | 'state' | 'publishMethod' | 'sendIntentId' | 'releaseId' | 'releaseURL' | 'claimedAt' | 'routeRevision' | 'contentRevision'>>;
-type IntentScope = Partial<Pick<SendIntent, 'id' | 'rootPostId' | 'action' | 'status' | 'activeExecutionId' | 'hasConfirmedSegments' | 'routeRevision' | 'contentRevision'>>;
+type IntentScope = Partial<Pick<SendIntent, 'id' | 'rootPostId' | 'action' | 'status' | 'activeExecutionId' | 'hasConfirmedSegments' | 'routeRevision' | 'contentRevision' | 'context'>>;
 type ExecutionScope = Partial<Pick<SendExecution, 'id' | 'status' | 'kind' | 'action' | 'context' | 'startedAt' | 'payload' | 'routeRevision' | 'contentRevision'>>;
 type SegmentScope = Partial<Pick<SendSegment, 'executionId' | 'status' | 'result' | 'authorizedAt' | 'permitHash' | 'submitBefore' | 'confirmedAt' | 'segmentIndex' | 'postId' | 'contentHash'>>;
 
@@ -25,14 +25,15 @@ export function isAccountChangeRevokedExecution(execution: ExecutionScope): bool
 
 /** Shared permission for the public summary and the transactional account mutation. */
 export function canChangePostAccount(post: PostScope, intent: IntentScope | null, executions: ExecutionScope[], segments: SegmentScope[]): boolean {
-  if (!intent?.id || intent.action !== 'POST' || !['QUEUE', 'ERROR'].includes(post.state ?? '') || post.publishMethod !== 'EXTENSION' ||
+  const dormant = post.state === 'DRAFT' && intent?.status === 'CANCELLED' && (intent.context as {editableDraft?:boolean}|null)?.editableDraft === true;
+  if (!intent?.id || intent.action !== 'POST' || (!dormant && !['QUEUE', 'ERROR'].includes(post.state ?? '')) || !['EXTENSION','API'].includes(post.publishMethod ?? '') ||
       post.sendIntentId !== intent.id || post.id !== intent.rootPostId || post.routeRevision !== intent.routeRevision || post.contentRevision !== intent.contentRevision || post.releaseId || post.releaseURL || post.claimedAt || intent.hasConfirmedSegments ||
-      !['QUEUED', 'RESERVED', 'FAILED_FINAL'].includes(intent.status ?? '') ||
+      (!dormant && !['QUEUED', 'RESERVED', 'FAILED_FINAL'].includes(intent.status ?? '')) ||
       (post.state === 'ERROR' && intent.status !== 'FAILED_FINAL') ||
       (intent.status === 'FAILED_FINAL' && (post.state !== 'ERROR' || !!intent.activeExecutionId)) ||
       (intent.status === 'RESERVED' && !intent.activeExecutionId)) return false;
   if (intent.activeExecutionId && !executions.some(execution => execution.id === intent.activeExecutionId && execution.status === 'RESERVED')) return false;
-  if (!executions.length) return intent.status === 'QUEUED' && !intent.activeExecutionId && segments.length === 0;
+  if (!executions.length) return (dormant || intent.status === 'QUEUED') && !intent.activeExecutionId && segments.length === 0;
   if (segments.some(segment => !executions.some(execution => execution.id === segment.executionId))) return false;
   return executions.every(execution => {
     const context = execution.context as { authorizationMode?: string } | null;

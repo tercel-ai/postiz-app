@@ -67,6 +67,9 @@ export class Post {
   @IsOptional() @IsInt() @Min(0) @Max(2147483646)
   expectedRouteRevision?: number;
 
+  @IsOptional() @IsInt() @Min(1)
+  expectedContentRevision?: number;
+
   // Optional: `Post.integrationId` is nullable, and operation-plan posts for a
   // platform the org has NOT connected are materialized without one — they are
   // published in-browser by the extension, which resolves the platform from
