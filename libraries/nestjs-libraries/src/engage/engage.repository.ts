@@ -3370,7 +3370,7 @@ export class EngageRepository {
       where: {
         organizationId,
         opportunityId,
-        post: { state: 'QUEUE', deletedAt: null, releaseURL: null },
+        post: { state: 'QUEUE', deletedAt: null, releaseURL: null, sendIntentId: null, AND: [legacyExecutionWhere()] },
       },
       // `id` alongside `postId` so the caller can name the replies it just
       // closed — the notification layer keys on the reply, not the post.
@@ -3424,7 +3424,7 @@ export class EngageRepository {
       // the row either way: `state: 'ERROR'` already excludes it from
       // claimDueEngageReplies, whose where-clause requires `post.state: 'QUEUE'`.
       const closed = await tx.post.updateMany({
-        where: { sendIntentId: null, id: { in: parked.map((p) => p.postId) }, state: 'QUEUE' },
+        where: { organizationId, sendIntentId: null, deletedAt: null, id: { in: parked.map((p) => p.postId) }, state: 'QUEUE', AND: [legacyExecutionWhere()] },
         data: { state: 'ERROR', error, releaseId: null },
       });
       // `retired` reports what actually happened, not what was asked for: an
@@ -3498,7 +3498,7 @@ export class EngageRepository {
       where: {
         organizationId,
         opportunityId,
-        post: { state: 'QUEUE', deletedAt: null, releaseURL: null },
+        post: { state: 'QUEUE', deletedAt: null, releaseURL: null, sendIntentId: null, AND: [legacyExecutionWhere()] },
       },
       // `id` for the same reason as target-gone: the caller notifies per reply.
       select: { id: true, postId: true },
@@ -3534,7 +3534,7 @@ export class EngageRepository {
       // sole reply-side input to getLastPlatformWriteAt, and rewinding it would
       // let the next poll write to the same account inside the pacing floor.
       const closed = await tx.post.updateMany({
-        where: { id: { in: parked.map((p) => p.postId) }, state: 'QUEUE' },
+        where: { organizationId, sendIntentId: null, deletedAt: null, id: { in: parked.map((p) => p.postId) }, state: 'QUEUE', AND: [legacyExecutionWhere()] },
         data: { state: 'ERROR', error, releaseId: null },
       });
       // Best-effort, with the same caveat as target-gone's: parked ids, not the
@@ -3603,7 +3603,7 @@ export class EngageRepository {
       // between the extension's attempt and this call went out for real, and
       // marking it ERROR would contradict a confirmed send. An already-ERROR row
       // keeps the reason that closed it.
-      where: { sendIntentId: null, id: reply.postId, state: { in: ['DRAFT', 'QUEUE'] } },
+      where: { organizationId, deletedAt: null, sendIntentId: null, id: reply.postId, state: { in: ['DRAFT', 'QUEUE'] }, AND: [legacyExecutionWhere()] },
       // `claimedAt` is preserved — see markOpportunityTargetGone for why. It
       // matters most HERE: this method's own premise is that the send FIRED, so
       // this row's claimedAt is the most recent moment the platform account was
@@ -3759,7 +3759,8 @@ export class EngageRepository {
     if (!reply) throw new NotFoundException('Sent reply not found');
 
     const recorded = await this._post.model.post.updateMany({
-      where: { sendIntentId: null,
+      where: { organizationId, deletedAt: null, sendIntentId: null,
+        AND: [legacyExecutionWhere()],
         id: reply.postId,
         // Re-asserted at write time so a report racing a commit cannot stamp a
         // failure onto a reply that is already live.
@@ -4015,12 +4016,24 @@ export class EngageRepository {
       // that draft, and the driver's own upsert can only ever meet its own
       // queued row. Without the scope a driver run would silently overwrite a
       // draft the user was editing — and hand it to the extension.
+      // Share the lookup predicate with the atomic update: archived evidence
+      // cannot be edited even if quarantine happens after the lookup.
+      const editablePost: Prisma.PostWhereInput = {
+        organizationId,
+        projectId: projectId ?? null,
+        state,
+        sendIntentId: null,
+        deletedAt: null,
+        ...(data.coordinatedAutomatic
+          ? { executionProtocol: 'ACCOUNT_BOUND_V1', sendOrigin: 'AUTOMATION' }
+          : { AND: [legacyExecutionWhere()], ...(state === 'DRAFT' ? { sendOrigin: { not: 'AUTOMATION' } } : {}) }),
+      };
       const existing = await tx.engageSentReply.findFirst({
         where: {
           organizationId,
           projectId: projectId ?? null,
           opportunityId,
-          post: { state, sendIntentId: null, ...(data.coordinatedAutomatic ? { executionProtocol: 'ACCOUNT_BOUND_V1', sendOrigin: 'AUTOMATION' } : state === 'DRAFT' ? { sendOrigin: { not: 'AUTOMATION' } } : {}) },
+          post: editablePost,
         },
         select: {
           id: true,
@@ -4035,7 +4048,7 @@ export class EngageRepository {
         if (this._sendModes && (await this._sendModes.activeLegacyPostIdsIn(tx, organizationId)).includes(existing.postId))
           throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
         await tx.post.update({
-          where: { sendIntentId: null, id: existing.postId },
+          where: { ...editablePost, id: existing.postId },
           data: {
             content: data.content,
             contentRevision: { increment: 1 },
@@ -6726,7 +6739,10 @@ export class EngageRepository {
     // whose platform fell outside SCANNABLE_PLATFORMS entirely.
     const reply = await this._sentReply.model.engageSentReply.findFirst({
       where: { id: sentReplyId, organizationId },
-      include: { opportunity: { select: { platform: true } } },
+      include: {
+        opportunity: { select: { platform: true } },
+        post: { select: { executionProtocol: true, sendIntentId: true } },
+      },
     });
     if (!reply) throw new NotFoundException('Sent reply not found');
     const platform = reply.opportunity.platform;
@@ -6734,6 +6750,25 @@ export class EngageRepository {
       throw new BadRequestException(
         `Reply-URL backfill is not supported for platform "${platform}"`
       );
+    }
+    // A confirmed coordinated reply may still need its permalink. This is
+    // metadata only: publication and account attribution remain coordinator-owned.
+    if (!opts.markPublished && reply.post?.executionProtocol === 'ACCOUNT_BOUND_V1') {
+      if (!url || !reply.projectId || !reply.post.sendIntentId)
+        throw new BadRequestException('ACCOUNT_BOUND_PROTOCOL_REQUIRED');
+      return this._post.model.post.update({
+        where: {
+          id: reply.postId, organizationId, projectId: reply.projectId,
+          state: 'PUBLISHED', deletedAt: null, executionProtocol: 'ACCOUNT_BOUND_V1',
+          sendIntentId: reply.post.sendIntentId, releaseId: { not: null },
+          sendIntent: {
+            organizationId, projectId: reply.projectId, rootPostId: reply.postId,
+            action: 'REPLY', status: 'SUCCEEDED', hasConfirmedSegments: true,
+            activeExecutionId: null,
+          },
+        },
+        data: { releaseURL: url },
+      });
     }
     const releaseId =
       platform === 'x' && url ? parseXTweetId(url) ?? undefined : undefined;
@@ -6802,7 +6837,9 @@ export class EngageRepository {
     }
 
     return this._post.model.post.update({
-      where: { sendIntentId: null, id: reply.postId },
+      // Recheck at the write boundary; a prior context read cannot authorize
+      // reviving quarantined content or bypassing coordinated settlement.
+      where: { organizationId, deletedAt: null, sendIntentId: null, id: reply.postId, AND: [legacyExecutionWhere()] },
       data: {
         // Empty/absent URL persists as null (never '') so every "awaiting its
         // link" check — which tests releaseURL for null — keeps working.
@@ -6910,7 +6947,7 @@ export class EngageRepository {
         // needs to know whether a removal report is NEW has to read it here,
         // before the write — see markExtensionReplyRemoved.
         removedAt: true,
-        post: { select: { state: true, releaseURL: true, sendIntentId: true, executionProtocol: true } },
+        post: { select: { state: true, releaseURL: true, sendIntentId: true, executionProtocol: true, deletedAt: true } },
         opportunity: { select: { platform: true } },
       },
     });
@@ -6922,6 +6959,7 @@ export class EngageRepository {
       projectId: reply.projectId,
       removedAt: reply.removedAt ?? null,
       state: reply.post?.state ?? null,
+      deletedAt: reply.post?.deletedAt ?? null,
       releaseURL: reply.post?.releaseURL ?? null,
       platform: reply.opportunity?.platform ?? null,
       sendIntentId: reply.post?.sendIntentId ?? null,
@@ -7018,8 +7056,9 @@ export class EngageRepository {
    * rather than shadowed by a second identity. Everywhere else there is no
    * integration to speak for the reply, so the supplied author is recorded.
    *
-   * No-ops (returns undefined) when the reply or post is gone — a background
-   * enrich must never throw.
+   * No-ops when the initial read finds no reply or post. A concurrent archive
+   * or protocol change rejects the atomic write; background callers handle that
+   * failure without restoring the archived record.
    */
   async updateReplyAuthor(
     organizationId: string,
@@ -7047,7 +7086,8 @@ export class EngageRepository {
       engageAuthor
     );
     return this._post.model.post.update({
-      where: { id: reply.postId },
+      // Background enrichment may finish after the original reply is archived.
+      where: { organizationId, deletedAt: null, sendIntentId: null, id: reply.postId, AND: [legacyExecutionWhere()] },
       data: { settings: mergedSettings },
     });
   }

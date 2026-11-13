@@ -1,3 +1,4 @@
+import { ACCOUNT_CHANGE_CANCELLATION, canChangePostAccount, isAccountChangeRevokedExecution } from './send-account-change';
 import { preserveDispatchTarget, readPublishNowRequestedAt, withPublishNowRequestedAt } from './send-dispatch';
 import { assertAutonomousAccountIn, controlledBlockedPlatformsIn } from './send-mode-handover';
 import { SendModeService } from './send-mode.service';
@@ -479,8 +480,9 @@ export class SendCoordinatorService {
 
   /** Explicit scheduling is separate from idempotent enqueue; an idle intent keeps its identity. */
   async rescheduleQueuedPost(org: string, rootId: string, user: string, publishDate: Date,
-    expectedRouteRevision?: number, expectedContentRevision?: number, publishNow = false) {
+    expectedRouteRevision?: number, expectedContentRevision?: number, publishNow = false, selection?: { integrationId: string; requestId: string }) {
     if (!Number.isFinite(publishDate.getTime())) throw new BadRequestException('INVALID_PUBLISH_DATE');
+    if (selection && (!publishNow || typeof selection.integrationId !== 'string' || !selection.integrationId.trim() || selection.integrationId.length > 128 || typeof selection.requestId !== 'string' || !selection.requestId.trim() || selection.requestId.length > 128)) throw new BadRequestException('INVALID_ACCOUNT_CHANGE_REQUEST');
     const requestedAt = publishNow ? new Date() : null;
     await this.enabled(org);
     await this.assertMember(this.db, org, user);
@@ -491,29 +493,85 @@ export class SendCoordinatorService {
       await this.assertControlledIn(tx, org);
       await this.assertMember(tx, org, user);
       const posts = await this.chain(tx, org, rootId), root = posts[0];
+      const receiptKey = { organizationId: org, userId: user, operation: `post-now-account:${rootId}`, requestId: selection?.requestId ?? '' };
+      // The client date is irrelevant for immediate sends; retries retain the same account request.
+      const fingerprint = selection ? sendHash({ rootId, expectedRouteRevision, expectedContentRevision, integrationId: selection.integrationId }) : '';
+      if (selection) {
+        const prior = await tx.sendMutationReceipt.findUnique({ where: { organizationId_userId_operation_requestId: receiptKey } });
+        if (prior) {
+          if (prior.requestHash !== fingerprint) reject('REQUEST_ID_CONFLICT');
+          const accepted = prior.result as { sendIntentId?: string; routeRevision?: number };
+          if (root.projectId !== scope.projectId || root.sendIntentId !== accepted.sendIntentId || root.integrationId !== selection.integrationId || root.routeRevision !== accepted.routeRevision || root.contentRevision !== expectedContentRevision) reject('SEND_CONTENT_REVISION_CONFLICT');
+          return root;
+        }
+      }
       const intent = root.sendIntentId ? await tx.sendIntent.findFirst({ where: { id: root.sendIntentId, organizationId: org, rootPostId: rootId, projectId: scope.projectId! } }) : null;
-      if (!intent || root.state !== 'QUEUE' || root.publishMethod !== 'EXTENSION' || intent.action !== 'POST' ||
+      if (!intent || (selection ? !['QUEUE', 'ERROR'].includes(root.state) : root.state !== 'QUEUE') || root.publishMethod !== 'EXTENSION' || intent.action !== 'POST' ||
           root.projectId !== scope.projectId || root.integrationId !== intent.integrationId ||
+          (intent.status === 'FAILED_FINAL' && root.state !== 'ERROR') ||
           canonicalControlledPlatform(root.providerIdentifier!) !== intent.platform ||
-          intent.status !== 'QUEUED' || intent.activeExecutionId || intent.hasConfirmedSegments ||
-          posts.some(post => post.state !== 'QUEUE' || post.sendIntentId !== intent.id || post.releaseId || post.releaseURL || post.claimedAt))
+          (selection ? !['QUEUED', 'RESERVED', 'FAILED_FINAL'].includes(intent.status) || (intent.status === 'RESERVED' && !intent.activeExecutionId) : intent.status !== 'QUEUED' || !!intent.activeExecutionId) || intent.hasConfirmedSegments ||
+          posts.some(post => (selection ? !['QUEUE', 'ERROR'].includes(post.state) : post.state !== 'QUEUE') || post.sendIntentId !== intent.id || post.releaseId || post.releaseURL || post.claimedAt))
         reject('SEND_RESCHEDULE_UNSAFE');
       if (!Number.isSafeInteger(expectedRouteRevision) || !Number.isSafeInteger(expectedContentRevision) ||
           root.routeRevision !== expectedRouteRevision || root.contentRevision !== expectedContentRevision ||
           intent.routeRevision !== expectedRouteRevision || intent.contentRevision !== expectedContentRevision)
         reject('SEND_CONTENT_REVISION_CONFLICT');
-      if (await tx.sendExecution.count({ where: { organizationId: org, sendIntentId: intent.id,
+      if (!selection && (await tx.sendExecution.count({ where: { organizationId: org, sendIntentId: intent.id,
         status: { notIn: ['FAILED_FINAL', 'CANCELLED', 'EXPIRED'] } } }) ||
-          await tx.sendSegment.count({ where: { organizationId: org, execution: { sendIntentId: intent.id }, status: { not: 'NOT_SUBMITTED' } } }))
+          await tx.sendSegment.count({ where: { organizationId: org, execution: { sendIntentId: intent.id }, status: { not: 'NOT_SUBMITTED' } } })))
         reject('SEND_RESCHEDULE_UNSAFE');
       const protectedIds = new Set(await this.modes.activeLegacyPostIdsIn(tx, org));
       if (posts.some(post => protectedIds.has(post.id))) reject('LEGACY_CONTENT_DRAIN_REQUIRED');
-      await tx.sendIntent.update({ where: { id: intent.id }, data: { revision: { increment: 1 }, context: sendJson({ ...(intent.context as Record<string, unknown> | null), manualPostNow: publishNow }) } });
+      let route: Awaited<ReturnType<SendBindingService['resolveForEnqueueInTransaction']>> = null;
+      let revocable: SendExecution[] = [];
+      if (selection) {
+        const executions = await tx.sendExecution.findMany({ where: { organizationId: org, sendIntentId: intent.id } });
+        const segments = await tx.sendSegment.findMany({ where: { organizationId: org, execution: { sendIntentId: intent.id } } });
+        if (!canChangePostAccount(root, intent, executions, segments) || executions.some(execution => {
+          const payload = execution.payload as Array<{ id?: string; contentHash?: string }>;
+          return payload.length !== posts.length || posts.some((post,index) => payload[index]?.id !== post.id || payload[index]?.contentHash !== postSendHash(post));
+        })) reject('SEND_ACCOUNT_CHANGE_UNSAFE');
+        revocable = executions.filter(execution => !isAccountChangeRevokedExecution(execution));
+        if (revocable.length && await tx.sendQuotaReservation.count({ where: { organizationId: org, executionId: { in: revocable.map(execution => execution.id) } } })) reject('SEND_ACCOUNT_CHANGE_UNSAFE');
+        route = await this.bindings.resolveForEnqueueInTransaction(tx, org, root.projectId!, intent.platform, 'POST', selection.integrationId, false);
+        if (!route || route.integrationId !== selection.integrationId) reject('SEND_BINDING_REQUIRED');
+        if (root.providerIdentifier === 'linkedin-page' && route.providerIdentifier !== 'linkedin-page') throw new BadRequestException('LINKEDIN_COMPANY_ACCOUNT_REQUIRED');
+        await this.enrollAccountIn(tx, org, route.integrationId, route.canonicalAccountKey);
+      }
+      const revision = root.routeRevision + (route ? 1 : 0);
+      for (const execution of revocable.sort((a,b) => a.canonicalAccountKey.localeCompare(b.canonicalAccountKey))) {
+        const account = await tx.accountWriteState.findUniqueOrThrow({ where: { organizationId_canonicalAccountKey: { organizationId: org, canonicalAccountKey: execution.canonicalAccountKey } } });
+        const locked = await tx.accountWriteState.updateMany({ where: { id: account.id, revision: account.revision },
+          data: { revision: { increment: 1 }, ...(account.activeExecutionId === execution.id ? { activeExecutionId: null } : {}) } });
+        if (locked.count !== 1) reject('ACCOUNT_WRITE_STATE_CHANGED');
+        const canceled = await tx.sendExecution.updateMany({ where: { id: execution.id, organizationId: org, status: execution.status, startedAt: null, routeRevision: execution.routeRevision, contentRevision: execution.contentRevision },
+          data: { status: 'CANCELLED', resolutionRevision: { increment: 1 }, lastProgressAt: requestedAt!, context: sendJson({ ...(execution.context as Record<string, unknown> | null),
+            accountChangeRevocation: { reason: ACCOUNT_CHANGE_CANCELLATION, requestId: selection!.requestId, at: requestedAt!.toISOString(), routeRevision: revision } }) } });
+        if (canceled.count !== 1) reject('SEND_INTENT_CHANGED');
+        const segments = await tx.sendSegment.findMany({ where: { organizationId: org, executionId: execution.id } });
+        for (const segment of segments) {
+          // Preserve the original authenticated no-permit stop receipt.
+          if (segment.status === 'NOT_SUBMITTED') continue;
+          const changed = await tx.sendSegment.updateMany({ where: { id: segment.id, status: 'PENDING', authorizedAt: null, permitHash: null, submitBefore: null, confirmedAt: null, result: { equals: Prisma.AnyNull } },
+            data: { status: 'NOT_SUBMITTED', result: { status: ACCOUNT_CHANGE_CANCELLATION, requestId: selection!.requestId } } });
+          if (changed.count !== 1) reject('SEND_ACCOUNT_CHANGE_UNSAFE');
+        }
+      }
+      const saved = await tx.sendIntent.updateMany({ where: { id: intent.id, organizationId: org, revision: intent.revision, activeExecutionId: intent.activeExecutionId, status: intent.status, fencingVersion: intent.fencingVersion },
+        data: { ...(selection ? { activeExecutionId: null, status: 'QUEUED', ...(revocable.length ? { fencingVersion: { increment: 1 } } : {}) } : {}), revision: { increment: 1 }, context: sendJson({ ...(intent.context as Record<string, unknown> | null), manualPostNow: publishNow }),
+          ...(route ? { integrationId: route.integrationId, canonicalAccountKey: route.canonicalAccountKey, target: sendJson(route.targetAccount), routeRevision: revision } : {}) } });
+      if (saved.count !== 1) reject('SEND_INTENT_CHANGED');
       for (const post of posts) {
-        const updated = await tx.post.updateMany({ where: { organizationId: org, id: post.id, state: 'QUEUE', sendIntentId: intent.id, releaseId: null },
-          data: { publishDate: requestedAt ?? publishDate, sendTarget: withPublishNowRequestedAt(post.sendTarget, post.parentPostId ? null : requestedAt) } });
+        const updated = await tx.post.updateMany({ where: { organizationId: org, id: post.id, state: post.state, sendIntentId: intent.id, releaseId: null, releaseURL: null, claimedAt: null, routeRevision: post.routeRevision, contentRevision: post.contentRevision },
+          data: { ...(selection ? { state: 'QUEUE', error: null } : {}), publishDate: requestedAt ?? publishDate, sendTarget: withPublishNowRequestedAt(route?.targetAccount ?? post.sendTarget, post.parentPostId ? null : requestedAt),
+            ...(route ? { integrationId: route.integrationId, routeRevision: revision, accountSelectionMode: 'EXPLICIT', accountResolution: 'RESOLVED', bindingSource: route.bindingSource, bindingSourceRevision: route.bindingRevision } : {}) } });
         if (updated.count !== 1) reject('SEND_RESCHEDULE_UNSAFE');
       }
+      if (selection) await tx.sendMutationReceipt.create({ data: { ...receiptKey, requestHash: fingerprint,
+        result: { rootPostId: rootId, sendIntentId: intent.id, integrationId: selection.integrationId, routeRevision: revision,
+          previousIntegrationId: intent.integrationId, previousRouteRevision: intent.routeRevision, previousTarget: intent.target, revokedExecutionIds: revocable.map(execution => execution.id) } } });
+      console.log('[post-now] original queued post updated', { rootPostId: rootId, sendIntentId: intent.id, requestId: selection?.requestId, integrationId: route?.integrationId ?? intent.integrationId, routeRevision: revision, publishNow });
       return tx.post.findUniqueOrThrow({ where: { id: rootId } });
     });
   }
@@ -1586,7 +1644,7 @@ export class SendCoordinatorService {
       } });
       return result;
     }
-    const superseded = execution.status === 'RETRY_REQUESTED' || !!await tx.sendMutationReceipt.findFirst({
+    const superseded = isAccountChangeRevokedExecution(execution) || execution.status === 'RETRY_REQUESTED' || !!await tx.sendMutationReceipt.findFirst({
       where: { organizationId: org, operation: `owner-send-retry:${execution.id}` },
     });
     if (superseded && outcome.status === 'definitely_not_submitted')

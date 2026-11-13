@@ -301,3 +301,112 @@ backend preparation or consuming local permission; an absent editor settles via
 the existing PREPARED/NOT_SUBMITTED stop-proof path. No backend source, endpoint,
 quota or journal state contract changes are required for that readiness fix.
 Historical UNKNOWN records remain subject to their existing recovery rules.
+
+
+## Historical missing-receipt Engage writer
+
+The existing privileged Post quarantine resource and local maintenance service
+can retire one captured, claimed, nonrecurring Engage root with no related
+receipts and a matching saved reply/project/platform. Their request contract is
+unchanged: revision, original-executor stop, no pending submit and actual evidence
+are required. The ordinary reply absence-recovery endpoint is not broadened.
+Review includes credential-free Post fingerprints so a prepared plan cannot
+silently adopt changed content or a changed private claim.
+
+The operation preserves old evidence and marks the old Post soft-deleted
+DRAFT/LEGACY_QUARANTINED; it does not mark it unsent, grant replay or modify quota.
+Only its captured ownership is removed. Live legacy write predicates fence late
+publication, failure, target and enrichment callbacks and draft edits; failed
+publication updates stop before opportunity/billing side effects. Manual URL
+backfill remains available for a live PUBLISHED ACCOUNT_BOUND reply whose same
+organization/project/root REPLY intent is SUCCEEDED, has confirmed segments and
+has no active execution. That metadata-only operation updates releaseURL without
+changing platform ID, account/author, settings, state, intent, quota or permissions;
+it cannot confirm, revive or resend content. Both modes retain old-content fencing
+and normal new-content account/pacing/permit rules.
+Backend deployment/restart must precede applying recovery; no migration is needed.
+See `organization-sending-modes.md` for the scoped prepare/apply CLI.
+
+## Account-only Post Now before sending authorization (2026-11-12)
+
+An explicit website account choice is expected on a saved queued Post. The
+previous zero-execution-only rule is replaced by evidence-based preauthorization
+revocation. No two-minute timeout proves that content was not submitted.
+`allowedActions.selectAccount` permits a safe account change; ordinary
+`reschedule` remains false for RESERVED work. A RESERVED record exposes account
+mutation only after selecting a different single account. Content/settings
+changes and date-only edits retain their existing guards.
+
+The existing `POST /posts/schedule` item accepts `type: "now"`, original `id`,
+`expectedRouteRevision`, `expectedContentRevision`, selected `integrationId` and
+stable `requestId`. The shared summary/mutation predicate requires the same
+EXTENSION POST chain and matching revisions, no publication/claim markers or
+confirmed/UNKNOWN/authorized/exposed segment. No-execution queues remain valid.
+A RESERVED/EXPIRED extension preparation is revocable only if its original claim
+persisted `authorizationMode: "NATIVE_FLOW_V1"`, never started, and retains its
+complete matching PENDING segment set with no permit, authorization timestamp,
+confirmation or result/exposure marker. Earlier safely canceled account-change
+attempts remain auditable and do not prevent another preauthorization edit.
+Other execution history retains its immutable account/recovery rules.
+
+The serializable transaction rechecks membership, mode, active project, complete
+chain/content, legacy protection and zero quota reservations for revoked work.
+It validates the new account through the existing binding resolver, marks old
+executions CANCELLED and pending segments NOT_SUBMITTED with an audited
+`account_change_before_native` marker, clears only matching account occupancy,
+and advances fencing plus route/intent revisions. Old account/target/payload,
+lease authentication, preflight evidence, pacing clocks and quota history remain.
+The same Post chain/SendIntent becomes QUEUED with the new target. There is no
+new Post, intent, platform submission, quota refund or pacing reset. Mutation
+receipts preserve prior routes and revoked IDs; lost-response replay does not
+repeat the edit.
+
+Targeted `/extension/send-attempts/claim` and both existing due adapters accept
+optional claim `authorizationMode: "NATIVE_FLOW_V1"`. The execution stores that
+contract at claim time. The standalone extension adds it only to newly persisted
+pending requests; old durable requests retain their exact body/fingerprint.
+Opted-in starts must use the same native mode and cannot call the old
+preauthorization draft-exposure endpoint. Revoked claims cannot renew, preflight,
+start or replay a claim into usable authority. Historical status/receipt access
+remains authenticated by the original lease. Stale stop cannot fail the new
+route. Late positive/UNKNOWN evidence is retained against the original actor
+and quarantines the original business content/new owner for reconciliation.
+
+The accepted schedule item echoes `integrationId` and `routeRevision`; the website
+requires that acknowledgment before waking the extension or closing the editor.
+Deploy all backend instances before updating the extension and website. Old
+clients/old durable claims omit the contract and remain immutable after claim;
+existing records are never retroactively opted in. No schema migration or
+historical reset is required. CONTROLLED account verification, pacing, quota,
+permits and journal rules remain; AUTONOMOUS current-browser identity, Reply
+account immutability and mode handover semantics are unchanged. Tests do not
+prove live publication.
+
+
+### Reviewed preauthorization stop recovery (2026-11-12)
+
+A native opted-in preparation can become FAILED_FINAL with Post ERROR after an
+authenticated structured stop receipt before any authorization. The shared
+summary/mutation predicate allows account selection only with complete matching
+payload/segments, no execution start or permit/authorization/exposure/confirmation,
+and validated no-pending-submit/no-permit stop evidence. The same proven stop
+history remains eligible after explicit retry returns the intent to QUEUED or
+creates a new native RESERVED preparation; every historical attempt is rechecked.
+Generic failure, old
+clients, ever-authorized history and UNKNOWN remain immutable. The transaction
+preserves the original NOT_SUBMITTED stop result, cancels the old execution,
+fences it, and restores the same chain/intent to QUEUED with the new account.
+Pending continuation segments receive the ordinary account-change cancellation
+marker; prior proof is never overwritten. Pacing, occupancy ownership and quota
+checks remain unchanged. No new business record or automatic unknown replay.
+
+Extension receipt recovery authenticates the old execution first. A settled
+no-permit PREPARED journal may be acknowledged locally against authoritative
+NOT_SUBMITTED/terminal-no-permit state. Manual actions skip only conclusively
+obsolete canceled/expired manifests without unresolved local submission evidence.
+After exact replay returns REPLAYED_EXECUTION_UNAVAILABLE for CANCELLED/EXPIRED,
+an explicit action can persist at most one fresh claim for the current route;
+other failure/UNKNOWN/authorization states do not grant replay. Website requires
+the exact account/revision acknowledgment and distinguishes account selection
+from frozen content/draft saving. Deploy backend before extension and website;
+no schema migration or historical opt-in is introduced.

@@ -388,3 +388,66 @@ Medium checks the original executor status before the native operation; it does
 not add backend calls while filling or submitting. Legacy absence review remains
 single-segment. See `multi-node-sending-api-ownership.md` for compatibility and
 `organization-sending-modes.md` for CONTROLLED/AUTONOMOUS boundaries.
+
+
+## Historical Engage claims without browser receipts
+
+A new queued reply has a Post/SendIntent but may have no execution or local
+journal yet. Extension Check status reads that business summary and keeps queued
+or active work pending; it does not invoke original-send confirmation until the
+state requires reconciliation.
+
+For an old captured, claimed legacy Engage root without receipts, ordinary
+absence recovery cannot invent NOT_SUBMITTED. The existing explicit quarantine
+service can archive exactly that standalone record after executor-stop and
+no-pending-submit evidence. The old record and audit remain, its protocol becomes
+LEGACY_QUARANTINED, and only its captured ownership is removed. New independent
+queued work then follows ordinary discovery/reservation/authorization. Atomic
+legacy callback and draft guards prevent revival or evidence overwrite; mode
+handover cannot restore the old send authority. No normal native operation,
+platform pacing, account selection, quota or website business API changes.
+
+
+## Account-only queued Post Now (2026-11-12)
+
+Account selection is distinct from unsaved content/settings. The website can
+submit an original queued Post's selected account through schedule when
+selectAccount allows it, including a RESERVED native preparation that can be
+safely revoked. Ordinary reschedule permission is unchanged. The backend checks
+claim-time native opt-in, complete PENDING/no-exposure/no-authorization evidence,
+then atomically cancels old preparations, advances fencing and updates the same
+intent/chain. Old credentials retain historical reads but no sending authority;
+late conflicting evidence quarantines the original content. Mutation receipts
+protect retries; the response acknowledges the actual account/route. No two-minute
+timeout, pacing reset, quota refund or record replacement is used. AUTONOMOUS,
+Reply and handover rules remain. Deploy backend before extension/website, without
+migration or historical reset. See [the API contract](multi-node-sending-api-ownership.md#account-only-post-now-before-sending-authorization-2026-11-12).
+
+
+### Reviewed preauthorization stop recovery (2026-11-12)
+
+A native opted-in preparation can become FAILED_FINAL with Post ERROR after an
+authenticated structured stop receipt before any authorization. The shared
+summary/mutation predicate allows account selection only with complete matching
+payload/segments, no execution start or permit/authorization/exposure/confirmation,
+and validated no-pending-submit/no-permit stop evidence. The same proven stop
+history remains eligible after explicit retry returns the intent to QUEUED or
+creates a new native RESERVED preparation; every historical attempt is rechecked.
+Generic failure, old
+clients, ever-authorized history and UNKNOWN remain immutable. The transaction
+preserves the original NOT_SUBMITTED stop result, cancels the old execution,
+fences it, and restores the same chain/intent to QUEUED with the new account.
+Pending continuation segments receive the ordinary account-change cancellation
+marker; prior proof is never overwritten. Pacing, occupancy ownership and quota
+checks remain unchanged. No new business record or automatic unknown replay.
+
+Extension receipt recovery authenticates the old execution first. A settled
+no-permit PREPARED journal may be acknowledged locally against authoritative
+NOT_SUBMITTED/terminal-no-permit state. Manual actions skip only conclusively
+obsolete canceled/expired manifests without unresolved local submission evidence.
+After exact replay returns REPLAYED_EXECUTION_UNAVAILABLE for CANCELLED/EXPIRED,
+an explicit action can persist at most one fresh claim for the current route;
+other failure/UNKNOWN/authorization states do not grant replay. Website requires
+the exact account/revision acknowledgment and distinguishes account selection
+from frozen content/draft saving. Deploy backend before extension and website;
+no schema migration or historical opt-in is introduced.

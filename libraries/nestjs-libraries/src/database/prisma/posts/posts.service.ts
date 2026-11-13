@@ -2900,7 +2900,7 @@ export class PostsService {
    */
   async schedulePosts(
     orgId: string,
-    items: Array<{ id: string; type?: 'now' | 'schedule'; publishMethod?: PublishMethod; date?: string; expectedRouteRevision?: number; expectedContentRevision?: number }>,
+    items: Array<{ id: string; type?: 'now' | 'schedule'; publishMethod?: PublishMethod; date?: string; expectedRouteRevision?: number; expectedContentRevision?: number; integrationId?: string; requestId?: string }>,
     sendContext?: { userId: string; origin: 'MANUAL' | 'AUTOMATION' }
   ) {
     const ids = [...new Set(items.map((i) => i.id))];
@@ -2908,7 +2908,7 @@ export class PostsService {
     const posts = await this._postRepository.getSchedulablePostsByIds(orgId, ids);
     const postById = new Map(posts.map((p) => [p.id, p]));
 
-    const scheduled: Array<{ id: string; publishMethod: PublishMethod | null }> = [];
+    const scheduled: Array<{ id: string; publishMethod: PublishMethod | null; integrationId?: string | null; routeRevision?: number }> = [];
     const failed: Array<{ id: string; code: string; message: string }> = [];
 
     for (const id of ids) {
@@ -2922,13 +2922,14 @@ export class PostsService {
           if (!this._sendCoordinator || !sendContext) throw new BadRequestException('SEND_POLICY_OWNER_REQUIRED');
           const item = itemById.get(id)!;
           const publishNow = item.type === 'now';
+          if (item.integrationId !== undefined && (!publishNow || !post.sendIntentId || !item.requestId)) throw new BadRequestException('INVALID_ACCOUNT_CHANGE_REQUEST');
           const publishDate = publishNow ? new Date() : item.date ? new Date(item.date) : undefined;
           const choice = item.publishMethod ?? (post.publishMethod === 'API' ? 'api' : 'extension');
           const queued = post.sendIntentId && (publishNow || (item.date && (item.type === 'schedule' || item.expectedRouteRevision !== undefined || item.expectedContentRevision !== undefined)))
-            ? await this._sendCoordinator.rescheduleQueuedPost(orgId, id, sendContext.userId, publishDate!, item.expectedRouteRevision, item.expectedContentRevision, publishNow)
+            ? await this._sendCoordinator.rescheduleQueuedPost(orgId, id, sendContext.userId, publishDate!, item.expectedRouteRevision, item.expectedContentRevision, publishNow, item.integrationId !== undefined ? { integrationId: item.integrationId, requestId: item.requestId! } : undefined)
             : await this._sendCoordinator.enqueue(orgId, id, { ...sendContext, publishMethod: choice === 'api' ? 'API' : 'EXTENSION', ...(publishDate ? { publishDate } : {}), ...(item.type ? { publishNow } : {}) });
           if (queued.publishMethod === 'API') await this.startWorkflow(getSocialTaskQueue(queued.providerIdentifier!), id, orgId);
-          scheduled.push({ id, publishMethod: queued.publishMethod === 'API' ? 'api' : 'extension' });
+          scheduled.push({ id, publishMethod: queued.publishMethod === 'API' ? 'api' : 'extension', ...(item.integrationId !== undefined ? { integrationId: queued.integrationId, routeRevision: queued.routeRevision } : {}) });
         } catch (error) {
           failed.push({ id, code: 'CONTROLLED_SCHEDULE_BLOCKED', message: (error as Error).message });
         }
@@ -2939,6 +2940,10 @@ export class PostsService {
         continue;
       }
       const requested = itemById.get(id)!;
+      if (requested.integrationId !== undefined) {
+        failed.push({ id, code: 'ACCOUNT_CHANGE_REQUIRES_CONTROLLED', message: 'Refresh the original post before changing its sending account.' });
+        continue;
+      }
       if (requested.type === 'now' || (requested.type === 'schedule' && requested.date)) {
         try {
           if (post.projectId && this._projectValidation) await this._projectValidation.assertProjectActive(orgId, post.projectId);

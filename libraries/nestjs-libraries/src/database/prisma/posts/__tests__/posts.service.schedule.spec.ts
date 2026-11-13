@@ -1399,3 +1399,27 @@ it('forwards explicit Post now retry after the existing coordinator clock parame
   await service.retryPost('org', 'p', 'owner', 'now');
   expect(retry).toHaveBeenCalledWith('org', 'p', 'owner', undefined, true);
 });
+
+it('forwards account-only Post Now through the existing coordinator and echoes its accepted route', async () => {
+ const {service}=makeService([{id:'p',state:'QUEUE',sendIntentId:'intent',publishMethod:'EXTENSION'}]);
+ const rescheduleQueuedPost=vi.fn().mockResolvedValue({id:'p',publishMethod:'EXTENSION',integrationId:'new-account',routeRevision:5});
+ vi.spyOn(service,'isControlled').mockResolvedValue(true);
+ Object.assign(service,{_sendCoordinator:{rescheduleQueuedPost}});
+ const result=await service.schedulePosts('org',[{id:'p',type:'now',expectedRouteRevision:4,expectedContentRevision:7,integrationId:'new-account',requestId:'stable-choice'}],{userId:'owner',origin:'MANUAL'});
+ expect(rescheduleQueuedPost).toHaveBeenCalledWith('org','p','owner',expect.any(Date),4,7,true,{integrationId:'new-account',requestId:'stable-choice'});
+ expect(result).toEqual({scheduled:[{id:'p',publishMethod:'extension',integrationId:'new-account',routeRevision:5}],failed:[]});
+});
+it('rejects a controlled account change that lacks a stable request without scheduling the old actor', async () => {
+ const {service}=makeService([{id:'p',state:'QUEUE',sendIntentId:'intent',publishMethod:'EXTENSION'}]);
+ const rescheduleQueuedPost=vi.fn();vi.spyOn(service,'isControlled').mockResolvedValue(true);
+ Object.assign(service,{_sendCoordinator:{rescheduleQueuedPost}});
+ const result=await service.schedulePosts('org',[{id:'p',type:'now',integrationId:'new-account'}],{userId:'owner',origin:'MANUAL'});
+ expect(result.scheduled).toEqual([]);expect(result.failed).toHaveLength(1);expect(rescheduleQueuedPost).not.toHaveBeenCalled();
+});
+it('never applies an account-change schedule item to autonomous current-session work', async () => {
+ const {service,schedulePostGroupToQueue}=makeService([{id:'p',state:'QUEUE',publishMethod:'EXTENSION'}]);
+ vi.spyOn(service,'isControlled').mockResolvedValue(false);
+ const result=await service.schedulePosts('org',[{id:'p',type:'now',integrationId:'new-account',requestId:'stable-choice'}],{userId:'owner',origin:'MANUAL'});
+ expect(result.scheduled).toEqual([]);expect(result.failed[0].code).toBe('ACCOUNT_CHANGE_REQUIRES_CONTROLLED');
+ expect(schedulePostGroupToQueue).not.toHaveBeenCalled();
+});

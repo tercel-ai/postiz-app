@@ -559,14 +559,14 @@ export class PostsController {
   @UseGuards(ExtensionExecutionReadyGuard)
   async getDuePublish(
     @GetOrgFromRequest() org: Organization,
-    @Body() body: { limit?: number; requestId?: string },
+    @Body() body: { limit?: number; requestId?: string; authorizationMode?: 'NATIVE_FLOW_V1' },
     @GetUserFromRequest() user?: User,
     @Headers() headers?: Record<string, string>
   ) {
     if (headers?.['x-extension-node-id']) {
       if (!this._sendExecutions || !user) throw new Error('SEND_COORDINATOR_REQUIRED');
       const [claimed, pacing] = await Promise.all([
-        this._sendExecutions.claim({ org: org.id, user: user.id, nodeId: headers['x-extension-node-id'], token: headers['x-extension-node-token'] }, { requestId: body?.requestId!, action: 'POST' }),
+        this._sendExecutions.claim({ org: org.id, user: user.id, nodeId: headers['x-extension-node-id'], token: headers['x-extension-node-token'] }, { requestId: body?.requestId!, action: 'POST', ...(body?.authorizationMode !== undefined ? { authorizationMode: body.authorizationMode } : {}) }),
         this._platformPacing.getPlatformPacing(),
       ]);
       return { due: claimed.items, pacing, executionProtocol: 'ACCOUNT_BOUND_V1' };

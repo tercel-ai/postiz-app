@@ -10,6 +10,7 @@ import {
   MaxLength,
 } from 'class-validator';
 export class ClaimSendDto {
+  @IsOptional() @IsIn(['NATIVE_FLOW_V1']) authorizationMode?: 'NATIVE_FLOW_V1';
   @IsString() @MaxLength(128) requestId: string;
   @IsIn(['POST', 'REPLY']) action: 'POST' | 'REPLY';
   @IsOptional() @IsString() @Matches(/\S/) @MaxLength(128) rootPostId?: string;

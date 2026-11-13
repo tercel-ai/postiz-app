@@ -5086,7 +5086,9 @@ describe('EngageRepository.getOrgScanStatus', () => {
         organizationId: 'org1',
         projectId: null,
         opportunityId: 'opp1',
-        post: { state: 'DRAFT', sendIntentId: null, sendOrigin: { not: 'AUTOMATION' } },
+        post: { organizationId: 'org1', projectId: null, state: 'DRAFT', deletedAt: null, sendIntentId: null,
+          AND: [{ OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] }],
+          sendOrigin: { not: 'AUTOMATION' } },
       });
       // A DRAFT engage Post is created (not published, no claim).
       expect(postCreate.mock.calls[0][0].data).toMatchObject({

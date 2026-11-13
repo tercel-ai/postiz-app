@@ -8,6 +8,8 @@ import {
   Min,
   IsOptional,
   IsString,
+  MaxLength,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 
@@ -38,6 +40,10 @@ export class SchedulePostItemDto {
   @IsOptional()
   @IsDateString()
   date?: string;
+
+  // An explicit account change is valid only for preauthorization controlled Post Now.
+  @IsOptional() @IsString() @MinLength(1) @MaxLength(128) integrationId?: string;
+  @IsOptional() @IsString() @MinLength(1) @MaxLength(128) requestId?: string;
 
   @IsOptional() @IsInt() @Min(0) expectedRouteRevision?: number;
   @IsOptional() @IsInt() @Min(1) expectedContentRevision?: number;

@@ -1,12 +1,13 @@
+import { canChangePostAccount } from './send-account-change';
 import { isAccountBoundSendingEnabled } from './account-bound-sending.config';
 import { Post, SendIntent, SendExecution, SendSegment } from '@prisma/client';
 
 type PublicPost = Partial<Pick<Post, 'id' | 'executionProtocol' | 'releaseId' | 'state' | 'integrationId' |
-  'accountSelectionMode' | 'routeRevision' | 'contentRevision' | 'publishDate' | 'sendIntentId' | 'publishMethod'>>;
+  'releaseURL' | 'claimedAt' | 'accountSelectionMode' | 'routeRevision' | 'contentRevision' | 'publishDate' | 'sendIntentId' | 'publishMethod'>>;
 type PublicIntent = Partial<Pick<SendIntent, 'id' | 'status' | 'activeExecutionId' | 'hasConfirmedSegments' |
-  'target' | 'integrationId' | 'revision' | 'action'>>;
-type PublicExecution = Partial<Pick<SendExecution, 'id' | 'status' | 'resolutionRevision'>>;
-type PublicSegment = Partial<Pick<SendSegment, 'executionId' | 'status' | 'result' | 'segmentIndex' | 'postId' | 'confirmedAt'>>;
+  'rootPostId' | 'target' | 'integrationId' | 'revision' | 'action' | 'routeRevision' | 'contentRevision'>>;
+type PublicExecution = Partial<Pick<SendExecution, 'id' | 'status' | 'resolutionRevision' | 'kind' | 'action' | 'context' | 'startedAt' | 'payload' | 'routeRevision' | 'contentRevision'>>;
+type PublicSegment = Partial<Pick<SendSegment, 'executionId' | 'status' | 'result' | 'segmentIndex' | 'postId' | 'confirmedAt' | 'authorizedAt' | 'permitHash' | 'submitBefore' | 'contentHash'>>;
 
 export const needsSendSummary = (post: PublicPost, controlled = false) => controlled ||
   post?.executionProtocol === 'ACCOUNT_BOUND_V1' || !!post?.sendIntentId;
@@ -29,6 +30,7 @@ export function sendBusinessSummary(post: PublicPost, intent: PublicIntent | nul
     intent.status === 'QUEUED' && !intent.activeExecutionId && !confirmed && !uncertain &&
     executions.every(execution => ['FAILED_FINAL', 'CANCELLED', 'EXPIRED'].includes(execution.status ?? '')) &&
     segments.every(segment => segment.status === 'NOT_SUBMITTED');
+  const accountChangeSafe = canChangePostAccount(post, intent, executions, segments);
   const frozen = !!intent || !!post.releaseId || post.state !== 'DRAFT';
   // Enqueueing an unclaimed saved reply is not editing its frozen account selection.
   const enqueueable = !intent && !post.sendIntentId && !post.releaseId &&
@@ -59,7 +61,7 @@ export function sendBusinessSummary(post: PublicPost, intent: PublicIntent | nul
     }),
     allowedActions: {
       enqueue: decision(actionable && enqueueable, operationBlockCode ?? (intent ? 'SEND_INTENT_IMMUTABLE' : !enabled ? 'ACCOUNT_BINDINGS_NOT_ENABLED' : queuedReplyEnqueue?.reason ?? 'CONTENT_NOT_ENQUEUEABLE')),
-      selectAccount: decision(actionable && !frozen, operationBlockCode ?? (intent ? 'SEND_INTENT_IMMUTABLE' : !enabled ? 'ACCOUNT_BINDINGS_NOT_ENABLED' : 'CONTENT_NOT_ENQUEUEABLE')),
+      selectAccount: decision(actionable && (!frozen || accountChangeSafe), operationBlockCode ?? (intent ? 'SEND_INTENT_IMMUTABLE' : !enabled ? 'ACCOUNT_BINDINGS_NOT_ENABLED' : 'CONTENT_NOT_ENQUEUEABLE')),
       reschedule: decision(actionable && rescheduleSafe, operationBlockCode ?? (intent ? 'SEND_INTENT_REQUIRES_CONTROLLED_RESCHEDULE' : 'CONTROLLED_RESCHEDULE_NOT_SUPPORTED')),
       retry: decision(actionable && retrySafe, operationBlockCode ?? (!enabled ? 'ACCOUNT_BINDINGS_NOT_ENABLED' : 'SEND_RETRY_UNSAFE')),
     },

@@ -613,13 +613,13 @@ export class EngageController {
   })
   @Post('/reply-due')
   @UseGuards(ExtensionExecutionReadyGuard)
-  async getDueReplies(@GetOrgFromRequest() org: Organization, @Body() body?: { requestId?: string }, @GetUserFromRequest() user?: User, @Headers() headers?: Record<string, string>) {
+  async getDueReplies(@GetOrgFromRequest() org: Organization, @Body() body?: { requestId?: string; authorizationMode?: 'NATIVE_FLOW_V1' }, @GetUserFromRequest() user?: User, @Headers() headers?: Record<string, string>) {
     if (headers?.['x-extension-node-id']) {
       if (!this._sendExecutions || !user) throw new Error('SEND_COORDINATOR_REQUIRED');
       if (this._extensionNodes) await this._extensionNodes.authenticate(org.id, user.id, headers['x-extension-node-id'], headers['x-extension-node-token']);
       if (this._sendModes ? await this._sendModes.isControlled(org.id) : isAccountBoundSendingEnabled()) await this._engageAutoReplyService.getDueReplies(org, new Date(), { coordinated: true });
       const [claimed, pacing] = await Promise.all([
-        this._sendExecutions.claim({ org: org.id, user: user.id, nodeId: headers['x-extension-node-id'], token: headers['x-extension-node-token'] }, { requestId: body?.requestId!, action: 'REPLY' }),
+        this._sendExecutions.claim({ org: org.id, user: user.id, nodeId: headers['x-extension-node-id'], token: headers['x-extension-node-token'] }, { requestId: body?.requestId!, action: 'REPLY', ...(body?.authorizationMode !== undefined ? { authorizationMode: body.authorizationMode } : {}) }),
         this._platformPacing.getPlatformPacing(),
       ]);
       return { due: claimed.items, pacing, executionProtocol: 'ACCOUNT_BOUND_V1' };

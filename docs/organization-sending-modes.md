@@ -530,3 +530,115 @@ current-session account selection or make uncertain controlled content eligible
 for automatic mode-handover replay. Mode changes, pauses, active writers, quota
 and pacing continue to be checked through their existing admission paths.
 See `multi-node-sending-api-ownership.md` for request and compatibility details.
+
+
+## Missing-receipt legacy Engage claim quarantine
+
+A historical standalone Engage browser reply can retain a claim and captured
+legacyDrain ownership even when it predates autonomous receipts. Its age is not
+proof of non-submission. The ordinary reply absence-recovery resource still
+requires matching NOT_SUBMITTED receipts and remains unchanged.
+
+The existing Post quarantine review/resolve service additionally accepts exactly
+one captured, claimed, nonrecurring legacy Engage root in DRAFT/QUEUE, with a
+matching saved reply/project/platform, unchanged captured occurrence, no parent
+or children, no controlled intent (including an orphaned root intent), no API
+method, removal/publication evidence, or related autonomous receipts. Other
+Engage cases and existing calendar checks retain their previous restrictions.
+
+The same archival transaction requires stopped original executors, no pending
+submit, evidence, a current recovery revision and the existing privileged user
+or local maintenance identity. It preserves content, claimedAt, historical
+business rows and audit evidence, sets soft-deleted DRAFT/LEGACY_QUARANTINED,
+clears only the private claim and captured ID/occurrence, and records an
+idempotent receipt. It never records NOT_SUBMITTED, releases quota, creates a new
+intent, or retries the old reply. Independent new sends retain ordinary actor,
+project, frequency and quota checks. Both modes reject old-content replay.
+
+Late legacy success, failure, target, draft and asynchronous author callbacks
+recheck organization, live-row status and legacy protocol at the actual write.
+Quarantine cannot be revived or overwritten, including when it races an earlier
+read. A rejected publication write cannot proceed to opportunity or billing
+side effects. Null and LEGACY live records remain compatible; controlled
+automatic drafts retain their own protocol-specific edit path.
+
+Deploy and restart the backend callback protections before applying quarantine.
+No schema migration is needed. Older servers reject this Engage review rather
+than weakening the ordinary absence proof. Extension status fixes deploy
+independently and perform no recovery write.
+
+### Operator workflow
+
+Run on the correctly configured Postiz server. Preparation performs database
+reads only and writes a local review plan:
+
+```bash
+pnpm exec ts-node --project scripts/tsconfig.json scripts/recover-legacy-calendar.ts \
+  --organization-id ORG_ID --post-id POST_ID --database-verified \
+  --plan legacy-reply-plan.json
+```
+
+The filename is retained for compatibility. Without an explicit Post scope the
+original calendar targets remain unchanged. A different organization requires an
+explicit Post; there is no implicit organization-wide cleanup. The plan binds
+the database fingerprint, operator/host, exact Post and full-record fingerprints.
+Content, claim, captured occurrence or receipt changes invalidate the reviewed operation.
+
+Review the plan, stop every original executor and ensure no submit is pending.
+Write the actual observations into an evidence file; do not infer them from age
+or missing receipts. Only then apply the same scope:
+
+```bash
+pnpm exec ts-node --project scripts/tsconfig.json scripts/recover-legacy-calendar.ts \
+  --organization-id ORG_ID --post-id POST_ID --database-verified \
+  --plan legacy-reply-plan.json --apply \
+  --executors-stopped --no-pending-submit --evidence-file recovery-evidence.txt
+```
+
+Keep the plan and journal. A lost response reuses the same apply command and
+persisted request, never a new guessed update. After recovery inspect normal
+mode/reply status; queued independent work is eligible for normal discovery,
+not guaranteed immediate publication. Unknown old content stays quarantined.
+
+
+## Account-only queued Post Now (2026-11-12)
+
+A selected account can change before sending authorization, including an explicitly
+opted-in native RESERVED preparation. The backend atomically cancels the old
+preparation, fences its authority and updates the same chain/intent. Complete
+PENDING evidence with no permit or exposed draft is required; two-minute lease
+expiry alone grants nothing. Old claims lacking the native preparation contract
+remain immutable. Canceled records/leases and late outcomes stay auditable;
+positive/UNKNOWN late evidence requires reconciliation. No pacing/quota reset,
+AUTONOMOUS identity change, Reply account change or mode-handover redesign occurs.
+Deploy backend before extension/website; no schema migration or historical reset.
+See [the API contract](multi-node-sending-api-ownership.md#account-only-post-now-before-sending-authorization-2026-11-12).
+
+
+### Reviewed preauthorization stop recovery (2026-11-12)
+
+A native opted-in preparation can become FAILED_FINAL with Post ERROR after an
+authenticated structured stop receipt before any authorization. The shared
+summary/mutation predicate allows account selection only with complete matching
+payload/segments, no execution start or permit/authorization/exposure/confirmation,
+and validated no-pending-submit/no-permit stop evidence. The same proven stop
+history remains eligible after explicit retry returns the intent to QUEUED or
+creates a new native RESERVED preparation; every historical attempt is rechecked.
+Generic failure, old
+clients, ever-authorized history and UNKNOWN remain immutable. The transaction
+preserves the original NOT_SUBMITTED stop result, cancels the old execution,
+fences it, and restores the same chain/intent to QUEUED with the new account.
+Pending continuation segments receive the ordinary account-change cancellation
+marker; prior proof is never overwritten. Pacing, occupancy ownership and quota
+checks remain unchanged. No new business record or automatic unknown replay.
+
+Extension receipt recovery authenticates the old execution first. A settled
+no-permit PREPARED journal may be acknowledged locally against authoritative
+NOT_SUBMITTED/terminal-no-permit state. Manual actions skip only conclusively
+obsolete canceled/expired manifests without unresolved local submission evidence.
+After exact replay returns REPLAYED_EXECUTION_UNAVAILABLE for CANCELLED/EXPIRED,
+an explicit action can persist at most one fresh claim for the current route;
+other failure/UNKNOWN/authorization states do not grant replay. Website requires
+the exact account/revision acknowledgment and distinguishes account selection
+from frozen content/draft saving. Deploy backend before extension and website;
+no schema migration or historical opt-in is introduced.

@@ -2640,6 +2640,10 @@ export class EngageService implements OnApplicationBootstrap {
     );
     if (!ctx) throw new NotFoundException('Sent reply not found');
 
+    if (ctx.deletedAt) throw new NotFoundException('Sent reply not found');
+    if (ctx.sendIntentId || !isLegacyExecution(ctx.executionProtocol))
+      throw new BadRequestException('ACCOUNT_BOUND_PROTOCOL_REQUIRED');
+
     // Already published with a URL → a repeat success callback. No-op so we never
     // double-charge or re-claim.
     if (ctx.state === 'PUBLISHED' && ctx.releaseURL) {

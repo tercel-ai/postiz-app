@@ -2361,19 +2361,35 @@ export class SendModeService {
     const captured = config.legacyDrain ?? config.transition;
     const receipts = allReceipts.filter(({ result }) => result.postIds?.some(id => posts.has(id)))
       .sort((a, b) => a.row.id.localeCompare(b.row.id));
+    const missingReceiptReply = ordered.length === 1 && first.source === 'engage'
+      ? await tx.engageSentReply.findFirst({ where: { organizationId, postId: first.id },
+        select: { id: true, projectId: true, removedAt: true, opportunity: { select: { platform: true } } } }) : null;
+    // Missing receipts cannot prove non-submission. This narrow case may only be
+    // archived after an operator stops the original executor; never re-enqueued.
+    const standaloneReply = !!missingReceiptReply && !!first.projectId &&
+      missingReceiptReply.projectId === first.projectId && !missingReceiptReply.removedAt &&
+      !!first.providerIdentifier && !!missingReceiptReply.opportunity?.platform &&
+      this.browserPlatform(first.providerIdentifier) === this.browserPlatform(missingReceiptReply.opportunity.platform) &&
+      !first.parentPostId && !first.intervalInDays && !first.removedAt && !first.releaseURL &&
+      first.publishMethod !== 'API' && ['DRAFT', 'QUEUE'].includes(first.state) &&
+      !!first.releaseId && first.claimedAt instanceof Date && Number.isFinite(first.claimedAt.getTime()) &&
+      !!captured?.eligiblePostIds.includes(first.id) &&
+      captured.eligiblePostOccurrences[first.id] === first.publishDate.toISOString() && !receipts.length &&
+      !await tx.sendIntent.count({ where: { organizationId, rootPostId: first.id } });
     const reasons: string[] = [];
     if (config.mode !== 'CONTROLLED') reasons.push('CONTROLLED_MODE_REQUIRED');
-    if (ordered.some(post => post.source !== 'calendar')) reasons.push('CALENDAR_THREAD_REQUIRED');
+    if (ordered.some(post => post.source !== 'calendar') && !standaloneReply)
+      reasons.push(first.source === 'engage' ? 'MISSING_RECEIPT_REPLY_NOT_RECOVERABLE' : 'CALENDAR_THREAD_REQUIRED');
     if (ordered.some(post => post.sendIntentId || !isLegacyExecution(post.executionProtocol))) reasons.push('CONTROLLED_THREAD_MEMBER');
     if (ordered.some(post => post.parentPostId && !posts.has(post.parentPostId))) reasons.push('THREAD_PARENT_MISSING');
     if (!ordered.some(post => active.includes(post.id))) reasons.push('NO_LEGACY_OWNERSHIP');
     if (receipts.some(({ result }) => ['AUTHORIZED', 'UNKNOWN'].includes(result.status))) reasons.push('UNRESOLVED_RECEIPT');
     const candidates = ordered.filter(post => post.state !== 'PUBLISHED');
     if (!candidates.length) reasons.push('NO_UNSETTLED_POSTS');
-    const recoveryRevision = sendHash({ posts: ordered, setting: setting?.value, receipts, active: active.filter(id => posts.has(id)).sort() });
+    const recoveryRevision = sendHash({ posts: ordered, missingReceiptReply, setting: setting?.value, receipts, active: active.filter(id => posts.has(id)).sort() });
     const view = { organizationId, postId, recoveryRevision, canResolve: reasons.length === 0, reasons,
       action: 'QUARANTINE_LEGACY_THREAD', postIds: ordered.map(post => post.id),
-      posts: ordered.map(post => ({ id: post.id, state: post.state, platform: post.providerIdentifier,
+      posts: ordered.map(post => ({ id: post.id, recordFingerprint: sendHash(post), state: post.state, source: post.source, claimedAt: post.claimedAt?.toISOString() ?? null, platform: post.providerIdentifier,
         parentPostId: post.parentPostId, deleted: !!post.deletedAt, claimPresent: !!post.releaseId,
         publicationEvidencePresent: !!post.releaseURL, captured: !!captured?.eligiblePostIds.includes(post.id) })),
       receipts: receipts.map(({ row, result }) => ({ id: row.id, status: result.status, revision: result.revision })),
@@ -2404,7 +2420,7 @@ export class SendModeService {
 
   async resolveLegacyPostRecovery(organizationId: string, userId: string, postId: string, body: ResolveLegacyPostRecoveryDto) {
     this.browserOwner(organizationId, userId, body);
-    return this.resolveCalendarRecovery(organizationId, postId, body, { kind: 'USER', userId });
+    return this.quarantineLegacyPosts(organizationId, postId, body, { kind: 'USER', userId });
   }
 
   // Trusted local operations only. These methods are intentionally not exposed by an HTTP controller.
@@ -2433,10 +2449,10 @@ export class SendModeService {
   async resolveMaintenancePostRecovery(organizationId: string, actor: MaintenanceRecoveryActor, postId: string, body: MaintenanceRecoveryRequest) {
     if (body.expectedOrganizationId !== organizationId) throw new ForbiddenException('SEND_OWNER_CHANGED');
     if (body.expectedActorKey !== sendHash(actor)) throw new ConflictException('MAINTENANCE_ACTOR_CHANGED');
-    return this.resolveCalendarRecovery(organizationId, postId, body, actor);
+    return this.quarantineLegacyPosts(organizationId, postId, body, actor);
   }
 
-  private async resolveCalendarRecovery(organizationId: string, postId: string,
+  private async quarantineLegacyPosts(organizationId: string, postId: string,
     body: ResolveLegacyPostRecoveryDto | MaintenanceRecoveryRequest,
     actor: { kind: 'USER'; userId: string } | MaintenanceRecoveryActor) {
     if (typeof body.requestId !== 'string' || !body.requestId.trim() || body.requestId.length > 128 ||

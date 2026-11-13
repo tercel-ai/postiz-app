@@ -316,7 +316,10 @@ describe('EngageRepository.closeUnconfirmedReply', () => {
     await repo.closeUnconfirmedReply('org-1', 'sent-1', 'unconfirmed');
 
     expect(postUpdateMany.mock.calls[0][0].where).toEqual({
+      organizationId: 'org-1',
+      deletedAt: null,
       sendIntentId: null,
+      AND: [{ OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] }],
       id: 'p1',
       state: { in: ['DRAFT', 'QUEUE'] },
     });
@@ -427,7 +430,9 @@ describe('EngageRepository.markOpportunityRepliesDisabled', () => {
     // forever — invisible to the queue counts and to whoever is wondering why
     // the project's reply budget never drains.
     const closed = postUpdateMany.mock.calls[0][0];
-    expect(closed.where).toEqual({ id: { in: ['p1', 'p2'] }, state: 'QUEUE' });
+    expect(closed.where).toEqual({ organizationId: 'org-1', deletedAt: null, sendIntentId: null,
+      AND: [{ OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] }],
+      id: { in: ['p1', 'p2'] }, state: 'QUEUE' });
     expect(closed.data.state).toBe('ERROR');
     expect(closed.data.error).toContain('Replies are disabled on this post');
     expect(closed.data.error).toContain(

@@ -85,3 +85,33 @@ it('reports actual mode details when a different database has an autonomous orga
     details: { mode: 'AUTONOMOUS', configuredMode: null, organizationId: TARGET_ORG } });
   expect(f.service.archive).not.toHaveBeenCalled();
 });
+
+
+it('prepares and applies one explicitly scoped missing-receipt reply without using calendar default targets', async () => {
+  const f = fixture();
+  const scope = { organizationId: 'reply-org', postIds: ['old-reply'] };
+  f.mode.organizationId = scope.organizationId;
+  const review = { ...f.reviews[0], organizationId: scope.organizationId, postId: 'old-reply', postIds: ['old-reply'],
+    posts: [{ ...f.reviews[0].posts[0], id: 'old-reply', platform: 'linkedin' }] };
+  f.service.inspect = vi.fn(async () => structuredClone(review));
+  f.service.archive = vi.fn(async id => ({ resolved: true, organizationId: scope.organizationId, actorKey: 'admin', postId: id, quarantinedPostIds: [id] }));
+  const plan = await preparePlan('production-fingerprint', f.service, scope);
+  expect(plan.organizationId).toBe(scope.organizationId);
+  expect(plan.reviews).toHaveLength(1);
+  expect(f.service.inspect).toHaveBeenCalledExactlyOnceWith('old-reply');
+  expect(f.service.archive).not.toHaveBeenCalled();
+  await applyPlan(plan, { version: 1, plan, operations: [] }, f.service, 'Original executor stopped; no pending submission.', () => {}, scope);
+  expect(f.service.archive).toHaveBeenCalledOnce();
+  await expect(applyPlan(plan, { version: 1, plan, operations: [] }, f.service, 'Stopped.', () => {},
+    { organizationId: scope.organizationId, postIds: ['another-reply'] })).rejects.toThrow('INVALID_OR_CHANGED_PLAN');
+});
+
+
+it('rejects a changed reviewed Post fingerprint before replacing its recovery revision', async () => {
+  const f = fixture();
+  (f.reviews[0].posts[0] as any).recordFingerprint = 'old-post-snapshot';
+  const plan = await preparePlan('db', f.service);
+  (f.reviews[0].posts[0] as any).recordFingerprint = 'changed-post-or-claim';
+  await expect(applyPlan(plan, { version: 1, plan, operations: [] }, f.service, 'Original executors stopped.', () => {})).rejects.toThrow('THREAD_CHANGED');
+  expect(f.service.archive).not.toHaveBeenCalled();
+});

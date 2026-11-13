@@ -38,7 +38,7 @@ export class SendExecutionService {
 
   async claim(
     auth: NodeAuthentication,
-    body: { requestId: string; action: 'POST' | 'REPLY'; rootPostId?: string }
+    body: { requestId: string; action: 'POST' | 'REPLY'; rootPostId?: string; authorizationMode?: 'NATIVE_FLOW_V1' }
   ) {
     return claimControlledSend(this.db, this.nodes, this.sends, auth, body,
       (execution, nodeId) => this.claimResponse(execution, nodeId));
@@ -145,6 +145,7 @@ export class SendExecutionService {
     return sendTransaction(this.db, async tx => {
       await this.sends.assertControlledIn(tx, auth.org, { executionId: id });
       const { execution } = await this.authenticate(tx, auth, id, lease);
+      if ((execution.context as { authorizationMode?: string } | null)?.authorizationMode === 'NATIVE_FLOW_V1') throw new ConflictException('SEND_NATIVE_AUTHORIZATION_REQUIRED');
       const now = new Date();
       const account = await tx.accountWriteState.findUniqueOrThrow({ where: {
         organizationId_canonicalAccountKey: { organizationId: auth.org, canonicalAccountKey: execution.canonicalAccountKey },
@@ -246,6 +247,7 @@ export class SendExecutionService {
     return sendTransaction(this.db, async (tx) => {
       await this.sends.assertControlledIn(tx, auth.org, { executionId: id });
       const { execution, node } = await this.authenticate(tx, auth, id, lease);
+      if ((execution.context as { authorizationMode?: string } | null)?.authorizationMode === 'NATIVE_FLOW_V1' && body.authorizationMode !== 'NATIVE_FLOW_V1') throw new ConflictException('SEND_AUTHORIZATION_MODE_REQUIRED');
       const segment = await tx.sendSegment.findUniqueOrThrow({
         where: {
           executionId_segmentIndex: { executionId: id, segmentIndex: index },

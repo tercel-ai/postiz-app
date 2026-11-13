@@ -9,7 +9,7 @@ import { canonicalControlledPlatform } from './controlled-platforms';
 import { hashSecret } from './extension-node.protocol';
 import { sendHash, sendLease, sendTransaction } from './send-coordination.utils';
 
-type Claim = { requestId: string; action: 'POST' | 'REPLY'; rootPostId?: string };
+type Claim = { requestId: string; action: 'POST' | 'REPLY'; rootPostId?: string; authorizationMode?: 'NATIVE_FLOW_V1' };
 type Position = { publishDate: Date; id: string };
 const PAGE_SIZE = 25;
 const SCAN_LIMIT = 100;
@@ -23,7 +23,7 @@ export async function claimControlledSend<T>(
   response: (execution: SendExecution, nodeId: string) => T
 ): Promise<{ items: T[]; reason?: string; executionId?: string; status?: string }> {
   await sends.enabled(auth.org);
-  if (!body.requestId?.trim() || body.requestId.length > 128 || !['POST', 'REPLY'].includes(body.action))
+  if ((body.authorizationMode !== undefined && body.authorizationMode !== 'NATIVE_FLOW_V1') || !body.requestId?.trim() || body.requestId.length > 128 || !['POST', 'REPLY'].includes(body.action))
     throw new BadRequestException('INVALID_SEND_CLAIM');
   const transaction = <R>(work: (tx: Prisma.TransactionClient) => Promise<R>) =>
     sendTransaction(db, work, { backoffOnConflict: true }).catch((error: unknown) => {
@@ -225,6 +225,7 @@ export async function claimControlledSend<T>(
           }, new Date());
           execution = await tx.sendExecution.update({ where: { id: execution.id }, data: {
             leaseTokenHash: hashSecret(sendLease(execution)), requestHash: fingerprint,
+            ...(body.authorizationMode ? { context: { ...(execution.context as Record<string, any> | null), authorizationMode: body.authorizationMode } } : {}),
           } });
           // A successful urgent grant restarts FIFO discovery; only budget exhaustion retains progress.
           if (lane.action === 'POST_NOW') { lane.position = null; lane.cycleStartedAt = new Date(); }
