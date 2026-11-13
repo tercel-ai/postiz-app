@@ -236,7 +236,7 @@ export class SendProtocolController {
       sendingMode: state.mode, modeRevision: state.revision,
       autonomousAllowed: state.autonomousAllowed,
       controlledDrain: Boolean(state.controlledDrain?.remainingCount),
-      sessionBoundActors: true, sessionBoundPlatforms: [...CONTROLLED_SEND_PLATFORMS],
+      cachedActorPreflight: true, sessionBoundActors: true, sessionBoundPlatforms: [...CONTROLLED_SEND_PLATFORMS],
       coordinationRequired: state.mode !== 'AUTONOMOUS', nodesEnabled: controlled,
       userId: user.id, organizationId: org.id, serverNow: new Date().toISOString() };
   }

@@ -4,6 +4,7 @@ import {
   AccountObservation,
   SessionReading,
   LIVE_EVIDENCE,
+  sessionDecision,
 } from './extension-node.protocol';
 import { matchesSendActor, sendHash } from './send-coordination.utils';
 
@@ -13,7 +14,8 @@ export async function confirmSendPreflight(
   observation: AccountObservation & { preflightChallenge?: string },
   session: SessionReading,
   previousProbe: string | null | undefined,
-  now: Date
+  now: Date,
+  previousSession?: SessionReading & { accountIdentity?: unknown; lastVerifiedIdentity?: unknown }
 ) {
   if (!observation.preflightChallenge) return;
   const segment = await tx.sendSegment.findFirst({
@@ -28,15 +30,17 @@ export async function confirmSendPreflight(
     where: { id: segment.executionId },
   });
   const at = new Date(observation.identityObservedAt ?? '');
+  const cached = observation.evidenceKind === 'SESSION_BOUND_ACTOR' && !!previousSession &&
+    sessionDecision(observation, previousSession, now, execution.integrationId).verificationStatus === 'VERIFIED';
   if (
     (observation.identityNamespace === 'linkedin.organization_id' &&
-      (observation.actorContext !== 'COMPOSER' || observation.evidenceKind !== 'LIVE_PAGE_ACTOR')) ||
+      (!cached && (observation.actorContext !== 'COMPOSER' || observation.evidenceKind !== 'LIVE_PAGE_ACTOR'))) ||
     execution.extensionNodeId !== node.id ||
     execution.nodeCredentialVersion !== node.credentialVersion ||
     execution.platform !== observation.platform ||
     session.integrationId !== execution.integrationId ||
     session.verificationStatus !== 'VERIFIED' ||
-    !LIVE_EVIDENCE.includes(observation.evidenceKind as any) ||
+    (!cached && !LIVE_EVIDENCE.includes(observation.evidenceKind as any)) ||
     !observation.probeId ||
     observation.probeId === previousProbe ||
     !Number.isFinite(at.getTime()) ||

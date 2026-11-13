@@ -28,7 +28,17 @@ const platformCases = [
   ['linkedin', 'linkedin.fs_miniProfile', 'ACoAAabc_1'], ['medium', 'medium.handle', 'alice'],
   ['quora', 'quora.user_id', '1923931969'], ['hackernews', 'hackernews.handle', 'Alice'], ['devto', 'devto.user_id', '12345'],
 ];
-it.each(platformCases.flatMap(row => ['POST', 'REPLY'].map(action => [...row, action])))('runs %s %s %s %s registration, OPTIONAL binding and settlement', async (platform, namespace, actorIdentity, action) => {
+const validFlows = platformCases.flatMap(row => ['POST', 'REPLY'].flatMap(action =>
+  ['LIVE', 'CACHE'].map(mode => [...row, action, mode, 'valid'])));
+const invalidCachedFlows = [
+  ...['changed-binding', 'missing-binding', 'missing-prior-proof', 'missing-prior-session',
+    'integration-mismatch', 'expired-challenge', 'stale-observation', 'future-observation',
+    'before-challenge', 'repeated-probe', 'changed-actor', 'changed-namespace'].map(failure =>
+    ['linkedin', 'linkedin.fs_miniProfile', 'ACoAAabc_1', 'POST', 'CACHE', failure]),
+  ...['changed-controller', 'composer-context'].map(failure =>
+    ['linkedin', 'linkedin.organization_id', '1337', 'POST', 'CACHE', failure]),
+];
+it.each([...validFlows, ...invalidCachedFlows])('runs %s %s %s %s %s %s registration, OPTIONAL binding and settlement', async (platform, namespace, actorIdentity, action, mode, failure) => {
   const company = namespace === 'linkedin.organization_id';
   const provider = company ? 'linkedin-page' : platform;
   const db = memorySendDatabase();
@@ -59,7 +69,7 @@ it.each(platformCases.flatMap(row => ['POST', 'REPLY'].map(action => [...row, ac
     token: registered.nodeToken,
   };
   let sequence = 0;
-  const report = (challenge?: string) =>
+  const report = (challenge?: string, overrides: Record<string, unknown> = {}) =>
     nodes.report(
       'org',
       'owner',
@@ -67,26 +77,29 @@ it.each(platformCases.flatMap(row => ['POST', 'REPLY'].map(action => [...row, ac
       auth.token,
       {
         reportSequence: ++sequence,
-        checkedAt: now.toISOString(),
+        checkedAt: new Date().toISOString(),
         platforms: [
           {
             platform,
-            ...(company ? { actorContext: challenge ? 'COMPOSER' : 'COMPANY_ADMIN', controllerId: 'ACoAdmin' } : {}),
+            ...(company ? { actorContext: challenge && mode === 'LIVE' ? 'COMPOSER' : 'COMPANY_ADMIN', controllerId: 'ACoAdmin' } : {}),
             id: actorIdentity,
             identityNamespace: namespace,
             loggedIn: true,
             handle: 'alice',
             probeId: `probe-${sequence}`,
-            evidenceKind: company ? 'LIVE_PAGE_ACTOR' : 'LIVE_COOKIE_ID',
+            sessionBinding: 'a'.repeat(64),
+            evidenceKind: challenge && mode === 'CACHE' ? 'SESSION_BOUND_ACTOR' : company ? 'LIVE_PAGE_ACTOR' : 'LIVE_COOKIE_ID',
             verificationStatus: 'VERIFIED',
-            identityObservedAt: now.toISOString(),
+            identityObservedAt: new Date().toISOString(),
             ...(challenge ? { preflightChallenge: challenge } : {}),
+            ...overrides,
           },
         ],
       } as any,
       { canCreateChannels: true, maxChannels: 1 }
     );
   const discovered: any = await report();
+  const originalSession = structuredClone(db.rows('extensionNodeSession')[0]);
   const actorId = discovered.results[0].integrationId;
   expect(actorId).toBeTruthy();
   expect(db.rows('integration')[0].token).toBe('');
@@ -184,17 +197,64 @@ it.each(platformCases.flatMap(row => ['POST', 'REPLY'].map(action => [...row, ac
     } as any)).rejects.toThrow('SEND_PREFLIGHT_EVIDENCE_INVALID');
     expect(db.rows('sendQuotaReservation')).toHaveLength(before);
   }
+  vi.setSystemTime(new Date(now.getTime()+1000));
+  if (failure !== 'valid') {
+    const prior = db.rows('extensionNodeSession')[0];
+    const overrides: Record<string, unknown> = {};
+    if (failure === 'changed-binding') overrides.sessionBinding = 'b'.repeat(64);
+    if (failure === 'missing-binding') overrides.sessionBinding = undefined;
+    if (failure === 'missing-prior-proof') prior.verifiedAt = null;
+    if (failure === 'missing-prior-session') db.rows('extensionNodeSession').splice(0, 1);
+    if (failure === 'integration-mismatch') db.rows('sendExecution')[0].integrationId = 'other-account';
+    if (failure === 'expired-challenge') vi.setSystemTime(new Date(now.getTime() + 31_000));
+    if (failure === 'stale-observation') overrides.identityObservedAt = new Date(now.getTime() - 31_000).toISOString();
+    if (failure === 'future-observation') overrides.identityObservedAt = new Date(now.getTime() + 1_001).toISOString();
+    if (failure === 'before-challenge') overrides.identityObservedAt = new Date(now.getTime() - 1).toISOString();
+    if (failure === 'repeated-probe') overrides.probeId = prior.probeId;
+    if (failure === 'changed-actor') overrides.id = 'ACoDifferentMember';
+    if (failure === 'changed-namespace') overrides.identityNamespace = 'linkedin.oauth_sub';
+    if (failure === 'changed-controller') overrides.controllerId = 'ACoOtherAdmin';
+    if (failure === 'composer-context') overrides.actorContext = 'COMPOSER';
+    const sessionsBefore = structuredClone(db.rows('extensionNodeSession'));
+    const segmentsBefore = structuredClone(db.rows('sendSegment'));
+    const receiptsBefore = structuredClone(db.rows('extensionNodeReportReceipt'));
+    const nodeBefore = structuredClone(db.rows('extensionNode'));
+    await expect(report(challenge.challenge, overrides)).rejects.toThrow('SEND_PREFLIGHT_EVIDENCE_INVALID');
+    expect(db.rows('extensionNodeSession')).toEqual(sessionsBefore);
+    expect(db.rows('sendSegment')).toEqual(segmentsBefore);
+    expect(db.rows('extensionNodeReportReceipt')).toEqual(receiptsBefore);
+    expect(db.rows('extensionNode')).toEqual(nodeBefore);
+    await expect(executions.start(auth, claim.executionId, 0, claim.leaseToken,
+      { authorizationMode: 'NATIVE_FLOW_V1' })).rejects.toThrow('FRESH_SEND_PREFLIGHT_REQUIRED');
+    expect(db.rows('sendSegment')[0]).toMatchObject({ status: 'PENDING', probeId: null,
+      evidenceSessionRevision: null, evidenceObservedAt: null });
+    expect(db.rows('sendSegment')[0].permitHash).toBeUndefined();
+    expect(db.rows('sendQuotaReservation')).toHaveLength(0);
+    expect(db.rows('sendQuotaBucket')).toHaveLength(0);
+    return;
+  }
   await report(challenge.challenge);
+  if (mode === 'CACHE') {
+    const session=db.rows('extensionNodeSession')[0], segment=db.rows('sendSegment')[0];
+    expect(session.verifiedAt).toEqual(originalSession.verifiedAt);
+    expect(session.lastVerifiedIdentity).toEqual(originalSession.lastVerifiedIdentity);
+    expect(session.probeId).toBe(`probe-${sequence}`);
+    expect(segment.probeId).toBe(session.probeId);
+    expect(segment.evidenceSessionRevision).toBe(session.sessionRevision);
+  }
   const permit = await executions.start(
     auth,
     claim.executionId,
     0,
-    claim.leaseToken
+    claim.leaseToken,
+    mode === 'CACHE' ? { authorizationMode: 'NATIVE_FLOW_V1' } : {}
   );
   expect(permit.granted).toBe(true);
+  if (mode === 'CACHE') expect(permit).toMatchObject({ authorizationMode: 'NATIVE_FLOW_V1' });
   expect(db.rows('sendQuotaReservation')[0].state).toBe('HELD');
   expect(
-    (await executions.start(auth, claim.executionId, 0, claim.leaseToken))
+    (await executions.start(auth, claim.executionId, 0, claim.leaseToken,
+      mode === 'CACHE' ? { authorizationMode: 'NATIVE_FLOW_V1' } : {}))
       .granted
   ).toBe(false);
   const result = {

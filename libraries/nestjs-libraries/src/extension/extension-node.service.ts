@@ -660,7 +660,7 @@ export class ExtensionNodeService {
           ...(!entry.loggedIn
             ? { lastVerifiedIdentity: Prisma.DbNull }
             : decision.verificationStatus === 'VERIFIED' &&
-              decision.probeId !== prior?.probeId
+              decision.probeId !== prior?.probeId && entry.evidenceKind !== 'SESSION_BOUND_ACTOR'
             ? {
                 lastVerifiedIdentity: {
                   id: entry.id ?? null,
@@ -699,7 +699,8 @@ export class ExtensionNodeService {
           entry,
           decision,
           prior?.probeId,
-          now
+          now,
+          prior ?? undefined
         );
         results.push({
           platform: entry.platform,

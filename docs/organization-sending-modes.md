@@ -6,7 +6,7 @@
 
 | 模式 | 用户体验 | 账号来源 |
 | --- | --- | --- |
-| AUTONOMOUS：插件自主发送 | 保留已有插件发送流程，不要求节点注册或受控许可 | 当前浏览器实际登录的账号；已有业务账号选择和校验继续适用 |
+| AUTONOMOUS：插件自主发送 | 保留已有插件发送流程，不要求节点注册或受控许可 | 当前浏览器实际登录的账号；自主发送不核对社交账号 |
 | CONTROLLED：多节点受控发送 | 后台冻结账号，由合格节点领取并验证，取得许可后提交 | 单条 Post/Reply 指定 → Project 默认 → 可选 Organization 全局默认 |
 | PAUSED：受控发送暂停 | 停止新的受控发送，保留查询、结果上报和结算 | 保留已冻结账号和执行记录，不能退回自主流程重发 |
 
@@ -334,7 +334,7 @@ attestations described above.
 
 `controlledDrain` 是 Settings 内的版本化收尾快照，记录切换前非终态 Intent ID、请求者和核实问题。它只授权原执行续期、身份预检和最终发送；不授予新受控入队或新领取。回执、身份、租约、fencingVersion、策略、项目激活和配额校验仍有效。后台每 15 秒清理已完成收尾，清理不递增模式修订。
 
-从未形成执行且符合交接条件的浏览器 Intent 转为终态 `HANDED_OVER` 并解除 Post 的 V1 执行绑定，保留审计、原内容、线程、来源和日期。浏览器交接使用 `accountSelectionMode=CURRENT_SESSION`，由当前浏览器实际登录账号发送，不再要求匹配原受控绑定；旧绑定证据保留供审计。`Post.sendTarget` 保留 `handoverMode=AUTONOMOUS` 及交接语义。再次切受控会经过原入队校验后复用该 Intent。客户端仍需声明支持交接和账号验证；旧插件收到 `HANDOVER_EXTENSION_UPGRADE_REQUIRED`，不得发送。API 任务和不支持的公司身份保持各自的交接边界。
+从未形成执行且符合交接条件的浏览器 Intent 转为终态 `HANDED_OVER` 并解除 Post 的 V1 执行绑定，保留审计、原内容、线程、来源和日期。浏览器交接使用 `accountSelectionMode=CURRENT_SESSION`，由当前浏览器实际登录账号发送，不再要求匹配原受控绑定；旧绑定证据保留供审计。`Post.sendTarget` 保留 `handoverMode=AUTONOMOUS` 及交接语义。再次切受控会经过原入队校验后复用该 Intent。CURRENT_SESSION 浏览器交接不要求账号验证声明；历史仍绑定账号的交接合同保留 `HANDOVER_EXTENSION_UPGRADE_REQUIRED`，新客户端不得绕过。API 任务和不支持的公司身份保持各自的交接边界。
 
 LinkedIn 公司账号的 `EXTENSION` 队列和未绑定 Intent 的草稿暂不交接自主执行，保留原受控绑定并在 `controlledDrain.issues` 返回 `HANDOVER_LINKEDIN_COMPANY_UNSUPPORTED`，直到自主执行器支持公司身份；公司账号的 API 路径和个人 LinkedIn 交接保持原有行为。
 
@@ -748,3 +748,12 @@ continues to reserve quota atomically.
 
 See [API ownership](multi-node-sending-api-ownership.md#quota-aware-controlled-claim-2026-11-13)
 for empty-claim reasons, stable receipt recovery and backend-only deployment.
+
+
+## Cached controlled identity and autonomous account responsibility (2026-11-13)
+
+CONTROLLED account discovery and live verification belong to the extension account manager. Each send compares the frozen target with that manager's verified, session-bound cache and submits it through the existing report/preflight APIs. The backend validates continuity against its previous verified session; it does not trust a newly asserted actor merely because the extension labels it cached. Original live proof time and last verified identity remain unchanged. A fresh challenge advances the probe used by start, while existing expiry, owner, target, policy, revision and fencing checks still apply. LinkedIn company selection remains explicit in the native writer.
+
+AUTONOMOUS Post and Reply send as the browser's current social account, without probing or matching an editor-selected social identity. `handoverAccountVerification: false` is valid for CURRENT_SESSION browser handovers under the existing backend contract. Aisee owner checks, backend admission, mode transitions, pacing, receipt recovery and UNKNOWN protection are unchanged. Historical bound-account grants cannot be silently treated as CURRENT_SESSION. Existing API sending and unsupported company-handover boundaries remain.
+
+Deployment requires the backend advertising `cachedActorPreflight: true` before the updated extension. No website, schema or database migration is required; old clients remain compatible. These changes do not permit resending historical uncertain content.

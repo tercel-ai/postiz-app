@@ -205,14 +205,15 @@ first, then calling backend preflight/start. Implementation and the permitted jo
 1. Before the native operation, recover old receipts, check the original business
    identity, negotiate ownership, and atomically claim the original task. Validate
    content/media and fetch assets before authorization where possible. Prepare an
-   empty native composer, select its intended persona and identify its own author
-   without filling or attaching content. X authorizes before opening a composer
+   empty native composer and select any intended company persona
+   without filling or attaching content. Personal sender identity comes from the
+   verified account-management cache. X authorizes before opening a composer
    because opening it can restore an existing human-sendable draft.
 2. Complete fresh backend preflight and actor reporting, then call the existing
    segment start route with `authorizationMode: NATIVE_FLOW_V1`. Existing frozen
    actor, project/organization membership, revision, fencing, pacing and quota
-   checks remain. LinkedIn company sends still require live COMPOSER evidence for
-   the organization identity; a controlling personal account is not sufficient.
+   checks remain. LinkedIn company sends require established company authority and explicit native
+   company selection; a controlling personal account alone is not sufficient.
 3. The acknowledged grant must echo `authorizationMode: NATIVE_FLOW_V1` and
    `executionDeadline`, equal to `submitBefore`. Its deadline is bounded by ten
    minutes from authorization, the original thirty-minute preparation cap and the
@@ -590,3 +591,14 @@ atomic quota reservation and rejects an exhausted allowance before granting a pe
 AUTONOMOUS legacy discovery retains its existing project/transport gates and current
 browser account behavior. Deploy the backend to enable this earlier CONTROLLED gate;
 no client upgrade, schema migration, new status, cursor or queue is required.
+
+
+## Existing-API cached account preflight (2026-11-13)
+
+`GET /extension/send-protocol` adds the optional capability `cachedActorPreflight: true`. The standalone extension uses the existing `POST /integrations/extension-session` observation fields (`SESSION_BOUND_ACTOR`, `sessionBinding`, actor identity, fresh `probeId`, `preflightChallenge`, and observed time). No endpoint, website contract or database column is added.
+
+Before updating the session, the backend validates cached continuity against the previous verified session: exact integration, namespace, actor, scope binding and company controller/context. This is required again when confirming the challenge. The challenge-bound report advances `probeId` but preserves the original live verification timestamp and `lastVerifiedIdentity`. Start still requires the exact session/segment probe, revisions, frozen target, node credential, policy, fencing and timing. Cached continuity cannot register/recover an account or bypass expired live proof. LIVE observations remain supported for account-management refresh and older clients.
+
+The extension alone owns cache refresh, switch invalidation and native company selection. CONTROLLED send preparation consumes that cache; personal composer/avatar/profile-link identification is removed. AUTONOMOUS does not validate social identity and uses CURRENT_SESSION; original Aisee owner checks, admission, journal, pacing and uncertain-content safeguards remain. Publication-returned identity may be recorded as an outcome without introducing a pre-send probe.
+
+Deploy the backend first; new clients stop before native work if the capability is absent. No migration or website update is required. Live platform acceptance is separate from code verification.

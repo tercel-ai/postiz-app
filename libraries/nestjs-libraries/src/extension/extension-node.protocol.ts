@@ -133,9 +133,9 @@ export function sessionDecision(
   const priorIdentity = (previous?.lastVerifiedIdentity ?? previous?.accountIdentity) as {
     id?: string; handle?: string; namespace?: string; sessionBinding?: string; controllerId?: string; actorContext?: string;
   } | null;
-  // Cookie continuity can renew an existing identity, never establish a new actor or authorize a send.
+  // Cookie continuity reuses an established identity; a fresh challenge may bind it to one send.
   const sessionContinuous = entry.evidenceKind === 'SESSION_BOUND_ACTOR' &&
-    !entry.preflightChallenge && sameAccount && previous?.verificationStatus === 'VERIFIED' && !!previous.verifiedAt &&
+    sameAccount && previous?.verificationStatus === 'VERIFIED' && !!previous.verifiedAt &&
     /^[a-f0-9]{64}$/.test(entry.sessionBinding ?? '') && entry.sessionBinding === priorIdentity?.sessionBinding &&
     entry.identityNamespace === priorIdentity?.namespace && !!entry.id && entry.id === priorIdentity.id &&
     ((entry.identityNamespace !== 'linkedin.organization_id' &&
@@ -198,7 +198,7 @@ export function sessionDecision(
     integrationId,
     verificationStatus: status,
     sessionRevision: (previous?.sessionRevision ?? 0) + (changed ? 1 : 0),
-    probeId: newEvidence ? entry.probeId! : previous?.probeId ?? null,
+    probeId: newEvidence || (verified && sessionContinuous && !!entry.preflightChallenge) ? entry.probeId! : previous?.probeId ?? null,
     verifiedAt:
       !entry.loggedIn || (switched && !verified)
         ? null

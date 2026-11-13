@@ -39,7 +39,6 @@ describe('cookie-bound actor continuity', () => {
     ['signed out', { ...previous(), verificationStatus: 'LOGGED_OUT' }, renewal, 'account'],
     ['missing live proof', { ...previous(), verifiedAt: null }, renewal, 'account'],
     ['unsupported platform', previous(), { ...renewal, platform: 'medium' }, 'account'],
-    ['challenge', previous(), { ...renewal, preflightChallenge: 'challenge' }, 'account'],
     ['stale reading', previous(), { ...renewal, identityObservedAt: now.toISOString() }, 'account'],
     ['future reading', previous(), { ...renewal, identityObservedAt: new Date(later.getTime() + 1).toISOString() }, 'account'],
   ])('refuses %s', (_label, prior, entry, matched) => {
@@ -133,6 +132,24 @@ describe('seven-platform availability continuity', () => {
     const previous = { ...prior, accountIdentity: identity, lastVerifiedIdentity: identity };
     expect(sessionDecision({ ...reading, sessionBinding: 'b'.repeat(64) }, previous, later, initial.results[0].integrationId).verificationStatus).toBe('UNKNOWN');
     expect(sessionDecision(reading, previous, later, 'different-account').verificationStatus).toBe('UNKNOWN');
-    expect(sessionDecision({ ...reading, preflightChallenge: 'challenge' }, previous, later, initial.results[0].integrationId).verificationStatus).toBe('UNKNOWN');
+    expect(sessionDecision({ ...reading, preflightChallenge: 'challenge' }, previous, later, initial.results[0].integrationId).verificationStatus).toBe('VERIFIED');
+  });
+});
+
+
+describe('cached actor send preflight', () => {
+  it('binds a fresh challenge to the established account without advancing the original live verification time', async () => {
+    const entry={...renewal,preflightChallenge:'challenge'};
+    const prior={...sessionDecision(live,null,now,'account'),accountIdentity:identity,lastVerifiedIdentity:identity};
+    const decision=sessionDecision(entry,prior,later,'account');
+    expect(decision.verificationStatus).toBe('VERIFIED');
+    expect(decision.probeId).toBe(entry.probeId);
+    expect(decision.verifiedAt).toEqual(prior.verifiedAt);
+    const update=vi.fn();
+    const tx={sendSegment:{findFirst:async()=>({id:'segment',executionId:'execution',challengeIssuedAt:now,challengeExpiresAt:new Date(later.getTime()+30000)}),update},
+      sendExecution:{findUniqueOrThrow:async()=>({id:'execution',sendIntentId:'intent',extensionNodeId:'node',nodeCredentialVersion:1,platform:'linkedin',integrationId:'account',fencingVersion:1,target:{id:'ACoAlice',idNamespace:'linkedin.fs_miniProfile'}})},
+      sendIntent:{findUniqueOrThrow:async()=>({activeExecutionId:'execution',fencingVersion:1})}};
+    await expect(confirmSendPreflight(tx as any,{id:'node',credentialVersion:1} as any,entry,decision,'page',later,prior)).resolves.toBeUndefined();
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({data:expect.objectContaining({probeId:entry.probeId,evidenceSessionRevision:decision.sessionRevision})}));
   });
 });
