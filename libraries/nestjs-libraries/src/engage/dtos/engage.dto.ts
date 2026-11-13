@@ -1748,7 +1748,19 @@ export class UpdateScheduledReplyDto {
 
   @IsOptional()
   @IsDateString()
-  scheduledAt?: string; // must be a future date
+  scheduledAt?: string | null; // Null requests server-now only for a versioned controlled edit.
+
+  @IsOptional() @IsString() @MinLength(1) @MaxLength(128)
+  requestId?: string;
+
+  @IsOptional() @IsInt() @Min(0) @Max(2147483646)
+  expectedRouteRevision?: number;
+
+  @IsOptional() @IsInt() @Min(0)
+  expectedContentRevision?: number;
+
+  @IsOptional() @IsString() @MinLength(1) @MaxLength(128)
+  integrationId?: string | null;
 
   @IsOptional()
   @IsString()

@@ -1,4 +1,4 @@
-import { ACCOUNT_CHANGE_CANCELLATION, canChangePostAccount, isAccountChangeRevokedExecution } from './send-account-change';
+import { ACCOUNT_CHANGE_CANCELLATION, canChangePostAccount, canEditUnsentReply, isAccountChangeRevokedExecution } from './send-account-change';
 import { preserveDispatchTarget, readPublishNowRequestedAt, withPublishNowRequestedAt } from './send-dispatch';
 import { assertAutonomousAccountIn, controlledBlockedPlatformsIn } from './send-mode-handover';
 import { SendModeService } from './send-mode.service';
@@ -643,6 +643,101 @@ export class SendCoordinatorService {
     }
   }
 
+  /** Edit the original saved Reply before any browser authority or draft exposure. */
+  async editUnsentReply(org: string, user: string, sentReplyId: string,
+    body: import('../engage/dtos/engage.dto').UpdateScheduledReplyDto) {
+    if (!body.requestId?.trim() || body.requestId.length > 128 ||
+        !Number.isSafeInteger(body.expectedRouteRevision) || !Number.isSafeInteger(body.expectedContentRevision) ||
+        body.integrationId !== undefined && body.integrationId !== null && !body.integrationId.trim())
+      reject('INVALID_SEND_EDIT_REQUEST');
+    const requestedAt = new Date();
+    const publishDate = body.scheduledAt === null ? requestedAt : body.scheduledAt === undefined ? undefined : new Date(body.scheduledAt);
+    await this.enabled(org);
+    await this.assertMember(this.db, org, user);
+    const scope = await this.db.engageSentReply.findFirst({ where: { id: sentReplyId, organizationId: org, removedAt: null } });
+    if (!scope?.projectId) throw new NotFoundException('SAVED_REPLY_NOT_FOUND');
+    await this.projects.assertProjectAccess(org, scope.projectId);
+    await this.projects.assertProjectActive(org, scope.projectId);
+    return sendTransaction(this.db, async tx => {
+      await this.assertControlledIn(tx, org);
+      await this.assertMember(tx, org, user);
+      const reply = await tx.engageSentReply.findFirst({ where: { id: sentReplyId, organizationId: org, projectId: scope.projectId, postId: scope.postId, removedAt: null } });
+      if (!reply) throw new NotFoundException('SAVED_REPLY_NOT_FOUND');
+      const posts = await this.chain(tx, org, reply.postId), root = posts[0];
+      const key = { organizationId: org, userId: user, operation: `reply-edit:${sentReplyId}`, requestId: body.requestId! };
+      const fingerprint = sendHash(body);
+      const prior = await tx.sendMutationReceipt.findUnique({ where: { organizationId_userId_operation_requestId: key } });
+      if (prior) {
+        if (prior.requestHash !== fingerprint) reject('REQUEST_ID_CONFLICT');
+        return prior.result as any;
+      }
+      if (publishDate && (!Number.isFinite(publishDate.getTime()) || body.scheduledAt !== null && publishDate <= requestedAt))
+        throw new BadRequestException('scheduledAt must be a future date');
+      const intent = root.sendIntentId ? await tx.sendIntent.findFirst({ where: { id: root.sendIntentId, organizationId: org, rootPostId: root.id, projectId: scope.projectId } }) : null;
+      const executions = intent ? await tx.sendExecution.findMany({ where: { organizationId: org, sendIntentId: intent.id } }) : [];
+      const segments = executions.length ? await tx.sendSegment.findMany({ where: { organizationId: org, executionId: { in: executions.map(e => e.id) } } }) : [];
+      if (posts.length !== 1 || root.source !== 'engage' || root.projectId !== scope.projectId || !intent ||
+          !canEditUnsentReply(root, intent, executions, segments) ||
+          root.routeRevision !== body.expectedRouteRevision || root.contentRevision !== body.expectedContentRevision)
+        reject('SEND_EDIT_UNSAFE');
+      if ((await this.modes.activeLegacyPostIdsIn(tx, org)).includes(root.id)) reject('LEGACY_CONTENT_DRAIN_REQUIRED');
+      const revocable = executions.filter(e => !isAccountChangeRevokedExecution(e));
+      if (revocable.some(e => {
+        const payload = e.payload as Array<{ id?: string; contentHash?: string }>;
+        return payload.length !== 1 || payload[0]?.id !== root.id || payload[0]?.contentHash !== postSendHash(root);
+      }) || revocable.length && await tx.sendQuotaReservation.count({ where: { organizationId: org, executionId: { in: revocable.map(e => e.id) } } }))
+        reject('SEND_EDIT_UNSAFE');
+      const selected = body.integrationId === null ? undefined : body.integrationId ?? root.integrationId ?? undefined;
+      const allowUnbound = !this.policies.requiresPreselection(intent.policySnapshot as any, await this.policies.lockSystemInTransaction(tx));
+      const route = await this.bindings.resolveForEnqueueInTransaction(tx, org, root.projectId!, intent.platform, 'REPLY', selected, allowUnbound);
+      if ((!route && !allowUnbound) || selected && route?.integrationId !== selected) reject('SEND_BINDING_REQUIRED');
+      if (root.providerIdentifier === 'linkedin-page' && route?.providerIdentifier !== 'linkedin-page') reject('LINKEDIN_COMPANY_ACCOUNT_REQUIRED');
+      if (route) await this.enrollAccountIn(tx, org, route.integrationId, route.canonicalAccountKey);
+      const retainSelection = body.integrationId === undefined && route?.integrationId === root.integrationId;
+      const routeRevision = root.routeRevision + 1, contentRevision = root.contentRevision + 1;
+      await this.revokePreparationsIn(tx, org, revocable, requestedAt, body.requestId!, routeRevision);
+      const target = body.scheduledAt === undefined ? preserveDispatchTarget(root.sendTarget, route?.targetAccount) : withPublishNowRequestedAt(route?.targetAccount, null);
+      const changed = await tx.post.updateMany({ where: { id: root.id, organizationId: org, projectId: scope.projectId,
+        state: root.state, sendIntentId: intent.id, routeRevision: root.routeRevision, contentRevision: root.contentRevision,
+        deletedAt: null, releaseId: null, releaseURL: null, claimedAt: null }, data: {
+        ...(body.content !== undefined ? { content: body.content } : {}), ...(publishDate ? { publishDate } : {}),
+        state: 'QUEUE', error: null, routeRevision, contentRevision,
+        integrationId: route?.integrationId ?? null, sendTarget: target,
+        accountSelectionMode: !route ? 'CURRENT_SESSION' : retainSelection ? root.accountSelectionMode : selected ? 'EXPLICIT' : 'INHERIT',
+        accountResolution: route ? 'RESOLVED' : 'AWAITING_CURRENT_ACTOR',
+        bindingSource: retainSelection ? root.bindingSource : route?.bindingSource ?? 'CURRENT_SESSION',
+        bindingSourceRevision: retainSelection ? root.bindingSourceRevision : route?.bindingRevision ?? null,
+      } });
+      if (changed.count !== 1) reject('SEND_CONTENT_CHANGED');
+      if (body.strategy !== undefined || body.brandStrength !== undefined || body.mentions !== undefined)
+        await tx.engageSentReply.update({ where: { id: sentReplyId, organizationId: org, postId: root.id }, data: { inputData: sendJson({
+          ...(reply.inputData as Record<string, unknown> | null),
+          ...(body.strategy !== undefined ? { strategy: body.strategy } : {}),
+          ...(body.brandStrength !== undefined ? { brandStrength: body.brandStrength } : {}),
+          ...(body.mentions !== undefined ? { mentions: body.mentions } : {}),
+        }) } });
+      const saved = await tx.sendIntent.updateMany({ where: { id: intent.id, revision: intent.revision, status: intent.status,
+        activeExecutionId: intent.activeExecutionId, fencingVersion: intent.fencingVersion }, data: {
+        status: 'QUEUED', activeExecutionId: null, revision: { increment: 1 },
+        fencingVersion: { increment: revocable.length ? 1 : 0 }, routeRevision, contentRevision,
+        integrationId: route?.integrationId ?? null, canonicalAccountKey: route?.canonicalAccountKey ?? null,
+        target: route ? sendJson(route.targetAccount) : Prisma.DbNull,
+      } });
+      if (saved.count !== 1) reject('SEND_INTENT_CHANGED');
+      const updated = await tx.post.findUniqueOrThrow({ where: { id: root.id } });
+      const updatedIntent = await tx.sendIntent.findUniqueOrThrow({ where: { id: intent.id } });
+      const result = { id: sentReplyId, postId: root.id, post: { id: root.id, content: updated.content, state: updated.state,
+        publishDate: updated.publishDate.toISOString(), routeRevision, contentRevision, integrationId: updated.integrationId },
+        sending: sendBusinessSummary(updated, updatedIntent,
+          await tx.sendExecution.findMany({ where: { organizationId: org, sendIntentId: intent.id } }),
+          await tx.sendSegment.findMany({ where: { organizationId: org, execution: { sendIntentId: intent.id } } }), null, true),
+      };
+      await tx.sendMutationReceipt.create({ data: { ...key, requestHash: fingerprint, result: sendJson(result) } });
+      console.log('[reply-edit] original saved', { requestId: body.requestId, sentReplyId, rootPostId: root.id, sendIntentId: intent.id, routeRevision, contentRevision });
+      return result;
+    });
+  }
+
   /** Full original editor submission, using the repository's existing field mapping in this transaction. */
   async editUnsentPost(
     org: string,
@@ -860,9 +955,9 @@ export class SendCoordinatorService {
               route?.targetAccount ?? null,
               body.type === 'now' && post.id === rootId ? now : null
             ),
-            accountSelectionMode: selected ? 'EXPLICIT' : 'INHERIT',
-            accountResolution: route ? 'RESOLVED' : 'DRAFT',
-            bindingSource: route?.bindingSource ?? null,
+            accountSelectionMode: !route && state !== 'DRAFT' ? 'CURRENT_SESSION' : selected ? 'EXPLICIT' : 'INHERIT',
+            accountResolution: route ? 'RESOLVED' : state === 'DRAFT' ? 'DRAFT' : 'AWAITING_CURRENT_ACTOR',
+            bindingSource: route?.bindingSource ?? (state === 'DRAFT' ? null : 'CURRENT_SESSION'),
             bindingSourceRevision: route?.bindingRevision ?? null,
           },
         });
@@ -1397,6 +1492,18 @@ export class SendCoordinatorService {
       } } : options.integrationId !== undefined
         ? { selection: { integrationId: options.integrationId } } : {}),
     });
+  }
+
+  /** Recover an accepted creation before classifying the same root as a new edit. */
+  async replayCreation(org: string, user: string, requestId: string, itemKey: string, fingerprint: string) {
+    const prior = await this.db.sendMutationReceipt.findUnique({ where: {
+      organizationId_userId_operation_requestId: {
+        organizationId: org, userId: user, operation: `send-create:${itemKey}`, requestId,
+      },
+    } });
+    if (!prior) return null;
+    if (prior.requestHash !== fingerprint) reject('SEND_CREATE_REQUEST_CONFLICT');
+    return (prior.result as { rootPostId: string }).rootPostId;
   }
 
   async prepareCreation(

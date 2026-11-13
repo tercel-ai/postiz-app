@@ -581,7 +581,7 @@ describe('business status wiring and retry admission', () => {
     const row = { id: 'reply', postId: 'root', post: { id: 'root', state: 'QUEUE', sendIntentId: 'intent', executionProtocol: 'ACCOUNT_BOUND_V1' } };
     repo._sentReply = { model: { engageSentReply: { findFirst: vi.fn().mockResolvedValue(row) } } };
     const update = vi.fn();
-    repo._tx = { model: { $transaction: async (work: any) => work({ post: { update }, engageSentReply: { update } }) } };
+    repo._tx = { model: { $transaction: async (work: any) => work({ post: { updateMany: update }, engageSentReply: { findFirst: repo._sentReply.model.engageSentReply.findFirst, update } }) } };
     await expect(repo.updateScheduledReply('org', 'reply', data)).rejects.toThrow('SEND_INTENT_IMMUTABLE');
     expect(update).not.toHaveBeenCalled();
   });
@@ -589,9 +589,9 @@ describe('business status wiring and retry admission', () => {
     const repo = Object.create(EngageRepository.prototype) as any;
     const row = { id: 'reply', postId: 'root', post: { id: 'root', state: 'QUEUE', sendIntentId: null, executionProtocol: 'LEGACY' } };
     repo._sentReply = { model: { engageSentReply: { findFirst: vi.fn().mockResolvedValue(row) } } };
-    const update = vi.fn().mockRejectedValue({ code: 'P2025' });
+    const update = vi.fn().mockResolvedValue({ count: 0 });
     const updateMetadata = vi.fn();
-    repo._tx = { model: { $transaction: async (work: any) => work({ post: { update }, engageSentReply: { update: updateMetadata } }) } };
+    repo._tx = { model: { $transaction: async (work: any) => work({ post: { updateMany: update }, engageSentReply: { findFirst: repo._sentReply.model.engageSentReply.findFirst, update: updateMetadata } }) } };
     await expect(repo.updateScheduledReply('org', 'reply', { inputData: { strategy: 'AMPLIFY' } })).rejects.toThrow('SEND_REPLY_CHANGED');
     expect(update.mock.calls[0][0].where).toMatchObject({ id: 'root', organizationId: 'org', state: 'QUEUE', sendIntentId: null });
     expect(updateMetadata).not.toHaveBeenCalled();
@@ -600,9 +600,9 @@ describe('business status wiring and retry admission', () => {
     const repo = Object.create(EngageRepository.prototype) as any;
     const row = { id: 'reply', postId: 'root', post: { id: 'root', state: 'QUEUE', sendIntentId: null, executionProtocol: 'LEGACY' } };
     repo._sentReply = { model: { engageSentReply: { findFirst: vi.fn().mockResolvedValue(row) } } };
-    const update = vi.fn();
+    const update = vi.fn().mockResolvedValue({ count: 1 });
     const updateMetadata = vi.fn();
-    repo._tx = { model: { $transaction: async (work: any) => work({ post: { update }, engageSentReply: { update: updateMetadata } }) } };
+    repo._tx = { model: { $transaction: async (work: any) => work({ post: { updateMany: update }, engageSentReply: { findFirst: repo._sentReply.model.engageSentReply.findFirst, update: updateMetadata } }) } };
     await repo.updateScheduledReply('org', 'reply', { content: 'edited', inputData: { strategy: 'AMPLIFY' } });
     expect(update.mock.calls[0][0].data).toEqual({ content: 'edited', contentRevision: { increment: 1 } });
     expect(updateMetadata).toHaveBeenCalledOnce();

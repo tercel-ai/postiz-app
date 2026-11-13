@@ -1,4 +1,4 @@
-import { canChangePostAccount } from './send-account-change';
+import { canChangePostAccount, canEditUnsentReply } from './send-account-change';
 import { isAccountBoundSendingEnabled } from './account-bound-sending.config';
 import { Post, SendIntent, SendExecution, SendSegment } from '@prisma/client';
 
@@ -30,7 +30,7 @@ export function sendBusinessSummary(post: PublicPost, intent: PublicIntent | nul
     intent.status === 'QUEUED' && !intent.activeExecutionId && !confirmed && !uncertain &&
     executions.every(execution => ['FAILED_FINAL', 'CANCELLED', 'EXPIRED'].includes(execution.status ?? '')) &&
     segments.every(segment => segment.status === 'NOT_SUBMITTED');
-  const accountChangeSafe = canChangePostAccount(post, intent, executions, segments);
+  const accountChangeSafe = intent?.action === 'REPLY' ? canEditUnsentReply(post, intent, executions, segments) : canChangePostAccount(post, intent, executions, segments);
   const frozen = !!intent || !!post.releaseId || post.state !== 'DRAFT';
   // Enqueueing an unclaimed saved reply is not editing its frozen account selection.
   const enqueueable = !intent && !post.sendIntentId && !post.releaseId &&

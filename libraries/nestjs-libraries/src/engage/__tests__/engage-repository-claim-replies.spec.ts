@@ -183,8 +183,12 @@ describe('EngageRepository.claimDueEngageReplies — winning the race', () => {
         id: { in: ['p1'] },
         state: 'QUEUE',
         sendIntentId: null,
+        deletedAt: null,
+        releaseURL: null,
+        publishDate: { lte: now },
         AND: [{ OR: [{ releaseId: null }, { claimedAt: { lte: leaseCutoff } }] },
-          { OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] }],
+          { OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] },
+          { OR: [{ publishMethod: null }, { publishMethod: 'EXTENSION' }] }],
       },
       data: { releaseId: 'claim_abc', claimedAt: now },
     });

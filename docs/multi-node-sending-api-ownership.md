@@ -430,7 +430,7 @@ validation correction requires a backend deployment only, without a schema chang
 `allowedActions.edit` is the explicit full-editor permission; `selectAccount`
 remains for older account-only consumers. Unclaimed API originals are editable;
 any API execution remains immutable. Existing recurring controlled admission
-restrictions and Reply immutability remain.
+restrictions remain; safe Reply editing follows the versioned preauthorization policy below.
 
 The serializable coordinator transaction uses the shared evidence predicate and
 shared preparation revocation helper, then invokes the existing repository editor
@@ -502,3 +502,55 @@ corrected backend and let existing pending claim requests recover normally. No
 cursor/history/business-record reset, SQL application, db push or schema migration
 is needed. If an earlier expanded database already contains POST_NOW rows, the
 corrected code ignores them and never deletes or uses them automatically.
+
+## Original Post and Reply recovery corrections (2026-11-13)
+
+An exact retry of first CONTROLLED enqueue from an existing Post draft checks its
+original `send-create` receipt before classifying the request as a later full edit.
+It retains the original root/thread group and intent; changed payloads cannot reuse
+the request ID. Full-editor acknowledgements retain their separate edit receipts.
+An edited unbound OPTIONAL queued Post keeps the existing `CURRENT_SESSION` and
+`AWAITING_CURRENT_ACTOR` admission semantics; a saved draft remains non-dispatchable.
+
+CONTROLLED saved Reply editing now uses the existing `PATCH /engage/sent/:id`.
+It accepts existing content/generation-input/date fields plus `requestId`,
+`expectedRouteRevision`, `expectedContentRevision`, and optional `integrationId`.
+The stable request and both expected revisions are required for an existing intent.
+Omitting account selection retains the original account and selection provenance;
+`null` requests inheritance/default resolution. An unresolved OPTIONAL account uses
+`CURRENT_SESSION` and `AWAITING_CURRENT_ACTOR` until verified first-claim binding.
+Omitting `scheduledAt` retains the schedule; a future ISO value schedules, and
+`scheduledAt:null` requests server-now only on this versioned controlled edit.
+Legacy null-date requests remain invalid. Exact acknowledged future-date retries
+still return their receipt after that scheduled time passes.
+
+Reply `allowedActions.edit` and `selectAccount` use the same complete native
+preauthorization evidence as Post. The transaction preserves the original
+sentReplyId, root, intent, opportunity and external reply target; it revokes safe
+preparations through the existing cancellation marker, advances both revisions,
+and stores a durable `{id,postId,post,sending}` acknowledgement. Old clients,
+authorization/exposure, UNKNOWN, confirmation, incomplete history and existing quota
+reservations remain protected. Existing origin, policy, quota and pacing are not
+reset. Changed accounts still require fresh actual browser identity verification.
+The accepted Reply is already queued; clients wake the existing bridge after
+checking the acknowledgement rather than creating another content record.
+
+Legacy AUTONOMOUS queued Reply edits now recheck claim, admission, captured,
+quarantined and deleted evidence under the same mode lock as browser admission.
+Content, generation inputs and date commit together; rejected edits do not partially
+reschedule a protected reply. The existing original-schedule lockout remains.
+Safe API/bound legacy schedule changes restart the existing Temporal workflow;
+explicit extension work retains browser routing. Legacy browser discovery and its
+atomic claim both require due time and a null/EXTENSION method, preserving old
+null-method automatic replies while excluding manually scheduled API work.
+
+Both existing due responses retain safe optional `reason`, `executionId` and
+`status` from controlled claims alongside `due`, pacing and protocol. They expose
+no lease credentials or raw evidence. Empty discovery, temporary waiting and
+uncertain publication remain distinct; expired occupancy never proves non-submission
+and never automatically replays UNKNOWN or confirmed content.
+
+Deploy the backend before clients use versioned Reply edits or null-date immediate
+submission. No schema migration, new status, endpoint, queue or cursor is required.
+Older saved-Reply enqueue requests retain their original idempotent contract.
+Tests verify coordination and request handling, not live platform publication.

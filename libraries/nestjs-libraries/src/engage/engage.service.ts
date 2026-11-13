@@ -1,3 +1,4 @@
+import { getSocialTaskQueue } from '../temporal/task-queue';
 import { SendModeService } from '../extension/send-mode.service';
 import { controlledReplySettings } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
 import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
@@ -26,7 +27,7 @@ import {
 } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
 import { CONTROLLED_SEND_PLATFORMS } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
-import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
+import { PostsService, RESCHEDULE_LOCKOUT_MS } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
 import { OperationPlanRepository } from '@gitroom/nestjs-libraries/database/prisma/operation-plan/operation-plan.repository';
@@ -2351,19 +2352,16 @@ export class EngageService implements OnApplicationBootstrap {
   async updateScheduledReply(
     org: Organization,
     id: string,
-    dto: UpdateScheduledReplyDto
+    dto: UpdateScheduledReplyDto,
+    userId?: string
   ) {
+    const original = await this._engageRepository.getSentReplyById(org.id, id);
+    if (original.post.sendIntentId)
+      return this._postsService.editUnsentReply(org.id, userId ?? '', id, dto);
     if (dto.scheduledAt !== undefined) {
-      if (new Date(dto.scheduledAt) <= new Date()) {
+      if ((dto.scheduledAt === null || new Date(dto.scheduledAt) <= new Date())) {
         throw new BadRequestException('scheduledAt must be a future date');
       }
-      const reply = await this._engageRepository.getSentReplyById(org.id, id);
-      // changeDate handles the claim-gate and Temporal workflow restart
-      await this._postsService.changeDate(
-        org.id,
-        reply.post.id,
-        dto.scheduledAt
-      );
     }
 
     const inputData =
@@ -2377,11 +2375,18 @@ export class EngageService implements OnApplicationBootstrap {
           }
       : undefined;
 
-    if (dto.content !== undefined || inputData !== undefined) {
-      return this._engageRepository.updateScheduledReply(org.id, id, {
-        content: dto.content,
-        inputData,
+    if (dto.content !== undefined || inputData !== undefined || dto.scheduledAt !== undefined) {
+      const saved = await this._engageRepository.updateScheduledReply(org.id, id, {
+        content: dto.content, inputData,
+        ...(dto.scheduledAt ? { publishDate: new Date(dto.scheduledAt), rescheduleLockoutMs: RESCHEDULE_LOCKOUT_MS } : {}),
       });
+      if (dto.scheduledAt && saved && (saved.post.publishMethod === 'API' ||
+          saved.post.publishMethod == null && saved.post.integrationId)) {
+        const platform = saved.post.providerIdentifier || saved.post.integration?.providerIdentifier || original.post.providerIdentifier;
+        try { await this._postsService.startWorkflow(getSocialTaskQueue(platform!), saved.postId, org.id); }
+        catch { throw new BadRequestException('Reschedule failed, please try again'); }
+      }
+      return saved;
     }
 
     return this._engageRepository.getSentReplyById(org.id, id);

@@ -101,3 +101,21 @@ it('validates native start opt-in while keeping an empty old-client request vali
  expect(validateSync(Object.assign(new StartSendDto(),{authorizationMode:'NATIVE_FLOW_V1'}))).toEqual([]);
  for(const authorizationMode of ['unknown',true,1]) expect(validateSync(Object.assign(new StartSendDto(),{authorizationMode}))).not.toEqual([]);
 });
+
+
+it.each(['POST', 'REPLY'] as const)('preserves the controlled %s empty-claim disposition without exposing credentials', async action => {
+  const controller: any = Object.create(action === 'POST' ? PostsController.prototype : EngageController.prototype);
+  Object.assign(controller, {
+    _sendExecutions: { claim: vi.fn().mockResolvedValue({ items: [],
+      reason: 'REPLAYED_EXECUTION_UNAVAILABLE', executionId: 'original-attempt', status: 'EXPIRED',
+      leaseToken: 'private-lease', privateEvidence: 'private' }) },
+    _engageAutoReplyService: { getDueReplies: vi.fn() },
+    _platformPacing: { getPlatformPacing: vi.fn().mockResolvedValue({}) },
+  });
+  const result = action === 'POST'
+    ? await controller.getDuePublish(org, { requestId: 'replayed-request' }, user, headers)
+    : await controller.getDueReplies(org, { requestId: 'replayed-request' }, user, headers);
+  expect(result).toEqual({ due: [], pacing: {}, executionProtocol: 'ACCOUNT_BOUND_V1',
+    reason: 'REPLAYED_EXECUTION_UNAVAILABLE', executionId: 'original-attempt', status: 'EXPIRED' });
+  expect(JSON.stringify(result)).not.toContain('private');
+});

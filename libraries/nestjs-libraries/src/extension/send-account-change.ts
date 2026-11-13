@@ -24,9 +24,9 @@ export function isAccountChangeRevokedExecution(execution: ExecutionScope): bool
 }
 
 /** Shared permission for the public summary and the transactional account mutation. */
-export function canChangePostAccount(post: PostScope, intent: IntentScope | null, executions: ExecutionScope[], segments: SegmentScope[]): boolean {
+function canEditUnsentContent(post: PostScope, intent: IntentScope | null, executions: ExecutionScope[], segments: SegmentScope[], action: 'POST' | 'REPLY'): boolean {
   const dormant = post.state === 'DRAFT' && intent?.status === 'CANCELLED' && (intent.context as {editableDraft?:boolean}|null)?.editableDraft === true;
-  if (!intent?.id || intent.action !== 'POST' || (!dormant && !['QUEUE', 'ERROR'].includes(post.state ?? '')) || !['EXTENSION','API'].includes(post.publishMethod ?? '') ||
+  if (!intent?.id || intent.action !== action || (!dormant && !['QUEUE', 'ERROR'].includes(post.state ?? '')) || !['EXTENSION','API'].includes(post.publishMethod ?? '') ||
       post.sendIntentId !== intent.id || post.id !== intent.rootPostId || post.routeRevision !== intent.routeRevision || post.contentRevision !== intent.contentRevision || post.releaseId || post.releaseURL || post.claimedAt || intent.hasConfirmedSegments ||
       (!dormant && !['QUEUED', 'RESERVED', 'FAILED_FINAL'].includes(intent.status ?? '')) ||
       (post.state === 'ERROR' && intent.status !== 'FAILED_FINAL') ||
@@ -38,7 +38,7 @@ export function canChangePostAccount(post: PostScope, intent: IntentScope | null
   return executions.every(execution => {
     const context = execution.context as { authorizationMode?: string } | null;
     const revoked = isAccountChangeRevokedExecution(execution);
-    if (!execution.id || execution.kind !== 'EXTENSION' || execution.action !== 'POST' || execution.startedAt || context?.authorizationMode !== 'NATIVE_FLOW_V1' ||
+    if (!execution.id || execution.kind !== 'EXTENSION' || execution.action !== action || execution.startedAt || context?.authorizationMode !== 'NATIVE_FLOW_V1' ||
         (revoked ? execution.status !== 'CANCELLED' : !['RESERVED', 'EXPIRED', 'FAILED_FINAL'].includes(execution.status ?? '') ||
           execution.routeRevision !== intent.routeRevision || execution.contentRevision !== intent.contentRevision)) return false;
     const rows = segments.filter(segment => segment.executionId === execution.id).sort((a,b) => (a.segmentIndex ?? -1) - (b.segmentIndex ?? -1));
@@ -52,4 +52,12 @@ export function canChangePostAccount(post: PostScope, intent: IntentScope | null
         (revoked ? segment.status === 'NOT_SUBMITTED' && ((segment.result as { status?: string } | null)?.status === ACCOUNT_CHANGE_CANCELLATION || hasUnpermittedStop(segment))
           : (failed && hasUnpermittedStop(segment)) || (segment.status === 'PENDING' && segment.result == null)));
   });
+}
+
+export function canChangePostAccount(post: PostScope, intent: IntentScope | null, executions: ExecutionScope[], segments: SegmentScope[]): boolean {
+  return canEditUnsentContent(post, intent, executions, segments, 'POST');
+}
+
+export function canEditUnsentReply(post: PostScope, intent: IntentScope | null, executions: ExecutionScope[], segments: SegmentScope[]): boolean {
+  return canEditUnsentContent(post, intent, executions, segments, 'REPLY');
 }

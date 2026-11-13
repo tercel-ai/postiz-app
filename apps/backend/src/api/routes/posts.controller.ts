@@ -569,7 +569,11 @@ export class PostsController {
         this._sendExecutions.claim({ org: org.id, user: user.id, nodeId: headers['x-extension-node-id'], token: headers['x-extension-node-token'] }, { requestId: body?.requestId!, action: 'POST', ...(body?.authorizationMode !== undefined ? { authorizationMode: body.authorizationMode } : {}) }),
         this._platformPacing.getPlatformPacing(),
       ]);
-      return { due: claimed.items, pacing, executionProtocol: 'ACCOUNT_BOUND_V1' };
+      return { due: claimed.items, pacing, executionProtocol: 'ACCOUNT_BOUND_V1',
+        ...(claimed.reason ? { reason: claimed.reason } : {}),
+        ...(claimed.executionId ? { executionId: claimed.executionId } : {}),
+        ...(claimed.status ? { status: claimed.status } : {}),
+      };
     }
     const [due, pacing] = await Promise.all([
       this._postsService.getDuePublishPosts(org.id, body?.limit),

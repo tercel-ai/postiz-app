@@ -465,7 +465,7 @@ exact value. See the [revision validation contract](multi-node-sending-api-owner
 `allowedActions.edit` is the explicit full-editor permission; `selectAccount`
 remains for older account-only consumers. Unclaimed API originals are editable;
 any API execution remains immutable. Existing recurring controlled admission
-restrictions and Reply immutability remain.
+restrictions remain; safe Reply editing follows the versioned preauthorization policy below.
 
 The serializable coordinator transaction uses the shared evidence predicate and
 shared preparation revocation helper, then invokes the existing repository editor
@@ -518,3 +518,30 @@ The deployed POST_NOW cursor write caused PostgreSQL 23514 with the original
 CHECK. Deploy the corrected backend; no schema migration, history reset, frontend
 or extension update is required for this fix. See the
 [canonical discovery contract](multi-node-sending-api-ownership.md#unified-post-discovery-cursor-and-post-now-priority-2026-11-13).
+
+## Original Post and Reply recovery corrections (2026-11-13)
+
+Exact retries of first CONTROLLED enqueue from an existing Post draft recover the
+original creation receipt before edit classification, retaining the root, thread
+group and intent. Later full edits continue using their separate durable receipts.
+OPTIONAL unbound queued edits remain available for verified current-session binding.
+
+Safe original Reply edits now follow the same transition as safe Post edits:
+original queued or proven preauthorization failure -> atomic native preparation
+revocation -> edited original root/intent QUEUED with both revisions advanced.
+The opportunity and external reply target remain unchanged. Old journal payloads
+and receipts remain auditable; late contradictory results quarantine the original
+instead of silently replaying it. Versioned PATCH acknowledgements can be replayed
+after response loss, including after an accepted scheduled time passes. The website
+checks the accepted identity/revisions and wakes the existing Reply bridge.
+
+Legacy autonomous Reply content, generation inputs and date now commit together
+under the admission/claim mode lock. Protected work cannot be partially rescheduled.
+Browser discovery rechecks due time and null/EXTENSION routing at the atomic claim,
+so future manual API schedules stay on their chosen workflow. Existing due responses
+also preserve safe claim disposition fields, making temporary waits diagnosable.
+
+See [API ownership](multi-node-sending-api-ownership.md#original-post-and-reply-recovery-corrections-2026-11-13)
+for PATCH fields, null-date immediate submission, acknowledgement and compatibility.
+Deploy backend support before the updated clients. No schema or new sending path is
+introduced; tests do not establish live platform publication.

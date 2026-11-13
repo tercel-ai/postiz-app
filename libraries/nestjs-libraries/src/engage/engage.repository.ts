@@ -1,3 +1,4 @@
+import { withPublishNowRequestedAt } from '../extension/send-dispatch';
 import { isCurrentSessionHandover } from '../extension/send-mode-handover';
 import { SendModeService } from '../extension/send-mode.service';
 import { sendTransaction } from '../extension/send-coordination.utils';
@@ -2408,7 +2409,8 @@ export class EngageRepository {
         // Belt and braces with `state`: a reply that went out leaves QUEUE AND
         // gains a URL, so a half-written commit cannot resurrect it.
         releaseURL: null,
-        AND: [available],
+        publishDate: { lte: opts.now },
+        AND: [available, { OR: [{ publishMethod: null }, { publishMethod: 'EXTENSION' }] }],
       },
     };
 
@@ -2451,7 +2453,9 @@ export class EngageRepository {
       // Re-check availability at write time: a concurrent claim of the same
       // candidate loses the race for that row, where the guard is a no-op.
       where: { organizationId, id: { in: postIds }, state: 'QUEUE', sendIntentId: null,
-        AND: [available, { OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] }] },
+        deletedAt: null, releaseURL: null, publishDate: { lte: opts.now },
+        AND: [available, { OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] },
+          { OR: [{ publishMethod: null }, { publishMethod: 'EXTENSION' }] }] },
       data: { releaseId: opts.leaseToken, claimedAt: opts.now },
     });
 
@@ -6530,50 +6534,52 @@ export class EngageRepository {
   async updateScheduledReply(
     organizationId: string,
     id: string,
-    data: { content?: string; inputData?: object }
+    data: { content?: string; inputData?: object; publishDate?: Date; rescheduleLockoutMs?: number }
   ) {
-    const reply = await this._sentReply.model.engageSentReply.findFirst({
-      where: { id, organizationId },
-      include: { post: { select: { id: true, state: true, sendIntentId: true, executionProtocol: true } } },
-    });
-    if (!reply) throw new NotFoundException('Sent reply not found');
-    if (reply.post.sendIntentId || !isLegacyExecution(reply.post.executionProtocol))
-      throw new ConflictException('SEND_INTENT_IMMUTABLE');
-    if (reply.post.state !== 'QUEUE') {
-      throw new BadRequestException(
-        'Reply has already been sent — cannot edit'
-      );
-    }
-
-    // Both writes must commit together: a partial commit would leave the
-    // published post content and the stored generation inputData diverged.
-    if (data.content !== undefined || data.inputData !== undefined) {
-      await this._tx.model.$transaction(async (tx) => {
-        try {
-          await tx.post.update({
-            where: { id: reply.postId, organizationId, state: 'QUEUE', sendIntentId: null, AND: [legacyExecutionWhere()] },
-            data: { ...(data.content !== undefined ? { content: data.content } : {}), contentRevision: { increment: 1 } },
-          });
-        } catch (error) {
-          if ((error as { code?: string }).code === 'P2025') throw new ConflictException('SEND_REPLY_CHANGED');
-          throw error;
-        }
-        if (data.inputData !== undefined) {
-          await tx.engageSentReply.update({
-            where: { id, organizationId, postId: reply.postId },
-            data: { inputData: data.inputData },
-          });
-        }
+    return sendTransaction(this._tx.model, async (tx) => {
+      // Admission and legacy claims take this same lock before capturing content.
+      if (this._sendModes) await this._sendModes.lockIn(tx, organizationId);
+      const reply = await tx.engageSentReply.findFirst({
+        where: { id, organizationId, removedAt: null }, include: { post: true },
       });
-    }
-
-    return this._sentReply.model.engageSentReply.findFirst({
-      where: { id },
-      include: {
-        post: {
-          select: { id: true, content: true, state: true, publishDate: true },
-        },
-      },
+      if (!reply) throw new NotFoundException('Sent reply not found');
+      const post = reply.post;
+      if (post.sendIntentId || !isLegacyExecution(post.executionProtocol))
+        throw new ConflictException('SEND_INTENT_IMMUTABLE');
+      if (post.state !== 'QUEUE')
+        throw new BadRequestException('Reply has already been sent — cannot edit');
+      if (post.deletedAt || post.releaseId || post.claimedAt || post.releaseURL ||
+          this._sendModes && (await this._sendModes.activeLegacyPostIdsIn(tx, organizationId)).includes(post.id))
+        throw new ConflictException('LEGACY_CONTENT_DRAIN_REQUIRED');
+      if (data.publishDate) {
+        if (!Number.isFinite(data.publishDate.getTime()) || data.publishDate <= new Date())
+          throw new BadRequestException('scheduledAt must be a future date');
+        if (new Date(post.publishDate).getTime() - Date.now() < (data.rescheduleLockoutMs ?? 0))
+          throw new BadRequestException('Post is too close to publication to reschedule');
+        const platform = post.providerIdentifier || (post.integrationId && (await tx.integration.findFirst({
+          where: { id: post.integrationId, organizationId }, select: { providerIdentifier: true },
+        }))?.providerIdentifier);
+        if (!platform) throw new BadRequestException('Integration not found or has been removed');
+      }
+      if (data.content !== undefined || data.inputData !== undefined || data.publishDate) {
+        const changed = await tx.post.updateMany({
+          where: { id: post.id, organizationId, state: 'QUEUE', sendIntentId: null,
+            deletedAt: null, releaseId: null, releaseURL: null, claimedAt: null,
+            contentRevision: post.contentRevision, routeRevision: post.routeRevision, publishDate: post.publishDate, AND: [legacyExecutionWhere()] },
+          data: { ...(data.content !== undefined ? { content: data.content } : {}),
+            ...(data.publishDate ? { publishDate: data.publishDate, sendTarget: withPublishNowRequestedAt(post.sendTarget, null) } : {}),
+            contentRevision: { increment: 1 } },
+        });
+        if (changed.count !== 1) throw new ConflictException('SEND_REPLY_CHANGED');
+        if (data.inputData !== undefined) await tx.engageSentReply.update({
+          where: { id, organizationId, postId: post.id }, data: { inputData: data.inputData },
+        });
+      }
+      return tx.engageSentReply.findFirst({ where: { id, organizationId }, include: {
+        post: { select: { id: true, content: true, state: true, publishDate: true, publishMethod: true,
+          integrationId: true, providerIdentifier: true, routeRevision: true, contentRevision: true,
+          integration: { select: { providerIdentifier: true } } } },
+      } });
     });
   }
 

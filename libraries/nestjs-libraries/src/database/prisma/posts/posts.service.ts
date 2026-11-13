@@ -1,3 +1,4 @@
+import type { UpdateScheduledReplyDto } from '../../../engage/dtos/engage.dto';
 import { readPublishNowRequestedAt } from '../../../extension/send-dispatch';
 import { isCurrentSessionHandover } from '../../../extension/send-mode-handover';
 import { ProjectInactiveException } from '@gitroom/nestjs-libraries/projects/project.exception';
@@ -184,7 +185,7 @@ function withDefaultPostSettings(
  * batch, skips): the two disagree about what to DO about it, never about where
  * the line is.
  */
-const RESCHEDULE_LOCKOUT_MS = 30_000;
+export const RESCHEDULE_LOCKOUT_MS = 30_000;
 
 /**
  * The window a platform with none of its own is deferred across.
@@ -1976,7 +1977,13 @@ export class PostsService {
         ? await this._postRepository.getPostById(post.value[0].id, orgId) : null;
       const autonomousEdit = !!autonomousOriginal && !autonomousOriginal.sendIntentId && ['DRAFT','QUEUE'].includes(autonomousOriginal.state);
       const editingOriginal = post.value[0]?.id ? await this._postRepository.getPostById(post.value[0].id, orgId) : null;
-      if (editingOriginal?.sendIntentId) {
+      const creationFingerprint = coordinated && body.requestId
+        ? sendHash({ post, type: body.type, date: body.date, projectId: body.projectId, source: body.source, inter: body.inter, tags: body.tags, shortLink: body.shortLink })
+        : null;
+      const creationReplay = editingOriginal?.sendIntentId && creationFingerprint
+        ? await this._sendCoordinator!.replayCreation(orgId, userId!, body.requestId!, post.itemKey ?? String(itemIndex), creationFingerprint)
+        : null;
+      if (editingOriginal?.sendIntentId && !creationReplay) {
         if (!this._sendCoordinator || !userId || body.posts.length !== 1) throw new BadRequestException('SEND_EDIT_UNSAFE');
         let editMethod = editingOriginal.publishMethod ?? undefined;
         if (post.publishMethod) {
@@ -1993,13 +2000,14 @@ export class PostsService {
       }
       if (coordinated) {
         const originalId = post.value[0]?.id;
-        const rootId = body.requestId
-          ? await this._sendCoordinator!.prepareCreation(orgId, userId!, body.requestId, post.itemKey ?? String(itemIndex), sendHash({ post, type: body.type, date: body.date, projectId: body.projectId, source: body.source, inter: body.inter, tags: body.tags, shortLink: body.shortLink }), originalId)
-          : originalId || sendUuid(sendContext!.contentUnitId!, sendUuid.URL);
+        const rootId = creationReplay ?? (body.requestId
+          ? await this._sendCoordinator!.prepareCreation(orgId, userId!, body.requestId, post.itemKey ?? String(itemIndex), creationFingerprint!, originalId)
+          : originalId || sendUuid(sendContext!.contentUnitId!, sendUuid.URL));
         const original = await this._postRepository.getPostById(rootId, orgId);
         if (!original && post.accountSelectionMode === 'INHERIT' && post.expectedRouteRevision === undefined)
           post.expectedRouteRevision = 0;
         if (original?.sendIntentId) {
+          if (original.group) preservedQueuedGroups.add(original.group);
           if (!body.requestId && !sendContext?.contentUnitId) throw new BadRequestException('SEND_INTENT_IMMUTABLE');
           if (original.state === 'QUEUE' && original.publishMethod === 'API') await this.startWorkflow(getSocialTaskQueue(original.providerIdentifier!), rootId, orgId);
           allCreatedPostIds.push(rootId);
@@ -2220,6 +2228,11 @@ export class PostsService {
   async hasContentSendIntent(orgId: string, contentUnitId: string) {
     if (!this._sendCoordinator) throw new ServiceUnavailableException('SEND_COORDINATION_NOT_ENABLED');
     return this._sendCoordinator.hasContentIntent(orgId, contentUnitId);
+  }
+
+  async editUnsentReply(orgId: string, userId: string, sentReplyId: string, body: UpdateScheduledReplyDto) {
+    if (!this._sendCoordinator || !userId) throw new BadRequestException('SEND_POLICY_OWNER_REQUIRED');
+    return this._sendCoordinator.editUnsentReply(orgId, userId, sentReplyId, body);
   }
 
   async getSendingSummary(orgId: string, userId: string, postId: string) {

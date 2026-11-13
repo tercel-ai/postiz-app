@@ -357,3 +357,34 @@ it('controlled full editor raw-request replay converts short links exactly once 
  expect(f.db.rows('sendIntent')).toHaveLength(1);
  expect(post).toMatchObject({id:'root',routeRevision:1,contentRevision:2});
 });
+
+
+it.each(['now', 'draft'] as const)('retains OPTIONAL current-session routing after full original edit to %s', async type => {
+ const f = await fixture();
+ f.policies.requiresPreselection.mockReturnValue(false);
+ f.bindings.resolveForEnqueueInTransaction.mockResolvedValue(null as any);
+ await f.service.editUnsentPost('org', 'user', {
+  requestId: `optional-edit-${type}`, projectId: 'project', type, date: sendNow.toISOString(),
+  posts: [{accountSelectionMode: 'INHERIT', expectedRouteRevision: 0, expectedContentRevision: 1, value: [{id: 'root', content: 'edited'}]}],
+ } as any, async (tx: any) => [await tx.post.update({where: {id: 'root'}, data: {content: 'edited', state: type === 'draft' ? 'DRAFT' : 'QUEUE'}})]);
+ expect(f.db.rows('post')[0]).toMatchObject({integrationId: null,
+  accountSelectionMode: type === 'draft' ? 'INHERIT' : 'CURRENT_SESSION',
+  accountResolution: type === 'draft' ? 'DRAFT' : 'AWAITING_CURRENT_ACTOR',
+  bindingSource: type === 'draft' ? null : 'CURRENT_SESSION'});
+ expect(f.db.rows('sendExecution')[0].status).toBe('CANCELLED');
+ expect(f.db.rows('sendQuotaReservation')).toHaveLength(0);
+});
+
+
+it('retains inherited Post selection when a full original request explicitly preserves inheritance', async () => {
+ const f = await fixture();
+ const root = f.db.rows('post')[0]; root.accountSelectionMode = 'INHERIT'; root.bindingSource = 'PROJECT'; root.bindingSourceRevision = 4;
+ f.bindings.resolveForEnqueueInTransaction.mockResolvedValue({integrationId:'account',providerIdentifier:'x',bindingSource:'PROJECT',bindingRevision:4,canonicalAccountKey:'account-key',targetAccount:{id:'123',idNamespace:'x.rest_id',handle:'alice'}});
+ await f.service.editUnsentPost('org', 'user', {requestId:'preserve-inherited-post',projectId:'project',type:'now',date:sendNow.toISOString(),posts:[{
+  accountSelectionMode:'INHERIT',expectedRouteRevision:0,expectedContentRevision:1,value:[{id:'root',content:'saved content'}],
+ }]} as any, async (tx:any) => [await tx.post.findUniqueOrThrow({where:{id:'root'}})]);
+ expect(f.bindings.resolveForEnqueueInTransaction).toHaveBeenLastCalledWith(expect.anything(),'org','project','x','POST',undefined,false);
+ expect(f.db.rows('post')[0]).toMatchObject({id:'root',integrationId:'account',accountSelectionMode:'INHERIT',bindingSource:'PROJECT',bindingSourceRevision:4});
+ expect(f.db.rows('sendExecution')[0].status).toBe('CANCELLED');
+ expect(f.db.rows('sendIntent')).toHaveLength(1);
+});

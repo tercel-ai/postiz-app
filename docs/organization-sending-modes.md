@@ -656,7 +656,7 @@ exact value. See the [revision validation contract](multi-node-sending-api-owner
 `allowedActions.edit` is the explicit full-editor permission; `selectAccount`
 remains for older account-only consumers. Unclaimed API originals are editable;
 any API execution remains immutable. Existing recurring controlled admission
-restrictions and Reply immutability remain.
+restrictions remain; safe Reply editing follows the versioned preauthorization policy below.
 
 The serializable coordinator transaction uses the shared evidence predicate and
 shared preparation revocation helper, then invokes the existing repository editor
@@ -707,3 +707,31 @@ verification, AUTONOMOUS current-session identity, handover, pacing and quota ru
 are unchanged. Fix the incompatible POST_NOW cursor write by deploying corrected
 backend code, without database changes or resetting old records. See the
 [canonical discovery contract](multi-node-sending-api-ownership.md#unified-post-discovery-cursor-and-post-now-priority-2026-11-13).
+
+## Original Post and Reply recovery corrections (2026-11-13)
+
+CONTROLLED original Reply edits now share Post's complete native preauthorization
+safety predicate and atomic preparation revocation. Same-account and changed-account
+edits retain the original business record, intent, opportunity and external target.
+A changed actor must still be freshly verified by the eventual browser executor.
+Mode changes, disabled coordination or revoked membership cannot gain edit permission.
+Old clients, authorized/exposed work, UNKNOWN and confirmed history retain protection.
+Existing send origin, policy, quota reservations and pacing are not reset by editing.
+
+AUTONOMOUS legacy Reply edits now lock the same organization mode row as claim and
+browser admission. Captured, claimed, admitted, quarantined or deleted evidence
+prevents mutation; content, inputs and scheduling commit together for safe work.
+Due browser claims exclude future work and API-routed manual schedules while keeping
+legacy null-method automatic replies. Existing API workflows retain their routing.
+
+Post creation-response replay and full-editor replay retain their separate receipts.
+OPTIONAL queued edits stay CURRENT_SESSION/AWAITING_CURRENT_ACTOR when unbound;
+saved Post drafts remain non-dispatchable and do not block ordinary handover.
+Occupancy expiry remains separate from original-content confirmation. Historical
+unbounded browser grants do not expire by age, and UNKNOWN/confirmed work is never
+automatically replayed. Additive due-response reasons expose waits without changing
+these admission rules.
+
+See [API ownership](multi-node-sending-api-ownership.md#original-post-and-reply-recovery-corrections-2026-11-13)
+for the versioned existing Reply PATCH contract and backend-first deployment order.
+No schema, status, endpoint, queue or cursor is added.
