@@ -74,7 +74,7 @@ export async function claimControlledSend<T>(
       return capability?.strictAccountVerification === true &&
         capability[body.action === 'POST' ? 'post' : 'reply'] === true;
     });
-    const actions = body.rootPostId || body.action === 'REPLY' ? [body.action] : ['POST_NOW', 'POST'];
+    const actions = [body.action];
     const cursors = await Promise.all(actions.map(action => body.rootPostId ? null : tx.sendClaimCursor.findUnique({
       where: { extensionNodeId_action: { extensionNodeId: node.id, action } },
     })));
@@ -86,8 +86,13 @@ export async function claimControlledSend<T>(
     const cursor = initial.cursors[index];
     const start: Position | null = cursor?.afterPublishDate && cursor.afterPostId
       ? { publishDate: cursor.afterPublishDate, id: cursor.afterPostId } : null;
-    return { action, cursor, position: start, wrapped: !start, scanned: 0, visited: false,
-      cycleStartedAt: action !== 'POST_NOW' && start && cursor?.cycleStartedAt ? cursor.cycleStartedAt : new Date() };
+    return { action, cursor, position: start, wrapped: !start, scanned: 0, visited: false, priority: false,
+      cycleStartedAt: start && cursor?.cycleStartedAt ? cursor.cycleStartedAt : new Date() };
+  });
+  // Priority is a bounded discovery prepass, never a separate database cursor/action.
+  if (!body.rootPostId && body.action === 'POST') lanes.unshift({
+    action: 'POST', cursor: null, position: null, wrapped: true, scanned: 0, visited: false,
+    priority: true, cycleStartedAt: new Date(),
   });
   type Lane = typeof lanes[number];
   let reason = sessions.length ? 'NO_MATCHING_DUE_POST' : 'NO_VERIFIED_SESSION_WITH_CAPABILITY';
@@ -108,7 +113,7 @@ export async function claimControlledSend<T>(
     ...eligible, createdAt: { lte: lane.cycleStartedAt }, publishDate: { lte: lane.cycleStartedAt },
   });
   const saveIn = async (tx: Prisma.TransactionClient, executionId: string | null, emptyReason?: string) => {
-    for (const lane of lanes.filter(lane => lane.visited && !body.rootPostId)) {
+    for (const lane of lanes.filter(lane => lane.visited && !lane.priority && !body.rootPostId)) {
       const { cursor, action, position: after, cycleStartedAt } = lane;
       const current = await tx.sendClaimCursor.findUnique({ where: {
         extensionNodeId_action: { extensionNodeId: node.id, action },
@@ -146,7 +151,6 @@ export async function claimControlledSend<T>(
         return requestedAt ? [{ ...row, requestedAt }] : [];
       }).sort((a, b) => +a.requestedAt - +b.requestedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     : [];
-  const priorityIds = priorityRows.map(row => row.id);
   for (const lane of lanes) {
     lane.visited = true;
     // Each lane has its own finite budget, so blocked urgent work cannot starve other accounts.
@@ -158,7 +162,7 @@ export async function claimControlledSend<T>(
       ] });
       const pageSize = Math.min(PAGE_SIZE, SCAN_LIMIT - lane.scanned);
       // Discovery holds no locks and grants no right. Each candidate is revalidated below.
-      const candidates = lane.action === 'POST_NOW'
+      const candidates = lane.priority
         ? priorityRows.filter(row => {
             const at = row.requestedAt;
             return at <= lane.cycleStartedAt && (!lane.position || at > lane.position.publishDate ||
@@ -167,7 +171,7 @@ export async function claimControlledSend<T>(
         : await db.post.findMany({
             where: { ...cycleWhere(lane),
               ...(body.rootPostId ? { id: body.rootPostId } : {
-                AND: range, ...(priorityIds.length ? { id: { notIn: priorityIds } } : {}),
+                AND: range,
               }),
             },
             orderBy: [{ publishDate: 'asc' }, { id: 'asc' }], take: pageSize,
@@ -183,7 +187,7 @@ export async function claimControlledSend<T>(
       }
       for (const candidate of candidates) {
         lane.scanned++;
-        lane.position = { publishDate: lane.action === 'POST_NOW' ? readPublishNowRequestedAt(candidate.sendTarget)! : candidate.publishDate, id: candidate.id };
+        lane.position = { publishDate: lane.priority ? readPublishNowRequestedAt(candidate.sendTarget)! : candidate.publishDate, id: candidate.id };
         if (!candidate.projectId) { reason = 'POST_PROJECT_MISSING'; continue; }
         if (!projectVerdicts.has(candidate.projectId))
           projectVerdicts.set(candidate.projectId, await sends.claimProjectActive(auth.org, candidate.projectId));
@@ -198,7 +202,7 @@ export async function claimControlledSend<T>(
           if (!post) return null;
           if (!body.rootPostId && body.action === 'POST') {
             const at = readPublishNowRequestedAt(post.sendTarget);
-            if (lane.action === 'POST_NOW' ? !at || at > lane.cycleStartedAt : !!at) return null;
+            if (lane.priority && (!at || at > lane.cycleStartedAt)) return null;
           }
           const capability = (currentNode.capabilities as any)?.[canonicalControlledPlatform(post.providerIdentifier!)];
           if (capability?.strictAccountVerification !== true || capability[body.action === 'POST' ? 'post' : 'reply'] !== true)
@@ -227,8 +231,7 @@ export async function claimControlledSend<T>(
             leaseTokenHash: hashSecret(sendLease(execution)), requestHash: fingerprint,
             ...(body.authorizationMode ? { context: { ...(execution.context as Record<string, any> | null), authorizationMode: body.authorizationMode } } : {}),
           } });
-          // A successful urgent grant restarts FIFO discovery; only budget exhaustion retains progress.
-          if (lane.action === 'POST_NOW') { lane.position = null; lane.cycleStartedAt = new Date(); }
+          // An urgent prepass grant leaves persistent FIFO discovery progress unchanged.
           await saveIn(tx, execution.id);
           return { items: [response(execution, currentNode.nodeId)] };
         }).catch((error: unknown) => {

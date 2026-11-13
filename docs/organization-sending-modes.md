@@ -695,3 +695,13 @@ extension choice is supplied. Full editor saves never silently change methods.
 Editor idempotency hashes the original request before short-link transformation;
 receipt replay returns the accepted snapshot without generating new links or
 advancing revisions again. Changed request bodies cannot reuse the same ID.
+
+
+### Unified Post discovery cursor and Post Now priority (2026-11-13)
+
+Post Now is priority metadata on the original Post, not another action or durable
+cursor. Discovery continues to persist only POST/REPLY progress. CONTROLLED actor
+verification, AUTONOMOUS current-session identity, handover, pacing and quota rules
+are unchanged. Fix the incompatible POST_NOW cursor write by deploying corrected
+backend code, without database changes or resetting old records. See the
+[canonical discovery contract](multi-node-sending-api-ownership.md#unified-post-discovery-cursor-and-post-now-priority-2026-11-13).

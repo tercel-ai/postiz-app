@@ -18,6 +18,15 @@
 
 - This applies regardless of which database the task is aimed at (dev, staging, or otherwise) and regardless of how low-risk the specific schema change looks in isolation.
 
+## Architecture Understanding and Minimal Necessary Changes
+
+- **Understand the existing architecture before changing any feature code.** Read the relevant architecture/flow documents, affected implementation and actual callers. Identify responsibilities, data flow, state meanings and API contracts; trace the complete flow across repositories where applicable. Names, UI symptoms, chat summaries and passing mocks are not sufficient evidence that a capability is missing.
+- **Solve within the existing architecture first.** Before editing, briefly explain the current flow, root cause, reusable mechanisms and why the proposed change is the minimum necessary. Check existing entry points, scheduling rules, markers, fields, states, components and helpers before introducing another path.
+- **Do not add unnecessary design when existing mechanisms reasonably solve the requirement.** This includes states/enums, database tables or fields, persistent cursors, APIs, separate queues, compatibility branches and abstraction layers. A priority difference, display difference or temporary processing phase does not by itself justify a new business state or persistent structure. For example, Post Now is priority within the existing Post queue: prefer its existing priority marker and unified discovery mechanism rather than another claim cursor.
+- **Extend only after demonstrating that existing mechanisms cannot reasonably meet the current requirement.** Cite the implementation and alternatives inspected, explain why reuse is inadequate, and record the smallest extension's responsibility, callers, compatibility, migration and maintenance costs. Implementation convenience, speculative future needs and perceived completeness are not sufficient reasons. An unwired or defective existing capability is not an architectural gap.
+- **Judge minimality by clear responsibilities, consistent semantics and maintainability.** Do not pile code into fewer files or add layers merely to claim reuse or decomposition. Preserve authorization, safety, idempotency, concurrency and recovery protections; bypassing them is not a valid simplification.
+- **Check for unnecessary mechanisms before delivery.** Remove newly introduced code/configuration that the final solution no longer needs, including parallel implementations and unused states, fields or branches. Preserve existing functionality unless the user explicitly authorizes its removal. Explain the final reuse, any necessary additions and deployment/migration effects.
+
 ## Post and Reply State Changes
 
 These rules are mandatory for changes affecting Post or Reply state, scheduling, Post Now, claim/admission, sending modes, account selection, retry, reconciliation, history, or status-dependent UI.

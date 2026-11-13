@@ -504,3 +504,15 @@ extension choice is supplied. Full editor saves never silently change methods.
 Editor idempotency hashes the original request before short-link transformation;
 receipt replay returns the accepted snapshot without generating new links or
 advancing revisions again. Changed request bodies cannot reuse the same ID.
+
+
+### Unified Post discovery cursor and Post Now priority (2026-11-13)
+
+Post Now uses the existing immediate-dispatch marker to request priority within
+the original Post queue. Only POST/REPLY discovery cursors are persisted. A bounded
+priority prepass leaves the POST cursor untouched; FIFO discovery also includes
+marked tasks so blocked priority prefixes cannot permanently hide later work.
+The deployed POST_NOW cursor write caused PostgreSQL 23514 with the original
+CHECK. Deploy the corrected backend; no schema migration, history reset, frontend
+or extension update is required for this fix. See the
+[canonical discovery contract](multi-node-sending-api-ownership.md#unified-post-discovery-cursor-and-post-now-priority-2026-11-13).

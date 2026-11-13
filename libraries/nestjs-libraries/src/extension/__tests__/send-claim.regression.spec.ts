@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { SEND_PREPARATION_LIMIT_MS, releaseExpiredAccountWriterIn, uncertainWriterExpiredIn } from '../send-coordination.utils';
 import { withPublishNowRequestedAt } from '../send-dispatch';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -668,7 +670,7 @@ it('discovers newly prioritized work before continuing an ordinary cursor', asyn
  f.db.rows('accountWriteState')[0].activeExecutionId = null;
  expect((await f.claim()).items[0]?.segments[0].id).toBe('urgent');
 });
-it('continues to eligible ordinary work after a full scan of blocked urgent work', async () => {
+it('eventually reaches eligible ordinary work after bounded scans of blocked urgent work', async () => {
  const f = fixture();
  for(let i=0;i<101;i++) {
   await f.create(`urgent-${String(i).padStart(3,'0')}`);
@@ -678,7 +680,9 @@ it('continues to eligible ordinary work after a full scan of blocked urgent work
  f.projects.assertProjectActive.mockImplementation(async (_org, project) => {
   if(project==='blocked') throw new ForbiddenException('PROJECT_INACTIVE');
  });
- expect((await f.claim()).items[0]?.segments[0].id).toBe('ordinary');
+ let found=(await f.claim('blocked-prefix-first')).items[0];
+ if(!found) found=(await f.claim('blocked-prefix-next')).items[0];
+ expect(found?.segments[0].id).toBe('ordinary');
 });
 
 it('keeps priority receipts idempotent and recovers an expired lease without duplicating its intent', async () => {
@@ -798,10 +802,11 @@ it('reads one priority snapshot for an entire polling claim across both scan lan
  });
  const model=f.db.post, findMany=vi.fn(model.findMany);
  f.db.post={...model,findMany};
- expect((await f.claim()).items[0]?.segments[0].id).toBe('ordinary');
+ expect((await f.claim('snapshot-first')).items).toEqual([]);
  const priorityReads=findMany.mock.calls.filter(([args])=>args.where?.sendTarget?.path?.[0]==='dispatch');
  expect(priorityReads).toHaveLength(1);
  expect(priorityReads[0][0]).not.toHaveProperty('take');
+ expect((await f.claim('snapshot-next')).items[0]?.segments[0].id).toBe('ordinary');
 });
 
 it.each(['exposed','unknown'])('releases the account after the X preparation deadline while quarantining the original %s content', async phase => {
@@ -852,4 +857,75 @@ it.each(['lease','permit'])('retains an old exposed X account while its %s is st
  if(live==='lease') execution.leaseExpiresAt=new Date(now.getTime()+60_000);
  else Object.assign(segment,{status:'AUTHORIZED',authorizedAt:sendNow,permitHash:'valid',submitBefore:new Date(now.getTime()+60_000)});
  expect((await releaseExpiredAccountWriterIn(f.db,f.db.rows('accountWriteState')[0],now)).activeExecutionId).toBe(old.executionId);
+});
+
+
+/** Model only the cursor CHECK; the existing harness owns transactional rollback. */
+function enforceCursorActions(f: ReturnType<typeof fixture>, allowed: string[]) {
+  const transact = f.db.$transaction.bind(f.db);
+  vi.spyOn(f.db, '$transaction').mockImplementation((work: any, options: any) => transact(async (tx: any) => work(new Proxy(tx, {
+    get(target, key) {
+      if (key !== 'sendClaimCursor') return Reflect.get(target, key);
+      const model = target.sendClaimCursor;
+      return { ...model, create: async (args: any) => {
+        if (!allowed.includes(args.data.action)) throw Object.assign(new Error('SendClaimCursor_action_check'), { code: '23514' });
+        return model.create(args);
+      } };
+    },
+  })), options));
+}
+function migrationCursorActions(name: string): string[] {
+  const sql = readFileSync(resolve(__dirname, '../../database/prisma/migrations', name), 'utf8');
+  const clause = name === 'add-send-claim-cursors.sql'
+    ? sql.match(/"action" TEXT NOT NULL CHECK \("action" IN \(([^)]+)\)\)/)?.[1]
+    : sql.match(/ADD CONSTRAINT "SendClaimCursor_action_check"\s+CHECK \("action" IN \(([^)]+)\)\)/)?.[1];
+  expect(clause, `cursor CHECK in ${name}`).toBeTruthy();
+  return [...clause!.matchAll(/'([^']+)'/g)].map(match => match[1]);
+}
+it('the original POST/REPLY-only cursor CHECK permits an empty automatic POST poll without a schema change', async () => {
+  const f = fixture(); f.db.rows('extensionNodeSession').length = 0;
+  enforceCursorActions(f, ['POST', 'REPLY']);
+  expect((await f.claim('original-check')).items).toEqual([]);
+  expect(f.db.rows('sendClaimCursor').map(cursor => cursor.action)).toEqual(['POST']);
+  expect(f.db.rows('sendMutationReceipt')).toHaveLength(1);
+  expect(f.db.rows('sendExecution')).toEqual([]);
+});
+it.each(['add-send-claim-cursors.sql', 'repair-send-safety-after-db-push.sql'])('unified automatic claim cursor writes satisfy unchanged %s for empty and urgent discovery', async migration => {
+  const allowed = migrationCursorActions(migration);
+  expect([...allowed].sort()).toEqual(['POST', 'REPLY'].sort());
+  const empty = fixture(); empty.db.rows('extensionNodeSession').length = 0;
+  enforceCursorActions(empty, allowed);
+  expect((await empty.claim('empty-existing')).items).toEqual([]);
+  expect(empty.db.rows('sendClaimCursor').map(cursor => cursor.action)).toEqual(['POST']);
+  expect((await empty.executions.claim(auth, { requestId: 'reply-existing', action: 'REPLY' })).items).toEqual([]);
+  expect(empty.db.rows('sendClaimCursor').map(cursor => cursor.action)).toEqual(['POST', 'REPLY']);
+  const urgent = fixture(); await urgent.create('ordinary'); await urgent.create('urgent');
+  urgent.db.rows('post')[1].sendTarget = withPublishNowRequestedAt(urgent.db.rows('post')[1].sendTarget, sendNow);
+  enforceCursorActions(urgent, allowed);
+  expect((await urgent.claim('urgent-existing')).items[0]?.segments[0].id).toBe('urgent');
+  for (const cursor of [...empty.db.rows('sendClaimCursor'), ...urgent.db.rows('sendClaimCursor')]) expect(allowed).toContain(cursor.action);
+});
+it('an urgent priority grant leaves the existing persistent POST cursor byte-for-byte unchanged', async () => {
+ const f=fixture();await f.create('first');await f.create('ordinary');await f.create('urgent');
+ enforceCursorActions(f,['POST','REPLY']);
+ expect((await f.claim('initial-fifo')).items[0]?.segments[0].id).toBe('first');
+ const before=structuredClone(f.db.rows('sendClaimCursor'));
+ vi.setSystemTime(new Date(+sendNow+1000));
+ await f.service.rescheduleQueuedPost('org','urgent','user',new Date(),0,1,true);
+ f.db.rows('accountWriteState')[0].activeExecutionId=null;
+ expect((await f.claim('priority')).items[0]?.segments[0].id).toBe('urgent');
+ expect(f.db.rows('sendClaimCursor')).toEqual(before);
+});
+it('the unified FIFO cursor eventually reaches urgent work beyond a permanently blocked priority prefix', async () => {
+ const f=fixture();enforceCursorActions(f,['POST','REPLY']);
+ for(let i=0;i<101;i++) {
+  await f.create(`blocked-${String(i).padStart(3,'0')}`);
+  Object.assign(f.db.rows('post')[i],{sendTarget:withPublishNowRequestedAt(f.db.rows('post')[i].sendTarget,sendNow),projectId:'blocked'});
+ }
+ await f.create('reachable-urgent');
+ f.db.rows('post')[101].sendTarget=withPublishNowRequestedAt(f.db.rows('post')[101].sendTarget,sendNow);
+ f.projects.assertProjectActive.mockImplementation(async(_org,project)=>{if(project==='blocked')throw new ForbiddenException('PROJECT_INACTIVE')});
+ expect((await f.claim('bounded-first')).items).toEqual([]);
+ expect((await f.claim('bounded-next')).items[0]?.segments[0].id).toBe('reachable-urgent');
+ expect(f.db.rows('sendClaimCursor').map(cursor=>cursor.action)).toEqual(['POST']);
 });

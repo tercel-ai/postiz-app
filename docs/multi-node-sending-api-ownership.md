@@ -463,3 +463,34 @@ extension choice is supplied. Full editor saves never silently change methods.
 Editor idempotency hashes the original request before short-link transformation;
 receipt replay returns the accepted snapshot without generating new links or
 advancing revisions again. Changed request bodies cannot reuse the same ID.
+
+
+### Unified Post discovery cursor and Post Now priority (2026-11-13)
+
+Post Now is a priority change on the original Post, not another action or queue.
+The existing dispatch.mode=now/requestedAt marker expresses that choice. Backend
+claim discovery persists only one POST cursor per node and the existing separate
+REPLY cursor; no POST_NOW cursor action, schema change or database migration is
+required. SendIntent and SendExecution actions also remain POST/REPLY.
+
+An authenticated POST poll first tries up to 100 marked immediate-work
+candidates from one snapshot; the snapshot query itself has no row-count limit.
+This priority prepass has no durable cursor and does not advance or rewind
+the POST cursor after a grant. If it cannot grant work, the normal POST keyset
+scan continues over all eligible due Posts, including marked ones. Its durable
+progress therefore reaches tasks beyond a blocked priority prefix across bounded
+polls. Priority and ordinary scans have independent finite budgets. This gives
+immediate work bounded priority while preserving eventual discovery beyond
+blocked prefixes. All candidates still pass current mode/project/actor,
+account occupancy, pacing, quota and permit decisions; a priority flag bypasses
+none of them. Original mutation receipts remain authoritative for exact replay.
+Direct root claims and Reply retain their existing semantics.
+
+An earlier backend version attempted to store POST_NOW in SendClaimCursor.action,
+which violates the existing POST/REPLY CHECK (PostgreSQL 23514), even on an empty
+POST poll. This correction removes that write; retain the original database
+constraint. The proposed constraint-widening migration is withdrawn. Deploy the
+corrected backend and let existing pending claim requests recover normally. No
+cursor/history/business-record reset, SQL application, db push or schema migration
+is needed. If an earlier expanded database already contains POST_NOW rows, the
+corrected code ignores them and never deletes or uses them automatically.
