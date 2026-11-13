@@ -735,3 +735,16 @@ these admission rules.
 See [API ownership](multi-node-sending-api-ownership.md#original-post-and-reply-recovery-corrections-2026-11-13)
 for the versioned existing Reply PATCH contract and backend-first deployment order.
 No schema, status, endpoint, queue or cursor is added.
+
+
+## Controlled quota admission (2026-11-13)
+
+CONTROLLED checks existing applicable quota usage before admitting a new execution,
+using the verified account for unbound OPTIONAL candidates. Exhausted originals stay
+queued; no new account binding or quota reservation is created for them. This does
+not change Automation/manual policy distinctions, Post/Reply budget dimensions,
+UNKNOWN holds, mode handover, or AUTONOMOUS legacy discovery. Final authorization
+continues to reserve quota atomically.
+
+See [API ownership](multi-node-sending-api-ownership.md#quota-aware-controlled-claim-2026-11-13)
+for empty-claim reasons, stable receipt recovery and backend-only deployment.

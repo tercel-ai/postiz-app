@@ -17,8 +17,15 @@ beforeEach(() => {
 });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 
-function fixture() {
+function fixture(quotaLimit?: number) {
   const f = setupSend();
+  if (quotaLimit !== undefined) {
+    const resolvePlan = f.quotas.resolve.getMockImplementation()!;
+    f.quotas.resolve.mockImplementation(async (...args) => {
+      const plan = await resolvePlan(...args);
+      return { ...plan, budgets: plan.budgets.map(b => ({ ...b, limit: quotaLimit })) };
+    });
+  }
   f.db.seed('extensionNode', {
     id: 'node', nodeId: 'node', organizationId: 'org', credentialVersion: 1,
     capabilities: { x: { post: true, reply: true, strictAccountVerification: true } },
@@ -239,7 +246,7 @@ it('starts a fresh cycle immediately after an empty queue receives newly created
 
 
 it('honors the possible write cooldown after an UNKNOWN report without reopening the old intent or quota', async () => {
-  const f = fixture(); await f.create();
+  const f = fixture(2); await f.create();
   const old = (await f.claim('old-claim')).items[0]; await f.proof(old);
   await f.executions.start(auth, old.executionId, 0, old.leaseToken);
   await f.executions.outcome(auth, old.executionId, 0, old.leaseToken, { status: 'unknown', eventId: 'lost' });
@@ -322,7 +329,7 @@ it('requires the original lease before returning reply context', async () => {
 });
 
 it('claims an unrelated post after a reply lease and its unreported permit have expired', async () => {
-  const f = fixture();
+  const f = fixture(2);
   await f.create('old');
   await f.create('next');
   const old = (await f.claim('old-claim', 'old')).items[0];
@@ -433,7 +440,7 @@ it.each(['POST', 'REPLY'] as const)('keeps the possible write cooldown when dire
 });
 
 it('releases a partial thread after the preparation cap while preserving its confirmed segment', async () => {
-  const f = fixture(); await f.create('old'); await f.create('next');
+  const f = fixture(2); await f.create('old'); await f.create('next');
   const root = f.db.rows('post').find(post => post.id === 'old');
   f.db.seed('post', { ...root, id: 'child', parentPostId: 'old' });
   const old = (await f.claim('old', 'old')).items[0];
@@ -753,9 +760,13 @@ it('applies manual Post now admission with real quota rules while retaining curr
  expect(await f.claim('manual-early')).toMatchObject({items:[],reason:'ACCOUNT_COOLDOWN_ACTIVE'});
  f.db.rows('accountWriteState')[0].lastConfirmedAt=null;
  f.db.rows('accountWriteState')[0].dailyWriteLimit=0;
+ expect(await f.claim('manual-full')).toMatchObject({items:[],reason:'SEND_QUOTA_EXHAUSTED'});
+ expect(f.db.rows('sendExecution')).toHaveLength(0);
+ f.db.rows('accountWriteState')[0].dailyWriteLimit=1;
  const item=(await f.claim('manual-due')).items[0];
  expect(item?.segments[0].id).toBe('automatic');
  await f.proof(item);
+ f.db.rows('accountWriteState')[0].dailyWriteLimit=0;
  await expect(f.executions.start(auth,item.executionId,0,item.leaseToken)).rejects.toThrow('SEND_QUOTA_EXHAUSTED');
  expect(f.db.rows('sendQuotaReservation')).toHaveLength(0);
  expect(f.db.rows('sendIntent')[0].sendOrigin).toBe('AUTOMATION');
@@ -928,4 +939,68 @@ it('the unified FIFO cursor eventually reaches urgent work beyond a permanently 
  expect((await f.claim('bounded-first')).items).toEqual([]);
  expect((await f.claim('bounded-next')).items[0]?.segments[0].id).toBe('reachable-urgent');
  expect(f.db.rows('sendClaimCursor').map(cursor=>cursor.action)).toEqual(['POST']);
+});
+
+
+it.each(['POST', 'REPLY'] as const)('leaves a quota-full %s queued without creating an execution or quota reservation', async action => {
+ const f=fixture(); await f.create(); f.db.rows('sendIntent')[0].action=action;
+ const plan={gapMs:0,budgets:[{key:'full-quota',scope:'ACCOUNT',dimension:action==='REPLY'?'REPLY_WRITES':'PLATFORM_WRITES',limit:4,units:1,
+  windowStart:new Date('2026-10-15T00:00:00Z'),windowEnd:new Date('2026-10-16T00:00:00Z'),timezone:'UTC',policyVersion:'current',accountKey:'account-key'}]};
+ f.quotas.resolve.mockResolvedValue(plan);
+ f.db.seed('sendQuotaBucket',{...plan.budgets[0],id:'full-quota',organizationId:'org',confirmedUnits:2,heldUnits:2});
+ const original=structuredClone([f.db.rows('post'),f.db.rows('sendIntent'),f.db.rows('accountWriteState'),f.db.rows('sendQuotaBucket')]);
+ const request={requestId:'quota-full',action,rootPostId:'root'};
+ expect(await f.executions.claim(auth,request)).toMatchObject({items:[],reason:'SEND_QUOTA_EXHAUSTED'});
+ expect([f.db.rows('post'),f.db.rows('sendIntent'),f.db.rows('accountWriteState'),f.db.rows('sendQuotaBucket')]).toEqual(original);
+ expect(f.db.rows('sendExecution')).toHaveLength(0);expect(f.db.rows('sendQuotaReservation')).toHaveLength(0);
+ plan.budgets[0].limit=5;
+ expect(await f.executions.claim(auth,request)).toMatchObject({items:[],reason:'SEND_QUOTA_EXHAUSTED'});
+ expect((await f.executions.claim(auth,{...request,requestId:'quota-restored'})).items).toHaveLength(1);
+ expect(f.db.rows('sendQuotaReservation')).toHaveLength(0);
+});
+it('checks OPTIONAL admission against the verified actor without binding an exhausted original', async()=>{
+ const f=fixture();await f.create();
+ Object.assign(f.db.rows('post')[0],{integrationId:null,accountSelectionMode:'CURRENT_SESSION',accountResolution:'AWAITING_CURRENT_ACTOR'});
+ Object.assign(f.db.rows('sendIntent')[0],{integrationId:null,canonicalAccountKey:null,target:null});
+ const base={scope:'ACCOUNT',dimension:'PLATFORM_WRITES',limit:1,units:1,windowStart:new Date('2026-10-15T00:00:00Z'),windowEnd:new Date('2026-10-16T00:00:00Z'),timezone:'UTC',policyVersion:'current'};
+ f.quotas.resolve.mockImplementation(async(_tx,intent)=>({gapMs:0,budgets:[{...base,key:`actor-${intent.canonicalAccountKey}`,accountKey:intent.canonicalAccountKey!}]}));
+ f.db.seed('sendQuotaBucket',{...base,id:'actor-account-key',organizationId:'org',confirmedUnits:1});
+ expect(await f.claim('optional-quota','root')).toMatchObject({items:[],reason:'SEND_QUOTA_EXHAUSTED'});
+ expect(f.db.rows('post')[0]).toMatchObject({integrationId:null,accountSelectionMode:'CURRENT_SESSION'});
+ expect(f.db.rows('sendIntent')[0]).toMatchObject({canonicalAccountKey:null,activeExecutionId:null});
+ expect(f.db.rows('sendExecution')).toHaveLength(0);
+});
+it('keeps a full Automation reply allowance separate from a manual Post on the same account', async()=>{
+ const f=fixture();await f.create('reply');await f.create('post');f.quotas.resolve.mockRestore();
+ Object.assign(f.db.rows('sendIntent')[0],{action:'REPLY',sendOrigin:'AUTOMATION'});
+ f.db.seed('engageConfig',{organizationId:'org',projectId:'project',metadata:{automationEnabled:true,autoReplyEnabled:true,replyPolicies:{x:{autoReplyEnabled:true,dailyReplyLimit:0,windowStart:'00:00',windowEnd:'23:59',timezone:'UTC'}}}});
+ expect(await f.executions.claim(auth,{requestId:'automatic-full',action:'REPLY',rootPostId:'reply'})).toMatchObject({items:[],reason:'SEND_QUOTA_EXHAUSTED'});
+ expect((await f.claim('manual-post','post')).items[0]?.segments[0].id).toBe('post');
+ expect(f.db.rows('sendQuotaBucket')).toHaveLength(0);expect(f.db.rows('sendQuotaReservation')).toHaveLength(0);
+});
+
+
+it('continues scanning another account when the first account has no quota left', async()=>{
+ const f=fixture();await f.create('full');await f.create('available');
+ f.db.seed('integration',{...f.db.rows('integration')[0],id:'other',internalId:'456'});
+ f.db.seed('integrationProject',{organizationId:'org',projectId:'project',integrationId:'other',disabled:false,engageEnabled:true});
+ f.db.seed('accountWriteState',{id:'other-key',organizationId:'org',canonicalAccountKey:'other-key',integrationId:'other',rolloutReady:true,activeExecutionId:null});
+ f.db.seed('extensionNodeSession',{...f.db.rows('extensionNodeSession')[0],id:'other-session',integrationId:'other',accountIdentity:{id:'456',namespace:'x.rest_id'}});
+ Object.assign(f.db.rows('post')[1],{integrationId:'other',publishDate:new Date(+sendNow+1)});
+ Object.assign(f.db.rows('sendIntent')[1],{integrationId:'other',canonicalAccountKey:'other-key',target:{id:'456',idNamespace:'x.rest_id'}});
+ f.quotas.resolve.mockImplementation(async(_tx,intent)=>({gapMs:0,budgets:[{key:`quota-${intent.canonicalAccountKey}`,scope:'ACCOUNT',dimension:'PLATFORM_WRITES',limit:1,units:1,
+  windowStart:new Date('2026-10-15T00:00:00Z'),windowEnd:new Date('2026-10-16T00:00:00Z'),timezone:'UTC',policyVersion:'current',accountKey:intent.canonicalAccountKey!}]}));
+ f.db.seed('sendQuotaBucket',{id:'quota-account-key',organizationId:'org',windowStart:new Date('2026-10-15T00:00:00Z'),windowEnd:new Date('2026-10-16T00:00:00Z'),confirmedUnits:1});
+ vi.setSystemTime(new Date(+sendNow+2));
+ expect((await f.claim('other-account')).items[0]?.segments[0].id).toBe('available');
+ expect(f.db.rows('sendIntent')[0]).toMatchObject({status:'QUEUED',activeExecutionId:null});
+ expect(f.db.rows('sendExecution')).toHaveLength(1);expect(f.db.rows('sendQuotaReservation')).toHaveLength(0);
+});
+it('keeps a live claim response recoverable when its quota fills before start',async()=>{
+ const f=fixture();await f.create();const original=await f.claim('recover-original','root');
+ f.db.seed('sendQuotaBucket',{id:'shared-project',organizationId:'org',windowStart:new Date('2026-10-15T00:00:00Z'),windowEnd:new Date('2026-10-16T00:00:00Z'),confirmedUnits:1});
+ expect(await f.claim('recover-original','root')).toEqual(original);
+ const item=original.items[0];await f.proof(item);
+ await expect(f.executions.start(auth,item.executionId,0,item.leaseToken)).rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+ expect(f.db.rows('sendExecution')).toHaveLength(1);expect(f.db.rows('sendQuotaReservation')).toHaveLength(0);
 });

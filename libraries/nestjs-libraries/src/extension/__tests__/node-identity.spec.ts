@@ -4,7 +4,7 @@ import { validateSync } from 'class-validator';
 import { ExtensionNodeService } from '../extension-node.service';
 import { RegisterExtensionNodeDto } from '../extension-node.dto';
 import { SendExecutionService } from '../send-execution.service';
-import { setupSend } from './support/send-fixture';
+import { setupSend, sendNow } from './support/send-fixture';
 import { memorySendDatabase } from './support/memory-send-database';
 
 const nodeId = 'a'.repeat(64);
@@ -22,7 +22,7 @@ beforeEach(() => {
   vi.stubEnv('SEND_EXECUTION_CREDENTIAL_KEY', 's'.repeat(32));
   vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true');
 });
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 
 describe('one public node identity with account-scoped state', () => {
   it('uses the same nodeId across users with independent internal rows and credentials', async () => {
@@ -114,7 +114,9 @@ describe('one public node identity with account-scoped state', () => {
     expect(seen).toBeInstanceOf(Date);
   });
   it('rejects another account execution even when nodeId and the leaked lease are identical', async () => {
-    const f = setupSend();
+    vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(sendNow);
+  const f = setupSend();
     f.db.seed('userOrganization', { organizationId: 'org', userId: 'bob', disabled: false });
     const nodes = new ExtensionNodeService(f.db as any);
     const capabilities = { x: { post: true, reply: true, strictAccountVerification: true } };

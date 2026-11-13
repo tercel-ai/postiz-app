@@ -657,3 +657,47 @@ it('returns the exhausted quota and reset window without exposing ledger keys', 
   expect(JSON.stringify(error.getResponse())).not.toContain('budget');
   expect(db.rows('sendQuotaReservation')).toHaveLength(0);
 });
+
+
+describe('read-only quota admission', () => {
+  it.each([false, true])('rejects a full quota without initializing or changing the ledger (existing bucket: %s)', async existing => {
+    const db = memorySendDatabase(), quota = new SendQuotaService();
+    if (existing) db.seed('sendQuotaBucket', { id: 'budget', organizationId: 'org', ...budget(), confirmedUnits: 0, heldUnits: 1 });
+    else {
+      db.seed('sendExecution', { id: 'uncertain', organizationId: 'org', projectId: 'project', platform: 'x', action: 'REPLY' });
+      db.seed('sendSegment', { executionId: 'uncertain', organizationId: 'org', segmentIndex: 0, authorizedAt: now, status: 'UNKNOWN' });
+    }
+    const before = structuredClone([db.rows('sendQuotaBucket'), db.rows('sendQuotaReservation'), db.rows('sendSegment')]);
+    await expect(db.$transaction((tx: any) => quota.assertAvailable(tx, 'org', [budget()], now))).rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+    expect([db.rows('sendQuotaBucket'), db.rows('sendQuotaReservation'), db.rows('sendSegment')]).toEqual(before);
+  });
+  it('uses the current limit and keeps non-enforced automatic budgets non-blocking', async () => {
+    const db = memorySendDatabase(), quota = new SendQuotaService();
+    db.seed('sendQuotaBucket', { id: 'budget', organizationId: 'org', ...budget(), limit: 99, confirmedUnits: 1 });
+    await expect(quota.assertAvailable(db as any, 'org', [budget({ limit: 1 })], now)).rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+    await quota.assertAvailable(db as any, 'org', [budget({ limit: 2 })], now);
+    await quota.assertAvailable(db as any, 'org', [budget({ limit: 0, enforce: false })], now);
+    expect(db.rows('sendQuotaBucket')[0]).toMatchObject({ limit: 99, confirmedUnits: 1, heldUnits: 0 });
+    expect(db.rows('sendQuotaReservation')).toHaveLength(0);
+  });
+  it('does not reserve during admission and still rejects a racing final authorization', async () => {
+    const db = memorySendDatabase(), quota = new SendQuotaService();
+    await quota.assertAvailable(db as any, 'org', [budget()], now);
+    await quota.assertAvailable(db as any, 'org', [budget()], now);
+    expect(db.rows('sendQuotaBucket')).toHaveLength(0);
+    await db.$transaction((tx: any) => quota.reserve(tx, 'org', 'winner', 0, [budget()], now));
+    await expect(db.$transaction((tx: any) => quota.reserve(tx, 'org', 'loser', 0, [budget()], now))).rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+    expect(db.rows('sendQuotaReservation')).toHaveLength(1);
+  });
+});
+
+
+it('allows a fresh quota window without changing the exhausted previous day',async()=>{
+ const db=memorySendDatabase(),quota=new SendQuotaService();
+ db.seed('sendQuotaBucket',{id:'budget',organizationId:'org',...budget(),confirmedUnits:1});
+ const later=new Date('2026-10-16T12:00:00Z');
+ const next=budget({key:'next-day',windowStart:new Date('2026-10-16T00:00:00Z'),windowEnd:new Date('2026-10-17T00:00:00Z')});
+ await quota.assertAvailable(db as any,'org',[next],later);
+ expect(db.rows('sendQuotaBucket')).toHaveLength(1);expect(db.rows('sendQuotaBucket')[0].confirmedUnits).toBe(1);
+ expect(db.rows('sendQuotaReservation')).toHaveLength(0);
+});

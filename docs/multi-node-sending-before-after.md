@@ -545,3 +545,18 @@ See [API ownership](multi-node-sending-api-ownership.md#original-post-and-reply-
 for PATCH fields, null-date immediate submission, acknowledgement and compatibility.
 Deploy backend support before the updated clients. No schema or new sending path is
 introduced; tests do not establish live platform publication.
+
+
+## Quota admission before controlled execution (2026-11-13)
+
+Previously a due Post/Reply could be claimed after its applicable quota was already
+full, reaching the extension only to fail at `/start`. Controlled discovery now
+uses existing quota policy and bucket-or-baseline accounting before creating the
+execution. A full candidate stays queued without a new execution or quota hold;
+other eligible accounts remain discoverable. OPTIONAL prechecks use the verified
+actor without persisting a blocked original's binding.
+
+The later atomic reservation remains mandatory for races and policy changes.
+Original claim receipts, uncertain results, quota holds and client activity/history
+remain intact. See [API ownership](multi-node-sending-api-ownership.md#quota-aware-controlled-claim-2026-11-13)
+for scope, replay and deployment details.

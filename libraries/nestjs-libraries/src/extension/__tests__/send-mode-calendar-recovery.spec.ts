@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { SendModeService, organizationSendModeKey } from '../send-mode.service';
 import { memorySendDatabase } from './support/memory-send-database';
-import { setupSend } from './support/send-fixture';
+import { setupSend, sendNow } from './support/send-fixture';
 
 beforeEach(() => vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true'));
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 function fixture() {
   const db = memorySendDatabase();
   const modes = new SendModeService(db);
@@ -203,6 +203,8 @@ it.each(['not-captured', 'unclaimed', 'recurring', 'thread', 'api', 'published-u
 
 
 it('admits an independent controlled reply after archival, while keeping both-mode replay and pacing protections', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(sendNow);
   const f = setupSend();
   f.db.seed('organization', { id: 'org' });
   await f.create('new-reply', 'EXTENSION');

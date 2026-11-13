@@ -554,3 +554,39 @@ Deploy the backend before clients use versioned Reply edits or null-date immedia
 submission. No schema migration, new status, endpoint, queue or cursor is required.
 Older saved-Reply enqueue requests retain their original idempotent contract.
 Tests verify coordination and request handling, not live platform publication.
+
+
+## Quota-aware controlled claim (2026-11-13)
+
+Controlled POST and REPLY discovery now checks the next root write's applicable
+quota before creating a new execution. The existing candidate transaction resolves
+the current operation policy and reads its existing quota buckets, or the same
+historical baseline used by reservation when no bucket exists. The precheck creates
+no bucket or reservation, does not consume quota, and does not bind an exhausted
+OPTIONAL original to the candidate browser account. The verified candidate's canonical
+account is used for this read before first-claim binding.
+
+Exhausted candidates retain their original business and preparation state and are
+skipped while discovery continues for other eligible accounts. Existing claim/due
+responses carry `reason: SEND_QUOTA_EXHAUSTED` through their current reason field;
+no new response field or endpoint is required. A later normal poll uses a new request
+ID and rechecks the current policy/window/ledger. Replaying an already accepted empty
+claim keeps its original empty result; replaying a live old claim remains credential
+recovery and does not authorize a platform write. Existing requested activity/history
+may remain visible in the extension; this change prevents new execution admission.
+
+This preserves the existing budget dimensions and scopes. Automation's project
+reply allowance remains enforced only where the existing policy requires it; manual
+operations retain their existing exceptions and account safety limits. Post is not
+charged against a Reply-only allowance. UNKNOWN/HELD usage remains counted, and
+expiry does not release it. No quota setting, daily limit or timezone is reinterpreted.
+
+Thread continuation segments retain their existing per-segment authorization
+and quota checks; claim does not reserve capacity for an entire thread.
+
+Availability is not a reservation: another sender or a policy change can consume
+the remaining capacity after claim. Final `/start` still performs the original
+atomic quota reservation and rejects an exhausted allowance before granting a permit.
+AUTONOMOUS legacy discovery retains its existing project/transport gates and current
+browser account behavior. Deploy the backend to enable this earlier CONTROLLED gate;
+no client upgrade, schema migration, new status, cursor or queue is required.

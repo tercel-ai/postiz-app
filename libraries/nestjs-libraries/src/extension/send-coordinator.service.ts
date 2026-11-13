@@ -391,8 +391,12 @@ export class SendCoordinatorService {
       if (!previous || previous.status !== 'RESERVED' || previous.leaseExpiresAt > now) return 'INTENT_EXECUTION_UNAVAILABLE';
     }
     try {
-      const next = await this.accountWriteNotBeforeIn(tx, intent, account, 0, now);
+      // OPTIONAL work uses the verified candidate actor before first-claim binding.
+      const candidate = { ...intent, canonicalAccountKey: account.canonicalAccountKey };
+      const plan = await this.quotas.resolve(tx, await this.admissionIntent(tx, candidate), account, 0, now);
+      const next = accountWriteNotBefore(account, plan.gapMs);
       if (next && next > now) return 'ACCOUNT_COOLDOWN_ACTIVE';
+      await this.quotas.assertAvailable(tx, org, plan.budgets, now);
     } catch (error) {
       if (error instanceof ForbiddenException || error instanceof BadRequestException)
         return /^[A-Z][A-Z0-9_]*$/.test(error.message) ? error.message : 'SEND_POLICY_BLOCKED';

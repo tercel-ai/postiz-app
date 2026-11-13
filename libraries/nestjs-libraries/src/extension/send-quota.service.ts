@@ -479,6 +479,50 @@ export class SendQuotaService {
     };
   }
 
+  private validateBudget(budget: SendBudget, now: Date) {
+    if (
+      !integer(budget.limit) ||
+      !integer(budget.units) ||
+      budget.units < 1 ||
+      budget.windowStart > now ||
+      budget.windowEnd <= now
+    )
+      throw new ForbiddenException('SEND_QUOTA_POLICY_INVALID');
+  }
+
+  private assertBudgetUsage(org: string, budget: SendBudget, bucket: {
+    organizationId: string; windowStart: Date; windowEnd: Date;
+    confirmedUnits: number; heldUnits: number;
+  }) {
+    if (
+      bucket.organizationId !== org ||
+      bucket.windowStart.getTime() !== budget.windowStart.getTime() ||
+      bucket.windowEnd.getTime() !== budget.windowEnd.getTime()
+    )
+      throw new ConflictException('QUOTA_BUCKET_CONFLICT');
+    if (
+      budget.enforce !== false &&
+      bucket.confirmedUnits + bucket.heldUnits + budget.units > budget.limit
+    )
+      throw new ForbiddenException({ message: 'SEND_QUOTA_EXHAUSTED', error: 'Forbidden', statusCode: 403, quota: {
+        scope: budget.scope, dimension: budget.dimension, limit: budget.limit,
+        confirmedUnits: bucket.confirmedUnits, heldUnits: bucket.heldUnits, requestedUnits: budget.units,
+        resetAt: budget.windowEnd.toISOString(), timezone: budget.timezone,
+      } });
+  }
+
+  /** Read the same ledger or historical baseline as reservation without allocating quota. */
+  async assertAvailable(tx: Prisma.TransactionClient, org: string, budgets: SendBudget[], now: Date) {
+    for (const budget of [...budgets].sort((a, b) => a.key.localeCompare(b.key))) {
+      this.validateBudget(budget, now);
+      const bucket = await tx.sendQuotaBucket.findUnique({ where: { id: budget.key } });
+      this.assertBudgetUsage(org, budget, bucket ?? {
+        organizationId: org, windowStart: budget.windowStart, windowEnd: budget.windowEnd,
+        ...await this.baseline(tx, org, budget),
+      });
+    }
+  }
+
   async reserve(
     tx: Prisma.TransactionClient,
     org: string,
@@ -490,14 +534,7 @@ export class SendQuotaService {
     for (const budget of [...budgets].sort((a, b) =>
       a.key.localeCompare(b.key)
     )) {
-      if (
-        !integer(budget.limit) ||
-        !integer(budget.units) ||
-        budget.units < 1 ||
-        budget.windowStart > now ||
-        budget.windowEnd <= now
-      )
-        throw new ForbiddenException('SEND_QUOTA_POLICY_INVALID');
+      this.validateBudget(budget, now);
       const prior = await tx.sendQuotaReservation.findUnique({
         where: {
           executionId_segmentIndex_bucketId: {
@@ -540,21 +577,7 @@ export class SendQuotaService {
             },
           });
       }
-      if (
-        bucket.organizationId !== org ||
-        bucket.windowStart.getTime() !== budget.windowStart.getTime() ||
-        bucket.windowEnd.getTime() !== budget.windowEnd.getTime()
-      )
-        throw new ConflictException('QUOTA_BUCKET_CONFLICT');
-      if (
-        budget.enforce !== false &&
-        bucket.confirmedUnits + bucket.heldUnits + budget.units > budget.limit
-      )
-        throw new ForbiddenException({ message: 'SEND_QUOTA_EXHAUSTED', error: 'Forbidden', statusCode: 403, quota: {
-          scope: budget.scope, dimension: budget.dimension, limit: budget.limit,
-          confirmedUnits: bucket.confirmedUnits, heldUnits: bucket.heldUnits, requestedUnits: budget.units,
-          resetAt: budget.windowEnd.toISOString(), timezone: budget.timezone,
-        } });
+      this.assertBudgetUsage(org, budget, bucket);
       const saved = await tx.sendQuotaBucket.updateMany({
         where: {
           id: bucket.id,
