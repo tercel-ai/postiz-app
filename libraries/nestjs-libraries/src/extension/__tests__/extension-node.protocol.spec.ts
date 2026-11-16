@@ -135,7 +135,7 @@ describe('extension session evidence', () => {
     expect(result.verifiedAt).toBeNull();
     expect(result.verificationStatus).toBe('UNKNOWN');
   });
-  it('accepts a new live observation and limits expiry by its original age', () => {
+  it('accepts fresh live identity without imposing a backend login lifetime', () => {
     const at = new Date(now.getTime() - 30_000).toISOString();
     const result = sessionDecision(
       { ...live, identityObservedAt: at },
@@ -144,9 +144,7 @@ describe('extension session evidence', () => {
       'account-1'
     );
     expect(result.verificationStatus).toBe('VERIFIED');
-    expect(result.verificationExpiresAt?.getTime()).toBe(
-      now.getTime() + 270_000
-    );
+    expect(result.verificationExpiresAt).toBeNull();
     expect(result.sessionRevision).toBe(1);
   });
   it('does not extend verification for replayed probes', () => {
@@ -271,4 +269,18 @@ describe('node credential and availability', () => {
       ])
     ).toBe('CAPABILITY_UNSUPPORTED');
   });
+});
+
+
+it.each(['x', 'reddit', 'linkedin', 'medium', 'quora', 'hackernews', 'devto'])('keeps %s identity valid across historical TTL expiry but still invalidates logout', platform => {
+  const previous = { ...sessionDecision({ ...live, platform }, null, now, 'account-1'),
+    verificationExpiresAt: new Date(now.getTime() - 1) };
+  const later = new Date(now.getTime() + 24 * 60 * 60_000);
+  const replay = sessionDecision({ ...live, platform, evidenceKind: 'CACHED' }, previous, later, 'account-1');
+  expect(replay.verificationStatus).toBe('VERIFIED');
+  expect(replay.verifiedAt).toEqual(previous.verifiedAt);
+  expect(replay.verificationExpiresAt).toBeNull();
+  const logout = sessionDecision({ ...live, platform, loggedIn: false }, replay, later, null);
+  expect(logout.verificationStatus).toBe('LOGGED_OUT');
+  expect(logout.integrationId).toBeNull();
 });

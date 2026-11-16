@@ -203,12 +203,13 @@ describe('node execution authentication and management', () => {
   it('never exposes hashes, salts, or registration receipts in node lists', async () => {
     const { db, service } = setup();
     db.extensionNode.findMany.mockResolvedValue([
-      { ...node, name: 'Office', browser: 'chrome', sessions: [] },
+      { ...node, name: 'Office', browser: 'chrome', sessions: [{ platform: 'quora', verificationStatus: 'VERIFIED', verificationExpiresAt: new Date(0) }] },
     ]);
     const result = await service.list('org', 'user');
     expect(result[0]).not.toHaveProperty('credentialHash');
     expect(result[0]).not.toHaveProperty('credentialSalt');
     expect(result[0]).not.toHaveProperty('registrationRequestHash');
+    expect(result[0].sessions[0]).toMatchObject({ verificationStatus: 'VERIFIED', verificationExpiresAt: null });
   });
 });
 

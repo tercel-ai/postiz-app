@@ -757,3 +757,18 @@ CONTROLLED account discovery and live verification belong to the extension accou
 AUTONOMOUS Post and Reply send as the browser's current social account, without probing or matching an editor-selected social identity. `handoverAccountVerification: false` is valid for CURRENT_SESSION browser handovers under the existing backend contract. Aisee owner checks, backend admission, mode transitions, pacing, receipt recovery and UNKNOWN protection are unchanged. Historical bound-account grants cannot be silently treated as CURRENT_SESSION. Existing API sending and unsupported company-handover boundaries remain.
 
 Deployment requires the backend advertising `cachedActorPreflight: true` before the updated extension. No website, schema or database migration is required; old clients remain compatible. These changes do not permit resending historical uncertain content.
+
+
+## Account continuity correction (2026-11-16)
+
+Seven-platform verified accounts no longer expire on the backend after five
+minutes. Historical `verificationExpiresAt` values are ignored and the compatible
+field returns null. Logout, actor/session changes and revocation still invalidate
+account evidence; sending permits, quotas and uncertain-result protection remain.
+Cookie checks/heartbeats use five-minute pacing and node-online tolerance is
+fifteen minutes. Ordinary maintenance remains passive unless renewal, recovery,
+account changes or an explicit check require live verification. CONTROLLED sends
+reuse unchanged acknowledged session bindings; AUTONOMOUS keeps the current
+browser account. Legacy STALE display text means verification is needed, not
+platform cookie expiry. Deploy the backend before the extension; no migration,
+new business state or API is needed. See the [complete contract](../../aisee-browser-extension/docs/account-bound-send-protocol.md#browser-login-continuity-without-a-verification-ttl-2026-11-16).

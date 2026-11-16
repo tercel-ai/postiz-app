@@ -216,7 +216,6 @@ describe('OPTIONAL initial current-session binding', () => {
   });
   it.each([
     'disabled-relation',
-    'expired-session',
     'wrong-actor',
     'unaudited',
     'owner-left',
@@ -226,8 +225,6 @@ describe('OPTIONAL initial current-session binding', () => {
     await f.enqueue();
     if (reason === 'disabled-relation')
       f.db.rows('integrationProject')[0].disabled = true;
-    if (reason === 'expired-session')
-      f.db.rows('extensionNodeSession')[0].verificationExpiresAt = now;
     if (reason === 'wrong-actor')
       f.db.rows('extensionNodeSession')[0].accountIdentity.id = '999';
     if (reason === 'unaudited')
@@ -362,4 +359,13 @@ it('keeps dispatch metadata through first actor binding while freezing pure acco
  expect(readPublishNowRequestedAt(f.db.rows('post')[0].sendTarget)).toEqual(now);
  expect(f.db.rows('sendIntent')[0].target).not.toHaveProperty('dispatch');
  expect(f.db.rows('sendExecution')[0].target).not.toHaveProperty('dispatch');
+});
+
+it.each(['POST', 'REPLY'] as const)('allows optional %s binding after the retired identity TTL', async action => {
+  const f = fixture(action);
+  f.seedActor();
+  await f.enqueue();
+  f.db.rows('extensionNodeSession')[0].verificationExpiresAt = new Date('2020-01-01T00:00:00Z');
+  expect((await f.claim()).items).toHaveLength(1);
+  expect(f.db.rows('sendIntent')[0].integrationId).not.toBeNull();
 });

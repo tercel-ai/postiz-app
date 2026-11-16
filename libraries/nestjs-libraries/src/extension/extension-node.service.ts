@@ -314,7 +314,6 @@ export class ExtensionNodeService {
           extensionNodeId: node.id,
           verificationStatus: 'VERIFIED',
           integrationId: { not: null },
-          verificationExpiresAt: { gt: new Date(now.getTime() + 60000) },
         },
         include: { integration: { select: accountIdentitySelect } },
       });
@@ -401,7 +400,7 @@ export class ExtensionNodeService {
         verificationStatus: s.verificationStatus,
         sessionRevision: s.sessionRevision,
         verifiedAt: s.verifiedAt,
-        verificationExpiresAt: s.verificationExpiresAt,
+        verificationExpiresAt: null as Date | null,
       })),
     }));
   }

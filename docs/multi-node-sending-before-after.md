@@ -560,3 +560,18 @@ The later atomic reservation remains mandatory for races and policy changes.
 Original claim receipts, uncertain results, quota holds and client activity/history
 remain intact. See [API ownership](multi-node-sending-api-ownership.md#quota-aware-controlled-claim-2026-11-13)
 for scope, replay and deployment details.
+
+
+## Account continuity correction (2026-11-16)
+
+Seven-platform verified accounts no longer expire on the backend after five
+minutes. Historical `verificationExpiresAt` values are ignored and the compatible
+field returns null. Logout, actor/session changes and revocation still invalidate
+account evidence; sending permits, quotas and uncertain-result protection remain.
+Cookie checks/heartbeats use five-minute pacing and node-online tolerance is
+fifteen minutes. Ordinary maintenance remains passive unless renewal, recovery,
+account changes or an explicit check require live verification. CONTROLLED sends
+reuse unchanged acknowledged session bindings; AUTONOMOUS keeps the current
+browser account. Legacy STALE display text means verification is needed, not
+platform cookie expiry. Deploy the backend before the extension; no migration,
+new business state or API is needed. See the [complete contract](../../aisee-browser-extension/docs/account-bound-send-protocol.md#browser-login-continuity-without-a-verification-ttl-2026-11-16).

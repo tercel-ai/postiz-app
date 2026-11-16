@@ -68,7 +68,7 @@ export async function claimControlledSend<T>(
     await sends.verifyPolicyIn(tx);
     const sessions = (await tx.extensionNodeSession.findMany({ where: {
       extensionNodeId: node.id, organizationId: auth.org, verificationStatus: 'VERIFIED',
-      verificationExpiresAt: { gt: new Date() }, integrationId: { not: null },
+      integrationId: { not: null },
     } })).filter((s) => {
       const capability = (node.capabilities as any)?.[s.platform];
       return capability?.strictAccountVerification === true &&
@@ -211,7 +211,7 @@ export async function claimControlledSend<T>(
             extensionNodeId: currentNode.id, organizationId: auth.org,
             platform: canonicalControlledPlatform(post.providerIdentifier!),
             ...(post.integrationId ? { integrationId: post.integrationId } : { actorKey: '' }),
-            verificationStatus: 'VERIFIED', verificationExpiresAt: { gt: new Date() },
+            verificationStatus: 'VERIFIED',
           } });
           if (!session) { reason = 'VERIFIED_SESSION_UNAVAILABLE'; return null; }
           const claimabilityReason = await sends.claimabilityReasonIn(tx, auth.org, post, session, body.action, new Date());

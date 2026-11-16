@@ -1,8 +1,9 @@
 import { createHash, createHmac } from 'node:crypto';
 import { stableSocialIdentity } from './social-account-identity.service';
 
-export const SESSION_TTL_MS = 300_000;
-export const NODE_ONLINE_MS = 180_000;
+// Freshness of a newly submitted identity observation, not a login lifetime.
+export const IDENTITY_OBSERVATION_MAX_AGE_MS = 300_000;
+export const NODE_ONLINE_MS = 15 * 60_000;
 export const ACCOUNT_BOUND_PROTOCOL = 'ACCOUNT_BOUND_V1';
 export const NODE_ID_PATTERN = /^[0-9a-f]{64}$/;
 export const LIVE_EVIDENCE = ['LIVE_COOKIE_ID', 'LIVE_PAGE_ACTOR'] as const;
@@ -126,7 +127,7 @@ export function sessionDecision(
   const fresh =
     Number.isFinite(at) &&
     at <= now.getTime() &&
-    now.getTime() - at < SESSION_TTL_MS;
+    now.getTime() - at < IDENTITY_OBSERVATION_MAX_AGE_MS;
   const duplicate = !!entry.probeId && entry.probeId === previous?.probeId;
   const sameAccount =
     matchedId != null && matchedId === previous?.integrationId;
@@ -147,8 +148,7 @@ export function sessionDecision(
     entry.evidenceKind !== 'SESSION_BOUND_ACTOR' &&
     (duplicate || entry.evidenceKind === 'CACHED') &&
     sameAccount &&
-    previous?.verificationStatus === 'VERIFIED' &&
-    (previous.verificationExpiresAt?.getTime() ?? 0) > now.getTime();
+    previous?.verificationStatus === 'VERIFIED';
   const verified =
     entry.loggedIn &&
     entry.verificationStatus === 'VERIFIED' &&
@@ -205,12 +205,9 @@ export function sessionDecision(
         : newEvidence
         ? now
         : previous?.verifiedAt ?? null,
-    verificationExpiresAt:
-      !entry.loggedIn || (switched && !verified)
-        ? null
-        : newEvidence || (verified && sessionContinuous && fresh && !duplicate)
-        ? new Date(at + SESSION_TTL_MS)
-        : previous?.verificationExpiresAt ?? null,
+    // A verified account remains bound until logout, actor/session change or revocation.
+    // Keep the nullable wire/database field for older clients; historical TTLs are ignored.
+    verificationExpiresAt: null,
   };
 }
 

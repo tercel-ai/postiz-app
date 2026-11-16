@@ -72,13 +72,13 @@ describe('shared Project, Post and Reply sending context', () => {
   it.each(['OFFLINE', 'STALE', 'LOGGED_OUT'])('keeps authorized accounts selectable while exposing %s node/session state', async status => {
     const { service, db } = setup();
     const reported = structuredClone(node);
-    if (status === 'OFFLINE') reported.lastSeenAt = new Date(now.getTime() - 600_000);
+    if (status === 'OFFLINE') reported.lastSeenAt = new Date(now.getTime() - 16 * 60_000);
     if (status === 'STALE') reported.sessions[0].verificationExpiresAt = new Date(now.getTime() - 1);
     if (status === 'LOGGED_OUT') reported.sessions[0].verificationStatus = status;
     db.extensionNode.findMany.mockResolvedValue([reported]);
     const result = await service.get('org', 'user', 'project');
     expect(result.accounts[0].actions.POST.canSelect).toBe(true);
-    expect(result.accounts[0].actions.POST.availability).toBe(status === 'OFFLINE' ? 'WAITING_FOR_TERMINAL' : 'SESSION_UNVERIFIED');
+    expect(result.accounts[0].actions.POST.availability).toBe(status === 'OFFLINE' ? 'WAITING_FOR_TERMINAL' : status === 'LOGGED_OUT' ? 'SESSION_UNVERIFIED' : 'AVAILABLE');
   });
   it('omits unidentified sessions from account choices', async () => {
     const { service, db } = setup();
@@ -156,7 +156,7 @@ describe('shared Project, Post and Reply sending context', () => {
     expect(context.accounts[0].terminals[0].sessionStatus).toBe(status);
     expect(JSON.stringify(views.get(account.id))).not.toContain('secret');
   });
-  it('shows expired identity evidence as stale in both APIs without renewing it from an online heartbeat', async () => {
+  it('ignores historical five-minute TTLs in both APIs without inventing a new live verification', async () => {
     const { service, db } = setup();
     const reported = structuredClone(node);
     reported.sessions[0].verificationExpiresAt = new Date(now.getTime() - 1);
@@ -166,9 +166,9 @@ describe('shared Project, Post and Reply sending context', () => {
     ]);
     const context = await service.get('org', 'user', 'project');
     const views = await new ExtensionNodeService(db as any).accountViews('org', 'user', [account]);
-    expect(views.get(account.id)).toMatchObject({ sendAvailability: 'SESSION_UNVERIFIED',
-      terminals: [{ connectionStatus: 'ONLINE', sessionStatus: 'STALE', verificationExpiresAt: reported.sessions[0].verificationExpiresAt }] });
-    expect(context.accounts[0].terminals[0]).toMatchObject({ connectionStatus: 'ONLINE', sessionStatus: 'STALE' });
+    expect(views.get(account.id)).toMatchObject({ sendAvailability: 'AVAILABLE',
+      terminals: [{ connectionStatus: 'ONLINE', sessionStatus: 'VERIFIED', verificationExpiresAt: null }] });
+    expect(context.accounts[0].terminals[0]).toMatchObject({ connectionStatus: 'ONLINE', sessionStatus: 'VERIFIED' });
   });
   it.each(['reddit', 'linkedin', 'medium', 'quora', 'hackernews', 'devto'])('includes %s platform actors in the same selection shape', async platform => {
     const { service, db } = setup();

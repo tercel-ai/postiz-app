@@ -21,12 +21,12 @@ afterEach(() => vi.useRealTimers());
 
 describe('cookie-bound actor continuity', () => {
   const previous = () => ({ ...sessionDecision(live, null, now, 'account'), accountIdentity: identity, lastVerifiedIdentity: identity });
-  it('renews an established identity after availability expires without changing the live proof or revision', () => {
+  it('keeps an established identity available without changing its live proof or revision', () => {
     const prior = previous();
     const next = sessionDecision(renewal, prior, later, 'account');
     expect(next).toMatchObject({ verificationStatus: 'VERIFIED', probeId: prior.probeId,
       verifiedAt: prior.verifiedAt, sessionRevision: prior.sessionRevision });
-    expect(next.verificationExpiresAt).toEqual(new Date(later.getTime() + 300_000));
+    expect(next.verificationExpiresAt).toBeNull();
   });
   it.each([
     ['first identity', null, renewal, 'account'],
@@ -85,7 +85,7 @@ describe('cookie-bound actor continuity', () => {
     expect(result.results[0]).toMatchObject({ integrationId: initial.results[0].integrationId, verificationStatus: 'VERIFIED' });
     expect(db.rows('integration')).toHaveLength(1);
     expect(db.rows('extensionNodeSession')[0]).toMatchObject({ probeId: prior.probeId, verifiedAt: prior.verifiedAt,
-      verificationExpiresAt: new Date(later.getTime() + 300_000), accountIdentity: { sessionBinding: binding } });
+      verificationExpiresAt: null, accountIdentity: { sessionBinding: binding } });
     await report({ ...actor, sessionBinding: undefined, probeId: 'fresh-page', identityObservedAt: later.toISOString() }, 3);
     expect(db.rows('extensionNodeSession')[0].lastVerifiedIdentity.sessionBinding).toBe(binding);
     const repeated: any = await report({ ...actor, evidenceKind: 'SESSION_BOUND_ACTOR', probeId: 'cookie-again', identityObservedAt: later.toISOString() }, 4);
@@ -121,7 +121,7 @@ describe('seven-platform availability continuity', () => {
     expect(db.rows('integration')).toHaveLength(1);
     const current = db.rows('extensionNodeSession')[0];
     expect(current).toMatchObject({ verifiedAt: prior.verifiedAt, probeId: prior.probeId, sessionRevision: prior.sessionRevision,
-      verificationExpiresAt: new Date(later.getTime() + 300_000) });
+      verificationExpiresAt: null });
     const { projectAccountTerminal, terminalAvailability } = await import('../extension-node.projection');
     const terminal = projectAccountTerminal(db.rows('extensionNode')[0] as any, current as any, later);
     expect(terminal).toMatchObject({ connectionStatus: 'ONLINE', sessionStatus: 'VERIFIED' });

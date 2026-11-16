@@ -27,15 +27,14 @@ export function nodeConnectionStatus(node: Pick<ExtensionNode, 'status' | 'lastS
 }
 
 export function projectAccountTerminal(node: TerminalNode, session: TerminalSession, now: Date) {
-  const sessionStatus = session.verificationStatus === 'VERIFIED' &&
-    (!session.verificationExpiresAt || session.verificationExpiresAt <= now) ? 'STALE' : session.verificationStatus;
+  const sessionStatus = session.verificationStatus;
   const capabilities = node.capabilities as Record<string, { post?: boolean; reply?: boolean; strictAccountVerification?: boolean }> | null;
   const capability = capabilities?.[session.platform];
   return {
     id: node.id, nodeId: node.nodeId, registeredByUserId: node.registeredByUserId,
     name: node.name, browser: node.browser, connectionStatus: nodeConnectionStatus(node, now), sessionStatus,
     lastSeenAt: node.lastSeenAt, observedAt: session.observedAt, receivedAt: session.receivedAt,
-    verifiedAt: session.verifiedAt, verificationExpiresAt: session.verificationExpiresAt,
+    verifiedAt: session.verifiedAt, verificationExpiresAt: null as Date | null,
     capabilities: { post: capability?.post === true && capability?.strictAccountVerification === true,
       reply: capability?.reply === true && capability?.strictAccountVerification === true },
   };

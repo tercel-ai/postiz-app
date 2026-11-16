@@ -272,8 +272,6 @@ export class SendExecutionService {
         !session ||
         session.verificationStatus !== 'VERIFIED' ||
         session.integrationId !== execution.integrationId ||
-        !session.verificationExpiresAt ||
-        session.verificationExpiresAt <= now ||
         !segment.challengeExpiresAt ||
         segment.challengeExpiresAt <= now ||
         !segment.probeId ||

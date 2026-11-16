@@ -533,3 +533,14 @@ it.each(['POST','REPLY'] as const)('retains a long native %s grant across actual
  expect(f.db.rows('sendOutcomeEvent').filter(event=>event.eventId===outcome.eventId)).toHaveLength(1);
  expect(f.db.rows('accountWriteState')[0].activeExecutionId).toBeNull();
 });
+
+
+it.each([null, new Date('2020-01-01T00:00:00Z')])('claims and authorizes a bound account with legacy verification expiry %s', async verificationExpiresAt => {
+  const f = fixture();
+  f.db.rows('extensionNodeSession')[0].verificationExpiresAt = verificationExpiresAt;
+  const item = await f.claim();
+  expect(item).toBeDefined();
+  await f.proof(item);
+  const permit = await f.executions.start(auth, item.executionId, 0, item.leaseToken);
+  expect(permit.granted).toBe(true);
+});

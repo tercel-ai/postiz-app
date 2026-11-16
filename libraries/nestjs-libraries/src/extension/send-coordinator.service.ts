@@ -353,7 +353,7 @@ export class SendCoordinatorService {
     if (!['QUEUED', 'RESERVED'].includes(intent.status)) return 'SEND_INTENT_NOT_QUEUED';
     if (intent.hasConfirmedSegments) return 'SEND_INTENT_ALREADY_PARTIALLY_CONFIRMED';
     if (action === 'REPLY' && await this.replyAlreadyPublishedIn(tx, post)) return 'CONTENT_ALREADY_SUBMITTED';
-    if (!session.integrationId || session.verificationStatus !== 'VERIFIED' || !session.verificationExpiresAt || session.verificationExpiresAt <= now) return 'SESSION_NOT_VERIFIED_OR_EXPIRED';
+    if (!session.integrationId || session.verificationStatus !== 'VERIFIED') return 'SESSION_NOT_VERIFIED_OR_EXPIRED';
     const owner = (intent.policySnapshot as { policyOwnerUserId?: string }).policyOwnerUserId;
     const member = owner ? await tx.userOrganization.findUnique({
       where: { userId_organizationId: { userId: owner, organizationId: org } },
@@ -1374,9 +1374,7 @@ export class SendCoordinatorService {
       !member ||
       member.disabled ||
       !session.integrationId ||
-      session.verificationStatus !== 'VERIFIED' ||
-      !session.verificationExpiresAt ||
-      session.verificationExpiresAt <= now
+      session.verificationStatus !== 'VERIFIED'
     )
       return null;
     let route;
