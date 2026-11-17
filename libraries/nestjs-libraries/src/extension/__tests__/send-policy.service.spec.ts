@@ -30,6 +30,7 @@ function setup() {
       create: vi.fn(),
     },
     $transaction: vi.fn(),
+    $queryRaw: vi.fn().mockResolvedValue([]),
   };
   db.$transaction.mockImplementation((work) => work(db));
   return { db, service: new SendPolicyService(db as any) };
@@ -165,24 +166,29 @@ describe('system account preselection policy', () => {
     expect(repo.set).toHaveBeenCalledTimes(1);
     expect(repo.delete).toHaveBeenCalledTimes(1);
   });
-  it('takes a policy coordination write lock without changing policy versions or audit timestamps', async () => {
+  it('takes a shared policy lock without writing versions or audit timestamps', async () => {
     const { service, db } = setup();
     const updatedAt = new Date('2026-10-15T00:00:00Z');
     const value = { mode: 'OPTIONAL', revision: 3, lastRequiredRevision: 2 };
     db.settings.findUnique.mockResolvedValue({ value, updatedAt });
     expect(await service.lockSystemInTransaction(db as any)).toEqual(value);
-    expect(db.settings.updateMany).toHaveBeenCalledWith({
-      where: { key: SEND_ACCOUNT_POLICY_KEY, value: { equals: value } },
-      data: { value, updatedAt },
-    });
-    db.settings.updateMany.mockResolvedValue({ count: 0 });
+    expect(db.$queryRaw.mock.calls[0][0].join('?')).toMatch(/FOR SHARE$/);
+    expect(db.$queryRaw.mock.calls[0][1]).toBe(SEND_ACCOUNT_POLICY_KEY);
+    expect(db.settings.updateMany).not.toHaveBeenCalled();
+    db.$queryRaw.mockRejectedValueOnce({ code: 'P2010', meta: { code: '40001' } });
     await expect(service.lockSystemInTransaction(db as any)).rejects.toThrow(
-      'SEND_POLICY_CHANGED'
+      'SEND_CONFIGURATION_CHANGED'
     );
     db.settings.findUnique.mockResolvedValue(null);
     expect(await service.lockSystemInTransaction(db as any)).toMatchObject({
       mode: 'REQUIRED',
     });
+  });
+  it('takes exclusive policy write intent before checking the saved revision', async () => {
+    const { service, db } = setup();
+    await service.saveSystem('admin', change('OPTIONAL'));
+    expect(db.$queryRaw.mock.calls[0][0].join('?')).toMatch(/FOR UPDATE$/);
+    expect(db.$queryRaw.mock.calls[0][1]).toBe(SEND_ACCOUNT_POLICY_KEY);
   });
   it('rejects corrupt tightening history and does not accept a task from an unseen future policy', async () => {
     const { service, db } = setup();

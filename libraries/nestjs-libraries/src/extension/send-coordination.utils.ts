@@ -102,6 +102,21 @@ export function postSendHash(post: {
     parentPostId: post.parentPostId,
   });
 }
+/** Lock a shared setting without creating a new row version for readers. */
+export async function lockSendSettingIn(tx: Prisma.TransactionClient, key: string, write = false): Promise<boolean> {
+  try {
+    const rows = write
+      ? await tx.$queryRaw<Array<{ key: string }>>`SELECT "key" FROM "Settings" WHERE "key" = ${key} FOR UPDATE`
+      : await tx.$queryRaw<Array<{ key: string }>>`SELECT "key" FROM "Settings" WHERE "key" = ${key} FOR SHARE`;
+    return rows.length > 0;
+  } catch (error) {
+    const raw = error as { code?: string; meta?: { code?: string } };
+    if (raw.code === 'P2010' && ['40001', '40P01'].includes(raw.meta?.code ?? ''))
+      throw Object.assign(new Error('SEND_CONFIGURATION_CHANGED'), { code: 'P2034', cause: error });
+    throw error;
+  }
+}
+
 export async function sendTransaction<T>(
   db: { $transaction: Function },
   work: (tx: Prisma.TransactionClient) => Promise<T>,

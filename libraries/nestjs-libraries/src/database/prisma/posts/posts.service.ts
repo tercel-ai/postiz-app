@@ -321,13 +321,26 @@ export class PostsService {
         // unconditional update by id, so writing unguarded would let a retried
         // activity turn an already-PUBLISHED post into an ERROR.
         if (scope?.state === 'QUEUE') {
+          const reason =
+            'Project is deactivated — publishing was skipped. Reactivate the project and reschedule this post.';
           await this._postRepository.changeState(
             id,
             'ERROR',
-            new Error(
-              'Project is deactivated — publishing was skipped. Reactivate the project and reschedule this post.'
-            )
+            new Error(reason)
           );
+          // Nothing else will ever report this send: the claim was refused, so
+          // the workflow returns without a publish attempt.
+          const post = await this._postRepository.getPostById(
+            id,
+            scope.organizationId
+          );
+          if (post) {
+            await this._notifyPostOutcome(
+              post,
+              AiseeNotificationEvent.POST_PUBLISH_FAILED,
+              { short_reason: reason }
+            );
+          }
         }
         return false;
       }
@@ -344,9 +357,26 @@ export class PostsService {
     // Pass the extension-routed providers so the sweep excludes both explicit
     // EXTENSION posts and legacy null-method posts on those integrations (they
     // wait for the browser, not Temporal — see repository method).
-    return this._postRepository.markStaleQueuePostsAsError(
-      this._integrationManager.extensionPublishProviderIds()
-    );
+    const { count, closedRoots } =
+      await this._postRepository.markStaleQueuePostsAsError(
+        this._integrationManager.extensionPublishProviderIds()
+      );
+
+    // The sweep is the only place these posts reach a terminal state: their
+    // workflow never started (or never got past QUEUE), so nothing else will
+    // tell the user they will never be published. Same event and dedup-key shape
+    // as the workflow's failure path, so a post that did report there is a no-op.
+    for (const root of closedRoots) {
+      await this._notifyPostOutcome(
+        root,
+        AiseeNotificationEvent.POST_PUBLISH_FAILED,
+        {
+          short_reason: 'It fell outside the recovery window.',
+        }
+      );
+    }
+
+    return count;
   }
 
   /**
@@ -1827,6 +1857,13 @@ export class PostsService {
           `startWorkflow: postId=${postId} has no bound integration and is not extension-publishable — marking ERROR`
         );
         await this.changeState(postId, 'ERROR', reason);
+        // No workflow starts from here, so this is the only report the user
+        // will get that the scheduled post was never sent.
+        await this._notifyPostOutcome(
+          post,
+          AiseeNotificationEvent.POST_PUBLISH_FAILED,
+          { short_reason: reason }
+        );
         return;
       }
       if (isExtension) {
@@ -2104,6 +2141,15 @@ export class PostsService {
             this.logger.warn(`createPost: postNow workflow threw but post already in ERROR state, postId=${posts[0].id}: ${(err as Error)?.message || err}`);
           } else {
             await this.changeState(posts[0].id, 'ERROR', `Workflow failed: ${(err as Error)?.message || err}`);
+            // The workflow never reached its own failure paths, so this is the
+            // only chance to tell the user the post-now request did not send.
+            if (failedPost) {
+              await this._notifyPostOutcome(
+                failedPost,
+                AiseeNotificationEvent.POST_PUBLISH_FAILED,
+                { short_reason: 'The publish workflow could not be started.' }
+              );
+            }
           }
         }
       } else if (body.type !== 'draft') {

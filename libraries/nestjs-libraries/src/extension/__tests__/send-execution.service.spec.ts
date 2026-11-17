@@ -100,6 +100,65 @@ function fixture() {
   return { ...setup, executions, claim, proof };
 }
 describe('authenticated extension send execution', () => {
+  it('waits for a contended mode lock before issuing one preflight challenge', async () => {
+    const f = fixture();
+    const item = await f.claim();
+    const lockedUntil = Date.now() + 60;
+    const assertControlled = f.service.assertControlledIn.bind(f.service);
+    const lock = vi.spyOn(f.service, 'assertControlledIn').mockImplementation(async (...args) => {
+      if (Date.now() < lockedUntil)
+        throw Object.assign(new Error('Mode setting write conflict'), { code: 'P2034' });
+      return assertControlled(...args);
+    });
+    const pending = f.executions.preflight(auth, item.executionId, 0, item.leaseToken);
+    const result = expect(pending).resolves.toHaveProperty('challenge');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lock).toHaveBeenCalledTimes(1);
+    expect(f.db.rows('sendSegment')[0].challengeIssuedAt).toBeFalsy();
+    await vi.advanceTimersByTimeAsync(1000);
+    await result;
+    expect(lock.mock.calls.length).toBeGreaterThan(1);
+    expect(f.db.rows('sendSegment')).toHaveLength(1);
+    expect(f.db.rows('sendSegment')[0].challengeIssuedAt).toBeInstanceOf(Date);
+    expect(f.db.rows('sendExecution')).toHaveLength(1);
+    expect(f.db.rows('sendExecution')[0].status).toBe('RESERVED');
+    expect(f.db.rows('sendSegment')[0].status).toBe('PENDING');
+    expect(f.db.rows('sendSegment')[0].authorizedAt).toBeFalsy();
+    expect(f.db.rows('sendQuotaReservation')).toHaveLength(0);
+  });
+
+  it('rechecks a mode change during preflight backoff without issuing a challenge', async () => {
+    const f = fixture();
+    const item = await f.claim();
+    const lock = vi.spyOn(f.service, 'assertControlledIn')
+      .mockRejectedValueOnce(Object.assign(new Error('Mode setting write conflict'), { code: 'P2034' }));
+    const pending = f.executions.preflight(auth, item.executionId, 0, item.leaseToken);
+    const result = expect(pending).rejects.toThrow('SEND_MODE_CONTROLLED_REQUIRED');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lock).toHaveBeenCalledTimes(1);
+    f.db.rows('settings').find(row => row.key === 'sending.organization_mode:org')!.value =
+      { mode: 'AUTONOMOUS', revision: 2 };
+    await vi.advanceTimersByTimeAsync(1000);
+    await result;
+    expect(lock).toHaveBeenCalledTimes(2);
+    expect(f.db.rows('sendSegment')[0].challengeIssuedAt).toBeFalsy();
+    expect(f.db.rows('sendSegment')[0].authorizedAt).toBeFalsy();
+  });
+
+  it('keeps preflight conflict retries bounded without authorizing a send', async () => {
+    const f = fixture();
+    const item = await f.claim();
+    const conflict = Object.assign(new Error('Mode setting write conflict'), { code: 'P2034' });
+    const lock = vi.spyOn(f.service, 'assertControlledIn').mockRejectedValue(conflict);
+    const result = expect(f.executions.preflight(auth, item.executionId, 0, item.leaseToken))
+      .rejects.toBe(conflict);
+    await vi.advanceTimersByTimeAsync(1000);
+    await result;
+    expect(lock).toHaveBeenCalledTimes(4);
+    expect(f.db.rows('sendSegment')[0].challengeIssuedAt).toBeFalsy();
+    expect(f.db.rows('sendQuotaReservation')).toHaveLength(0);
+  });
+
   it('replays the same claim lease without claiming another content unit', async () => {
     const { claim, executions, create, db } = fixture();
     const item = await claim();

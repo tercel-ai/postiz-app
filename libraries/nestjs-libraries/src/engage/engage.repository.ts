@@ -2989,20 +2989,23 @@ export class EngageRepository {
       oppIds.length
         ? this._sentReply.model.engageSentReply
             .findMany({
-              // Exclude unsent DRAFT working-copies: a saved draft must NOT make the
-              // signal feed show "replied / link pending" for an opportunity the user
-              // hasn't actually replied to yet.
+              // Read drafts for resuming editing, keeping their identity separate
+              // from publication/link tracking below.
               where: {
                 organizationId,
                 projectId: dto.projectId ?? null,
                 opportunityId: { in: oppIds },
-                post: { state: { not: 'DRAFT' } },
+                OR: [
+                  // Platform removal never erases an existing publication/link.
+                  { post: { state: { not: 'DRAFT' } } },
+                  { removedAt: null, post: { state: 'DRAFT', deletedAt: null } },
+                ],
               },
               orderBy: { createdAt: 'desc' },
               select: {
                 id: true,
                 opportunityId: true,
-                post: { select: { releaseURL: true } },
+                post: { select: { releaseURL: true, state: true } },
               },
             })
             .then((r) => r ?? [])
@@ -3037,7 +3040,12 @@ export class EngageRepository {
       string,
       { id: string; replyLink: string | null }
     >();
+    const draftByOpp = new Map<string, string>();
     for (const rep of replies) {
+      if (rep.post?.state === 'DRAFT') {
+        if (!draftByOpp.has(rep.opportunityId)) draftByOpp.set(rep.opportunityId, rep.id);
+        continue;
+      }
       if (!latestByOpp.has(rep.opportunityId)) {
         latestByOpp.set(rep.opportunityId, {
           id: rep.id,
@@ -3072,6 +3080,7 @@ export class EngageRepository {
       return {
         ...merged,
         sentReplyId: rep?.id ?? null,
+        draftReplyId: draftByOpp.get(merged.id) ?? null,
         replyLink: rep?.replyLink ?? null,
         channelAvatar: avatarFor(merged.platform, merged.channelId),
       };
@@ -3625,7 +3634,7 @@ export class EngageRepository {
     reason: string
   ): Promise<void> {
     await sendTransaction(this._tx.model, async (tx) => {
-      if (this._sendModes) await this._sendModes.lockIn(tx, organizationId);
+      if (this._sendModes) await this._sendModes.lockModeIn(tx, organizationId);
       const reply = await tx.engageSentReply.findFirst({
         where: { id: sentReplyId, organizationId },
         select: { postId: true, opportunityId: true, projectId: true },
@@ -3939,7 +3948,7 @@ export class EngageRepository {
   ): Promise<void> {
     if (this._sendModes && !tx) {
       return sendTransaction(this._tx.model, async client => {
-        await this._sendModes!.lockIn(client, organizationId);
+        await this._sendModes!.lockModeIn(client, organizationId);
         return this._deleteDraftsForOpportunity(organizationId, opportunityId, projectId, leaseCutoff, client);
       });
     }
@@ -4014,7 +4023,7 @@ export class EngageRepository {
       if (this._sendModes) {
         if (data.coordinatedAutomatic) await this._sendModes.assertControlledIn(tx, organizationId);
         else if (state === 'QUEUE') await this._sendModes.assertAutonomousIn(tx, organizationId);
-        else await this._sendModes.lockIn(tx, organizationId);
+        else await this._sendModes.lockModeIn(tx, organizationId);
       }
       // Scoped to the state being written: re-saving a human's draft updates
       // that draft, and the driver's own upsert can only ever meet its own
@@ -4269,7 +4278,7 @@ export class EngageRepository {
         const post = await tx.post.findUnique({ where: { id: postId },
           select: { organizationId: true, sendIntentId: true } });
         if (!post) return;
-        await this._sendModes!.lockIn(tx, post.organizationId);
+        await this._sendModes!.lockModeIn(tx, post.organizationId);
         if (post.sendIntentId) throw new ConflictException('SEND_INTENT_IMMUTABLE');
         if ((await this._sendModes!.activeLegacyPostIdsIn(tx, post.organizationId)).includes(postId))
           throw new ConflictException('SEND_MODE_TRANSITION_PENDING');
@@ -4550,55 +4559,59 @@ export class EngageRepository {
 
     const merged = this._merge(row);
 
-    if (row.status === 'SCHEDULED' || row.status === 'REPLIED') {
-      // An opportunity may now carry several replies (batch send); surface the
-      // most recent for the detail panel.
-      const sentReply = await this._sentReply.model.engageSentReply.findFirst({
-        where: {
-          organizationId,
-          projectId: projectId ?? null,
-          opportunityId: id,
-        },
-        orderBy: { createdAt: 'desc' },
-        include: {
-          post: {
-            select: {
-              id: true,
-              content: true,
-              state: true,
-              releaseURL: true,
-              publishDate: true,
-              impressions: true,
-              trafficScore: true,
-              analytics: true,
-              lastMetricsFetchAt: true,
-              integration: {
-                select: {
-                  id: true,
-                  name: true,
-                  providerIdentifier: true,
-                  picture: true,
-                },
+    if (!['NEW', 'SCHEDULED', 'REPLIED'].includes(row.status))
+      return { ...merged, sentReply: null };
+
+    // An opportunity may now carry several replies (batch send); surface the
+    // most recent for the detail panel.
+    const sentReply = await this._sentReply.model.engageSentReply.findFirst({
+      where: {
+        organizationId,
+        projectId: projectId ?? null,
+        opportunityId: id,
+        ...(row.status === 'NEW'
+          ? { removedAt: null, post: { deletedAt: null, state: 'DRAFT' as const } }
+          : { post: { state: { not: 'DRAFT' as const } } }),
+      },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        post: {
+          select: {
+            id: true,
+            content: true,
+            state: true,
+            executionProtocol: true,
+            sendIntentId: true,
+            releaseURL: true,
+            publishDate: true,
+            impressions: true,
+            trafficScore: true,
+            analytics: true,
+            lastMetricsFetchAt: true,
+            integration: {
+              select: {
+                id: true,
+                name: true,
+                providerIdentifier: true,
+                picture: true,
               },
             },
           },
-          opportunity: {
-            select: {
-              id: true,
-              platform: true,
-              externalPostUrl: true,
-              title: true,
-              postContent: true,
-              authorUsername: true,
-              authorDisplayName: true,
-            },
+        },
+        opportunity: {
+          select: {
+            id: true,
+            platform: true,
+            externalPostUrl: true,
+            title: true,
+            postContent: true,
+            authorUsername: true,
+            authorDisplayName: true,
           },
         },
-      });
-      return { ...merged, sentReply };
-    }
-
-    return { ...merged, sentReply: null };
+      },
+    });
+    return { ...merged, sentReply };
   }
 
   async getOpportunityForReply(
@@ -5462,7 +5475,7 @@ export class EngageRepository {
       const eligiblePostIds: string[] = [];
       for (const organizationId of [...byOrganization.keys()].sort()) {
         if (this._sendModes) {
-          const mode = await this._sendModes.lockIn(tx, organizationId);
+          const mode = await this._sendModes.lockModeIn(tx, organizationId);
           // Repairing a shared opportunity does not authorize new legacy sends.
           if (mode.mode !== 'AUTONOMOUS' || !mode.autonomousAllowed || mode.transition) continue;
         }
@@ -6538,7 +6551,7 @@ export class EngageRepository {
   ) {
     return sendTransaction(this._tx.model, async (tx) => {
       // Admission and legacy claims take this same lock before capturing content.
-      if (this._sendModes) await this._sendModes.lockIn(tx, organizationId);
+      if (this._sendModes) await this._sendModes.lockModeIn(tx, organizationId);
       const reply = await tx.engageSentReply.findFirst({
         where: { id, organizationId, removedAt: null }, include: { post: true },
       });

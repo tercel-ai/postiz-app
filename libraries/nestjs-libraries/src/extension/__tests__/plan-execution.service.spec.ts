@@ -68,7 +68,7 @@ function setup() {
     db as any,
     bindings as any,
     projects as any,
-    { lockIn: vi.fn(async () => ({ mode: process.env.ACCOUNT_BOUND_SENDING_ENABLED === 'true' ? 'CONTROLLED' : 'AUTONOMOUS' })) } as any
+    { lockModeIn: vi.fn(async () => ({ mode: process.env.ACCOUNT_BOUND_SENDING_ENABLED === 'true' ? 'CONTROLLED' : 'AUTONOMOUS' })) } as any
   );
   return { db, bindings, projects, service };
 }

@@ -115,10 +115,14 @@ export function memorySendDatabase() {
     {
       rows,
       identitySchema: { legacyKey: true },
-      $queryRaw: async () => [
-        {columns:['organizationId','providerIdentifier','identityNamespace','internalId']},
-        ...(db.identitySchema.legacyKey ? [{columns:['organizationId','internalId']}] : []),
-      ],
+      $queryRaw: async (query: TemplateStringsArray, ...values: unknown[]) => {
+        if (query.join('?').includes('FROM "Settings"'))
+          return rows('settings').filter(row => row.key === values[0]).map(row => ({ key: row.key }));
+        return [
+          {columns:['organizationId','providerIdentifier','identityNamespace','internalId']},
+          ...(db.identitySchema.legacyKey ? [{columns:['organizationId','internalId']}] : []),
+        ];
+      },
       seed: (name: string, data: any) =>
         rows(name).push({ ...defaults(), ...structuredClone(data) }),
       $transaction: async (work: Function) => {

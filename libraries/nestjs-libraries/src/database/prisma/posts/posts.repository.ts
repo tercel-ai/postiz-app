@@ -891,7 +891,7 @@ export class PostsRepository {
     if (!organizationId) throw new BadRequestException('SEND_ORGANIZATION_REQUIRED');
     if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
     return sendTransaction(this._tx.model, async client => {
-      const state = await this._sendModes!.lockIn(client, organizationId);
+      const state = await this._sendModes!.lockModeIn(client, organizationId);
       if (!state.transition && !state.legacyDrain) return remove(client);
       const active = await this._sendModes!.activeLegacyPostIdsIn(client, organizationId);
       if (preservePendingQueue) {
@@ -1282,7 +1282,7 @@ export class PostsRepository {
       return sendTransaction(this._tx.model, async client => {
         const post = await client.post.findUnique({ where: { id }, select: { organizationId: true } });
         if (!post) return;
-        const mode = await this._sendModes!.lockIn(client, post.organizationId);
+        const mode = await this._sendModes!.lockModeIn(client, post.organizationId);
         if (mode.configuredMode === 'CONTROLLED' || mode.transition) return;
         return this.resetClaimForPost(id, client);
       });
@@ -1361,7 +1361,19 @@ export class PostsRepository {
 
   async markStaleQueuePostsAsError(
     extensionProviderIds: string[] = []
-  ): Promise<number> {
+  ): Promise<{
+    count: number;
+    // Roots this sweep actually closed. They are the only rows worth a
+    // notification: a thread's children ride along with their root and were
+    // never independently notified either.
+    closedRoots: Array<{
+      id: string;
+      organizationId: string;
+      projectId: string | null;
+      providerIdentifier: string | null;
+      integration: { providerIdentifier: string | null } | null;
+    }>;
+  }> {
     const cutoff = dayjs.utc().subtract(7, 'day').toDate();
     // Extension-routed posts must NEVER be swept: they legitimately sit in QUEUE
     // until the user's browser comes online (a pull executor, not Temporal), so a
@@ -1405,10 +1417,11 @@ export class PostsRepository {
       ...excludeWaitingOnBrowser,
     };
 
+    const staleError =
+      'Post was never published — it fell outside the recovery window. Please reschedule.';
     const errorData: Prisma.PostUpdateManyMutationInput = {
       state: State.ERROR,
-      error:
-        'Post was never published — it fell outside the recovery window. Please reschedule.',
+      error: staleError,
       releaseId: null,
     };
 
@@ -1417,9 +1430,16 @@ export class PostsRepository {
     // children that have to follow.
     const staleRoots = await this._post.model.post.findMany({
       where: staleWhere,
-      select: { id: true, group: true, organizationId: true },
+      select: {
+        id: true,
+        group: true,
+        organizationId: true,
+        projectId: true,
+        providerIdentifier: true,
+        integration: { select: { providerIdentifier: true } },
+      },
     });
-    if (!staleRoots.length) return 0;
+    if (!staleRoots.length) return { count: 0, closedRoots: [] };
 
     // The predicate is re-asserted rather than trusting the ids alone: this read
     // and the write below are not one atomic statement (they used to be a single
@@ -1466,7 +1486,26 @@ export class PostsRepository {
       data: errorData,
     });
 
-    return result.count + children.count;
+    // Report only the roots this pass actually closed. The predicate was
+    // re-asserted above, so a root that published between the read and the write
+    // stayed PUBLISHED and must not be announced as a failure; matching on the
+    // sweep's own error text excludes rows another cause already closed.
+    const closedRoots = await this._post.model.post.findMany({
+      where: {
+        id: { in: staleRoots.map((r) => r.id) },
+        state: State.ERROR,
+        error: staleError,
+      },
+      select: {
+        id: true,
+        organizationId: true,
+        projectId: true,
+        providerIdentifier: true,
+        integration: { select: { providerIdentifier: true } },
+      },
+    });
+
+    return { count: result.count + children.count, closedRoots };
   }
 
   /**
@@ -2274,7 +2313,7 @@ export class PostsRepository {
         ? await this._sendModes.assertControlledIn(tx, orgId)
         : state !== 'draft' || admissionMode === 'AUTONOMOUS'
           ? await this._sendModes.assertAutonomousIn(tx, orgId)
-          : await this._sendModes.lockIn(tx, orgId);
+          : await this._sendModes.lockModeIn(tx, orgId);
       if (!admissionMode && state === 'draft') {
         restrictToUnclaimedDrafts = !!(mode.transition || mode.legacyDrain);
       }

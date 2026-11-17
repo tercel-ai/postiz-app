@@ -98,6 +98,7 @@ function createServiceMocks() {
     postOverageService: {
       deductIfOverage: vi.fn().mockResolvedValue(undefined),
     },
+    notifications: { notify: vi.fn().mockResolvedValue(true) },
   };
 }
 
@@ -793,9 +794,15 @@ describe('PostsRepository.markStaleQueuePostsAsError', () => {
       .mockResolvedValueOnce({ count: 3 }) // roots
       .mockResolvedValueOnce({ count: 0 }); // children
 
-    const count = await repo.markStaleQueuePostsAsError();
+    const { count, closedRoots } = await repo.markStaleQueuePostsAsError();
 
     expect(count).toBe(3);
+    // The notification path announces only roots the re-asserted write closed.
+    expect(closedRoots).toEqual([
+      { id: 'root-1', group: 'g1', organizationId: 'org-1' },
+      { id: 'root-2', group: 'g2', organizationId: 'org-1' },
+      { id: 'root-3', group: 'g3', organizationId: 'org-1' },
+    ]);
     expect(selectCall().where.state).toBe('QUEUE');
     expect(selectCall().where.intervalInDays).toBe(null);
     expect(selectCall().where.parentPostId).toBe(null);
@@ -838,7 +845,7 @@ describe('PostsRepository.markStaleQueuePostsAsError', () => {
       .mockResolvedValueOnce({ count: 2 }) // roots
       .mockResolvedValueOnce({ count: 3 }); // children
 
-    const count = await repo.markStaleQueuePostsAsError();
+    const { count } = await repo.markStaleQueuePostsAsError();
 
     // Both halves of the thread are reported, not just the roots.
     expect(count).toBe(5);
@@ -858,9 +865,10 @@ describe('PostsRepository.markStaleQueuePostsAsError', () => {
   it('does not touch anything when no root is stale', async () => {
     mockPrismaPost.findMany.mockResolvedValue([]);
 
-    const count = await repo.markStaleQueuePostsAsError();
+    const { count, closedRoots } = await repo.markStaleQueuePostsAsError();
 
     expect(count).toBe(0);
+    expect(closedRoots).toEqual([]);
     expect(mockPrismaPost.updateMany).not.toHaveBeenCalled();
   });
 
@@ -1141,6 +1149,9 @@ describe('PostsService.startWorkflow — no bound integration', () => {
       mocks.refreshIntegrationService as any,
       mocks.postOverageService as any,
       {} as any,
+      undefined,
+      undefined,
+      mocks.notifications as any,
     );
   });
 
@@ -1160,6 +1171,15 @@ describe('PostsService.startWorkflow — no bound integration', () => {
       'ERROR',
       expect.stringContaining('No connected account'),
       undefined,
+    );
+    // No workflow starts here, so this emit is the user's only signal that the
+    // scheduled post will never be sent.
+    expect(mocks.notifications.notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        organizationId: 'org-1',
+        eventKey: 'post.publish_failed',
+        dedupKey: 'post.publish_failed:post-1',
+      })
     );
   });
 

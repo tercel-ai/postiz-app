@@ -21,6 +21,12 @@ import { AccountWriteState, Prisma, SendExecution, SendIntent, SendSegment } fro
 import { randomBytes, randomUUID } from 'node:crypto';
 import { PrismaService } from '../database/prisma/prisma.service';
 import { ProjectValidationService } from '../projects/project-validation.service';
+import {
+  AiseeNotificationChannel,
+  AiseeNotificationClient,
+  AiseeNotificationEvent,
+} from '@gitroom/nestjs-libraries/notifications/aisee-notification.client';
+import { capitalize } from 'lodash';
 import { SendBindingService } from './send-binding.service';
 import { SendPolicyService } from './send-policy.service';
 import { SendQuotaService } from './send-quota.service';
@@ -89,7 +95,8 @@ export class SendCoordinatorService {
     private readonly policies: SendPolicyService,
     private readonly projects: ProjectValidationService,
     private readonly quotas: SendQuotaService,
-    private readonly modes: SendModeService = new SendModeService(db)
+    private readonly modes: SendModeService = new SendModeService(db),
+    private readonly notifications?: AiseeNotificationClient
   ) {}
 
   async enabled(org: string) {
@@ -2021,7 +2028,142 @@ export class SendCoordinatorService {
     });
     if (result.conflict)
       reject('SEND_OUTCOME_CONFLICT_REQUIRES_RECONCILIATION');
+    await this.notifySendOutcome(org, executionId);
     return result;
+  }
+
+  /**
+   * Announce the terminal state of the post/reply an execution belongs to.
+   *
+   * Must run AFTER the transaction that recorded the outcome has committed:
+   * emitting inside it would leave a notification behind on rollback. The state
+   * is read back from the database rather than derived from the outcome, so a
+   * replay, a late segment report or a repeated removal report collapses into the
+   * same fact. Event keys and dedup keys deliberately match the legacy publish
+   * paths — the two pipelines never publish the same row, and matching keys make
+   * a double report a no-op instead of a duplicate notification.
+   *
+   * Only the chain's root post speaks: follow-up thread segments are not separate
+   * user actions, exactly as in the workflow's `i === 0` guard.
+   */
+  async notifySendOutcome(organizationId: string, executionId: string): Promise<void> {
+    const notifications = this.notifications;
+    if (!notifications) return;
+    try {
+      const execution = await this.db.sendExecution.findFirst({
+        where: { id: executionId, organizationId },
+        select: { sendIntentId: true },
+      });
+      if (!execution) return;
+      const intent = await this.db.sendIntent.findFirst({
+        where: { id: execution.sendIntentId, organizationId },
+        select: { rootPostId: true, action: true },
+      });
+      if (!intent) return;
+      const post = await this.db.post.findFirst({
+        where: { id: intent.rootPostId, organizationId },
+        select: {
+          id: true,
+          state: true,
+          removedAt: true,
+          releaseURL: true,
+          projectId: true,
+          providerIdentifier: true,
+          integration: { select: { providerIdentifier: true } },
+        },
+      });
+      if (!post) return;
+
+      const platform = capitalize(
+        post.integration?.providerIdentifier || post.providerIdentifier || ''
+      );
+      const projectId = post.projectId || undefined;
+
+      if (intent.action === 'REPLY') {
+        const reply = await this.db.engageSentReply.findUnique({
+          where: { postId: post.id },
+          select: { id: true },
+        });
+        if (!reply) return;
+        const data = {
+          platform,
+          sent_reply_id: reply.id,
+          project_id: projectId,
+          external_url: post.releaseURL || undefined,
+        };
+        if (post.removedAt) {
+          await notifications.notify({
+            organizationId,
+            eventKey: AiseeNotificationEvent.ENGAGE_REPLY_REMOVED,
+            dedupKey: `engage.reply_removed:${reply.id}`,
+            data,
+            channel: AiseeNotificationChannel.ENGAGE,
+          });
+        }
+        if (post.state === 'PUBLISHED') {
+          await notifications.notify({
+            organizationId,
+            eventKey: AiseeNotificationEvent.ENGAGE_REPLIED,
+            dedupKey: `engage.replied:${reply.id}`,
+            data,
+            channel: AiseeNotificationChannel.ENGAGE,
+          });
+        } else if (post.state === 'ERROR') {
+          await notifications.notify({
+            organizationId,
+            eventKey: AiseeNotificationEvent.ENGAGE_REPLY_FAILED,
+            dedupKey: `engage.reply_failed:${reply.id}`,
+            data,
+            channel: AiseeNotificationChannel.ENGAGE,
+          });
+        }
+        return;
+      }
+
+      const data = {
+        platform,
+        post_id: post.id,
+        project_id: projectId,
+        external_url: post.releaseURL || undefined,
+      };
+      if (post.removedAt) {
+        await notifications.notify({
+          organizationId,
+          eventKey: AiseeNotificationEvent.POST_REMOVED,
+          dedupKey: `post.removed:${post.id}`,
+          data,
+        });
+      }
+      if (post.state === 'PUBLISHED') {
+        await notifications.notify({
+          organizationId,
+          eventKey: AiseeNotificationEvent.POST_PUBLISHED,
+          dedupKey: `post.published:${post.id}`,
+          data,
+        });
+      }
+      // A thread can end half-published: the anchor is live and a later segment
+      // was never submitted. That is two facts, as on the legacy path, so both
+      // events go out — each keyed on the anchor.
+      const segments = await this.db.sendSegment.findMany({
+        where: { executionId },
+        select: { status: true },
+      });
+      if (post.state === 'ERROR' || segments.some((segment) => segment.status === 'NOT_SUBMITTED')) {
+        await notifications.notify({
+          organizationId,
+          eventKey: AiseeNotificationEvent.POST_PUBLISH_FAILED,
+          dedupKey: `post.publish_failed:${post.id}`,
+          data,
+        });
+      }
+    } catch (error) {
+      // A notification is a side channel: the send outcome is already committed.
+      this.logger.warn(
+        `notifySendOutcome failed for execution=${executionId}: ` +
+          `${(error as Error)?.message || error}`
+      );
+    }
   }
 
   async outcomeIn(
@@ -2441,7 +2583,7 @@ export class SendCoordinatorService {
     sentReplyId: string,
     body: SendOutcome & { expectedResolutionRevision: number; text: string; targetUrl: string; reviewedNotSent?: boolean }
   ) {
-    return sendTransaction(this.db, async (tx) => {
+    const outcome = await sendTransaction(this.db, async (tx) => {
       await this.assertMember(tx, org, user);
       const execution = await this.execution(tx, org, executionId);
       const intent = await tx.sendIntent.findFirst({ where: { id: execution.sendIntentId, organizationId: org } });
@@ -2541,6 +2683,8 @@ export class SendCoordinatorService {
       await tx.sendExecution.update({ where: { id: executionId }, data: { resolutionRevision: { increment: 1 } } });
       return body.status === 'confirmed' ? { status: 'confirmed' as const, url: body.url! } : { status: 'retryable' as const };
     });
+    await this.notifySendOutcome(org, executionId);
+    return outcome;
   }
 
   /** Resolve the exact frozen original post chain; never grant general execution access. */
@@ -2721,7 +2865,7 @@ export class SendCoordinatorService {
     if (body.reviewedNotSent !== true || body.draftsClosed !== true)
       reject('SEND_POST_ABSENCE_REVIEW_REQUIRED');
     if (!body.eventId?.trim() || body.eventId.length > 128) throw new BadRequestException('INVALID_SEND_OUTCOME');
-    return sendTransaction(this.db, async tx => {
+    const outcome = await sendTransaction(this.db, async tx => {
       const { execution, intent, segments, segment } = await this.sendReviewScope(tx, org, user, executionId, rootPostId);
       if (segments.length !== 1) reject('SEND_POST_REVIEW_NOT_SETTLED');
       const event: SendOutcome = {
@@ -2746,6 +2890,8 @@ export class SendCoordinatorService {
       await tx.sendExecution.update({ where: { id: executionId }, data: { resolutionRevision: { increment: 1 } } });
       return { status: 'retryable' as const };
     });
+    await this.notifySendOutcome(org, executionId);
+    return outcome;
   }
 
   async reconciliationView(
@@ -2873,6 +3019,7 @@ export class SendCoordinatorService {
     });
     if (result.conflict)
       reject('SEND_OUTCOME_CONFLICT_REQUIRES_RECONCILIATION');
+    await this.notifySendOutcome(org, executionId);
     return result;
   }
 

@@ -59,7 +59,7 @@ flowchart TD
 
 模式切换是管理员操作，不由“项目没配置账号”、注册失败、网络错误或节点离线触发。
 
-模式变更、任务入队、节点领取与提交授权共享组织模式事务锁，并使用现有 Serializable 重试机制。系统能力修改与授权共享系统设置锁。读取模式之后再在另一个事务无条件授权，不能满足并发保护要求。
+模式变更、任务入队、节点领取与提交授权共享组织模式事务锁，并使用现有 Serializable 重试机制。正常校验对系统和组织 Settings 行取得 `FOR SHARE`；组织配置修改按“系统 SHARE → 组织 UPDATE”顺序取得锁，系统能力修改取得系统 UPDATE。只读校验不再把原值写回作为锁；不同发送的共享锁可以共存，配置修改仍与读者互斥。事务快照早于真实配置修改时，PostgreSQL 拒绝过期行锁，整笔事务重新读取并校验。读取模式之后再在另一个事务无条件授权，不能满足并发保护要求。
 
 模式修订也参与受控配额桶标识。自主期间可能产生新的 PUBLISHED 记录，重新开启受控时必须重新建立同一时间窗的配额基线，同时计入此前受控确认记录、自主发送记录和仍需保护的历史预留。切换模式、反复保存同一模式都不会重置当天额度；历史预留仍按原账本幂等结算。自主发送若没有可确认的账号归属，其已发送记录会保守计入相同平台的账号配额，不能把身份不明确当作零用量。
 
@@ -832,3 +832,116 @@ Existing APIs and response fields remain unchanged; heldUnits remains diagnostic
 Deploy the backend quota change. No schema migration, data deletion, new queue,
 new API or bulk historical retry is required. Website and extension use the
 existing server decisions; no new client capability is needed for this policy.
+
+## Mode-lock concurrency verification (2026-11-17)
+
+The mode guard no longer updates Settings just to lock it. Normal CONTROLLED
+guards read locked mode/transition metadata without the dashboard's cross-account
+blocker counts. Historical handovers and autonomous eligibility retain their full
+checks. Transition/reallocation maintenance skips identical marker writes.
+Raw-query SQLSTATE 40001/40P01 errors are normalized to the existing P2034
+transaction retry path. Account, content and quota conflicts remain real safety
+constraints, not a promise of unlimited concurrency.
+
+Unit tests cover guard queries, metadata write intent, missing-row sentinels,
+mode changes, maintenance idempotence and raw-query conflict handling. The opt-in
+`send-mode-locks.postgres.spec.ts` additionally exercises actual PostgreSQL row
+locks, simultaneous guards, cross-organization independence and a stale snapshot
+after a system disable. A control test installs the exact former no-op update
+algorithm and reproduces cross-organization P2034 contention on real PostgreSQL.
+Lock waits are observed for the test connection through `pg_locks`, rather than
+inferred solely from a timing delay. These opt-in tests skip without an
+explicit `SEND_MODE_LOCK_TEST_URL` and reject ordinary application database names.
+
+After explicit authorization to create/drop a separate localhost database (an
+exception to AGENTS.md's direct-SQL/database-name restrictions), use Node 22:
+
+```sh
+node scripts/verify-send-mode-locks.cjs
+```
+
+The runner reads only server credentials from `.env`, requires loopback port
+5432, connects to the `postgres` maintenance database, and creates a unique
+`aisee_mode_lock_test_<uuid>` database. It passes only that generated database to
+the tests and drops it in `finally`. It never opens `postiz_dev`, applies the
+application schema/migrations, changes `.env`, or calls a social platform. A
+separate container is unnecessary. The tests additionally verify their actual
+database name and refuse existing test tables before writing.
+
+On 2026-11-17 all eight tests passed against the user-authorized local PostgreSQL
+server. The old algorithm reproduced P2034; the corrected guard allowed eight
+independent transactions while another transaction remained open, preserved
+organization-switch exclusion without blocking other organizations, and rejected
+stale authorization after a system disable. Policy readers also coexisted without
+rewriting audit timestamps; real policy saves waited behind readers; an old
+binding snapshot retried after REQUIRED then OPTIONAL and retained the tightening
+barrier. Two independent draft inserts both committed using the narrow mode
+context. Every created test database was
+removed. This verifies the targeted concurrency mechanism, not general capacity
+under arbitrary load or live platform publication.
+
+Deploy all backend/orchestrator processes to remove old no-op mode-lock writers.
+No schema/client update or historical resend is required. Database lock tests do
+not call X or any other platform; they do not prove platform publication.
+
+### Policy lock and draft-context follow-up
+
+The same shared/exclusive Settings row-lock helper is now used by account
+preselection policy. `lockSystemInTransaction` takes SHARE and returns the
+unchanged policy; `saveSystem` takes UPDATE before checking its revision. Missing
+policy rows still mean REQUIRED revision zero and cannot authorize an unbound
+actor. `lastRequiredRevision`, first-binding checks and immutable bound-account
+rules remain unchanged. Raw serialization/deadlock errors retain the existing
+transaction retry classification; no platform write is inside those retries.
+
+`lockModeIn` provides the existing locked mode/transition metadata for plan
+materialization and Post/Reply draft/content operations. In configured CONTROLLED
+mode it avoids unrelated organization-wide blocker statistics, while preserving
+PAUSED when system capability is off. Autonomous eligibility, unconfigured
+organizations and historical handovers still use the original complete state
+checks. Management/configuration mutations retain `lockIn` and full statistics.
+Call-site content/claim checks, legacy active IDs, account occupancy, quotas and
+uncertain-result protections are unchanged. No HTTP field, new state, table or
+schema migration is introduced; deploy updated backend/orchestrator workers.
+
+Follow-up verification: eight isolated PostgreSQL tests passed and the production
+backend tsconfig passed. With database/Redis integration connections disabled and
+the frozen `apps/extension` excluded, the complete permitted suite reported 5738
+passed, 75 failed and 105 skipped. A pre-change staged-source comparison in the
+same working tree reported 5735 passed, the same 75 failing test names and 101
+skipped; no new failures were introduced. Four extra skipped cases belong to the
+expanded PostgreSQL suite, which was executed separately against its disposable
+database. The index remained unchanged; unrelated staged work was preserved.
+
+### Fixture ownership and receipt races
+
+The PostgreSQL fixture now checks every table and enum type it will create,
+including pre-existing table row types, before any fixture writes. All fixture
+DDL commits in one transaction; teardown owns the objects only after that commit
+and drops all fixture tables/types in `afterAll`, including after a failed test.
+Lifecycle regressions verify collision refusal without modifying existing data,
+rollback before ownership, complete cleanup and repeat initialization. The runner
+still removes the entire generated local database in `finally`.
+
+`lockModeIn` explicitly returns `SendModeContext`: locked mode/revision fields
+and common transition metadata, without dashboard counts, blockers or reallocation
+projections. Full autonomous/history checks still run where required. Persisted
+reallocation metadata is still validated, even when its result is not returned.
+
+The expanded real PostgreSQL suite passes 15 tests. Four receipt races start from
+AUTHORIZED or UNKNOWN and force both settlement and administrator recovery to
+read the same revision before either writes. In both commit orders, the losing
+transaction encounters real P2034, retries and rejects the conflicting terminal
+decision. The original receipt, quota provenance, recovery evidence and
+idempotent replay remain intact. These tests call the existing settlement/recovery
+services with isolated records; they never admit or execute platform work. No
+business schema, HTTP contract, deployment or historical resend is changed.
+
+Final verification: 15/15 disposable PostgreSQL cases and 10/10 lock unit tests
+passed; backend and orchestrator production type checks passed. With external
+database/Redis connections disabled and `apps/extension` excluded, the full suite
+reported 5739 passed, 75 failed and 112 skipped; the 75 failure names match the
+previous run exactly. Explicitly including the changed test files in a separate
+type check retained the staged baseline's 22 diagnostics with no additions. The
+original staged diff was unchanged; only these lock/test/documentation follow-ups
+were left unstaged. Every generated test database was removed.

@@ -595,3 +595,101 @@ pacing and content replay protection remain separate. Late successes are counted
 once, including released historical reservations. No API, client capability or
 schema changes; deploy the backend. Already-dispatched/late outcomes are recorded
 truthfully and can exceed the limit before subsequent authorizations stop.
+
+
+## Signal Feed draft recovery (2026-11-17)
+
+Previously saved human Reply drafts were excluded from the list's reply lookup,
+and NEW opportunity details returned no reply. Reopening Generate Reply therefore
+mounted an empty panel despite a saved DRAFT. The list now returns a separate
+`draftReplyId` while preserving non-draft publication/link fields; NEW detail reads
+return the original saved working copy. The website reuses Edit and loads detail
+before mounting, awaits explicit-close saves and reports failures. Existing scoped
+upsertDraft and all sending/account/UNKNOWN guards remain authoritative. This is a
+read/display correction, not a release of queued account bindings or automatic
+submission. Deploy backend before frontend; no migration or historical rewrite.
+
+
+### Review corrections for draft recovery (2026-11-17)
+
+The opportunity route forwards its authenticated user to the existing sending
+summary attachment used by normal Reply reads. Both summary locations are
+returned unchanged, including queued, reserved, reconciling and confirmed
+permissions and historical controlled work after handover. Legacy autonomous
+records do not gain controlled account checks. Website close-save additionally
+requires the original record to remain a DRAFT; autonomous queued records without
+a summary cannot fall through to save-draft.
+
+Platform removal remains a fact about a confirmed publication, not deletion of
+the business record. Non-draft IDs and links are kept even when removedAt is set.
+Only working-copy recovery excludes removed/deleted drafts; queued/published
+detail excludes unrelated drafts. No state, claim, authorization, quota, retry,
+account binding or audit evidence is mutated by these reads.
+
+Review verification: 402 focused tests passed, with 0 failed/skipped. Eight
+selected new regression cases fail against the original source and pass with
+the patch. Full permitted tests (frozen apps/extension/** excluded; opt-in external
+Redis/database/AI access disabled) reported 5795 passed, 4 failed and 97 skipped.
+The same four unchanged scan-ingest failures reproduce with the original source.
+Backend production tsconfig typecheck and frontend typecheck pass. Repository-wide
+strict typecheck remains non-clean in unrelated tests. Deployment still requires
+the confirmed environment/job and an isolated release scope; tests alone do not
+prove live browser behavior or publication.
+
+Isolated release verification: an original-HEAD source snapshot excluding the
+frozen extension was tested before and after applying only the eight-file backend
+patch. Baseline reported 5760 passed, 4 failed, 97 skipped; patched source reported
+5776 passed, 4 failed, 97 skipped. The same three frontend setup suites also fail
+to load dotenv through the shared dependency symlink in both snapshots; all failure
+names match and no new failures were introduced. The isolated 402-test focused
+suite, production backend tsconfig check and official `nest build` all passed.
+No database migration, server restart or deployment has been executed; the target
+environment/job still needs to be supplied.
+
+## Preflight mode-lock contention (2026-11-17)
+
+An observed X Reply stopped before opening its platform tab because segment
+preflight exhausted immediate Serializable retries while rewriting the common
+sending-mode Settings row as a lock (Prisma P2034). Claim and account verification had
+succeeded; stop-confirmation correctly retained the original execution as
+NOT_SUBMITTED/FAILED_FINAL. The browser's `tabs.create failed` label included the
+preparation callback and did not mean Chrome rejected a tab creation request.
+
+The root correction removes no-op Settings writes from normal guards, uses
+compatible shared row locks for readers, and obtains exclusive write intent only
+for the configuration row being mutated. The fixed system-before-organization
+order remains. Normal CONTROLLED guards no longer read organization-wide blocker
+statistics, which unnecessarily broadened Serializable read dependencies between
+independent writes. Status and recovery still compute their full evidence.
+Unchanged transition/reallocation maintenance markers do not create new row
+versions. Preflight's existing bounded backoff handles residual real conflicts;
+raw PostgreSQL serialization/deadlock errors use the same retry path.
+
+Post/Reply, manual/automatic and autonomous admission reuse these guards. Actual
+account occupancy, quota, identity, content CAS and mode-handover protections
+remain. No platform call is inside a retried transaction, no uncertain content is
+replayed, and historical failed records are unchanged. Deploy all backend and
+orchestrator processes; old instances retain the conflicting no-op writes. No
+schema or client change is required. Mock tests cover policy and query selection;
+the opt-in disposable PostgreSQL suite verifies actual lock compatibility and
+stale-snapshot retry. Neither test type proves live platform publication.
+
+The follow-up review found the same no-op lock in account-preselection policy and
+unnecessary full mode aggregates on plan/draft writes. Policy read/write locks now
+reuse the shared/exclusive helper. Plan, Post and Reply writers consume locked
+mode/transition metadata through `lockModeIn`; CONTROLLED avoids unrelated counts,
+while autonomous/legacy safety checks and management projections remain complete.
+Real PostgreSQL tests confirm independent policy readers/draft inserts proceed,
+policy changes wait, and REQUIRED-to-OPTIONAL retains the tightening barrier for
+old snapshots. These database-only changes do not retry historical platform sends.
+
+Further verification uses 15 real PostgreSQL tests in a generated localhost
+database, including same-receipt settlement/recovery races from AUTHORIZED and
+UNKNOWN in both commit orders. The losing transaction retries after actual P2034
+and rechecks the committed result; original receipt identity, quota metadata and
+operator evidence remain preserved. Fixture creation is atomic, every fixture
+table/type is checked before writing, and teardown owns only a successfully
+created complete fixture. Failure cleanup and repeat initialization are tested.
+The internal narrow `SendModeContext` type prevents admission callers from
+depending on dashboard counts; reallocation validation remains in place. No
+platform operation, state transition, public API or client behavior is changed.

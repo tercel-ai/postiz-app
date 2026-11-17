@@ -96,17 +96,17 @@ it.each(['retry', 'schedule'] as const)('keeps %s as new autonomous work while d
 
 it('allows saving a new unscheduled draft under the mode lock during draining', async () => {
   const { repository, modes } = fixture();
-  (modes as any).lockIn = vi.fn(async () => ({ transition: { targetMode: 'CONTROLLED' } }));
+  (modes as any).lockModeIn = vi.fn(async () => ({ transition: { targetMode: 'CONTROLLED' } }));
   const result = await repository.createOrUpdatePost('draft', 'org', '2026-01-01', {
     value: [{ id: 'draft', content: 'still editable', image: [] }], settings: { __type: 'x' },
   } as any, []);
   expect(result.posts[0].state).toBe('DRAFT');
-  expect((modes as any).lockIn).toHaveBeenCalled();
+  expect((modes as any).lockModeIn).toHaveBeenCalled();
 });
 
 it('does not clear a captured queued claim through a draft edit during draining', async () => {
   const { db, repository, modes, row } = fixture();
-  (modes as any).lockIn = vi.fn(async () => ({ transition: { targetMode: 'CONTROLLED' } }));
+  (modes as any).lockModeIn = vi.fn(async () => ({ transition: { targetMode: 'CONTROLLED' } }));
   db.seed('post', { ...row('old'), releaseId: 'lease', claimedAt: new Date() });
   await expect(repository.createOrUpdatePost('draft', 'org', '2026-01-01', {
     value: [{ id: 'old', content: 'changed while sending', image: [] }], settings: { __type: 'x' },

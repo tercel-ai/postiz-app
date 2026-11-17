@@ -575,11 +575,41 @@ describe('EngageRepository — two-table reads', () => {
         .items[0] as any;
       expect(item.sentReplyId).toBe('reply-new');
       expect(item.replyLink).toBe('https://x.com/a/status/1');
-      // The feed's reply-link lookup must EXCLUDE unsent DRAFT working-copies, so a
-      // saved draft never makes an opportunity look "already replied".
-      expect(sentFindMany.mock.calls[0][0].where.post).toEqual({
-        state: { not: 'DRAFT' },
-      });
+      // Both working copies and publications are read, then projected separately.
+      expect(sentFindMany.mock.calls[0][0].where.OR).toEqual([
+        { post: { state: { not: 'DRAFT' } } },
+        { removedAt: null, post: { state: 'DRAFT', deletedAt: null } },
+      ]);
+    });
+
+    it('exposes a saved draft without treating it as a published reply or losing an older reply URL', async () => {
+      const { repo, stateFindMany, stateCount, sentFindMany } = buildRepo();
+      stateFindMany.mockResolvedValue([STATE_ROW]);
+      stateCount.mockResolvedValue(1);
+      const draft: { id: string; opportunityId: string; post: { state: string; releaseURL: string | null } } =
+        { id: 'draft', opportunityId: 'opp1', post: { state: 'DRAFT', releaseURL: null } };
+      sentFindMany.mockResolvedValue([draft]);
+      let item = (await repo.listOpportunities('org1', { projectId: 'project' } as any)).items[0] as any;
+      expect(item).toMatchObject({ status: 'NEW', draftReplyId: 'draft', sentReplyId: null, replyLink: null });
+      expect(sentFindMany.mock.calls[0][0].where).toMatchObject({ organizationId: 'org1', projectId: 'project' });
+      sentFindMany.mockResolvedValue([draft, { id: 'published', opportunityId: 'opp1', post: { state: 'PUBLISHED', releaseURL: 'https://example.test/reply' } }]);
+      item = (await repo.listOpportunities('org1', {} as any)).items[0] as any;
+      expect(item).toMatchObject({ draftReplyId: 'draft', sentReplyId: 'published', replyLink: 'https://example.test/reply' });
+    });
+
+    it('retains confirmed platform-removed publication IDs and links separately from a newer draft', async () => {
+      const { repo, stateFindMany, stateCount, sentFindMany } = buildRepo();
+      stateFindMany.mockResolvedValue([{ ...STATE_ROW, status: 'REPLIED' }]); stateCount.mockResolvedValue(1);
+      sentFindMany.mockResolvedValue([
+        { id: 'draft', opportunityId: 'opp1', post: { state: 'DRAFT' } },
+        { id: 'removed-publication', opportunityId: 'opp1', removedAt: new Date(),
+          post: { state: 'PUBLISHED', releaseURL: 'https://example.test/confirmed' } },
+      ]);
+      const item = (await repo.listOpportunities('org1', {} as any)).items[0] as any;
+      expect(item).toMatchObject({ status: 'REPLIED', sentReplyId: 'removed-publication', replyLink: 'https://example.test/confirmed', draftReplyId: 'draft' });
+      const query = sentFindMany.mock.calls[0][0].where;
+      expect(query).not.toHaveProperty('removedAt');
+      expect(query.OR[0]).toEqual({ post: { state: { not: 'DRAFT' } } });
     });
 
     it('reports replyLink null when the latest reply has no URL (pending backfill)', async () => {
@@ -744,6 +774,45 @@ describe('EngageRepository — two-table reads', () => {
       expect(
         stateFindMany.mock.calls[0][0].where.opportunity
       ).not.toHaveProperty('OR');
+    });
+  });
+
+  describe('getOpportunityDetail draft recovery', () => {
+    it.each(['SCHEDULED', 'REPLIED'])('keeps %s detail on the non-draft publication, including platform removal history', async status => {
+      const { repo, stateFindFirst, sentFindFirst } = buildRepo();
+      stateFindFirst.mockResolvedValue({ ...STATE_ROW, status });
+      const publication = { id: 'publication', removedAt: new Date(), post: { id: 'post', state: 'PUBLISHED', releaseURL: 'https://example.test/confirmed' } };
+      sentFindFirst.mockResolvedValue(publication);
+      const result = await repo.getOpportunityDetail('org1', 'opp1', 'project');
+      expect(result.sentReply).toEqual(publication);
+      const query = sentFindFirst.mock.calls[0][0];
+      expect(query.where).toEqual({ organizationId: 'org1', projectId: 'project', opportunityId: 'opp1', post: { state: { not: 'DRAFT' } } });
+      expect(query.include.post.select).toMatchObject({ executionProtocol: true, sendIntentId: true });
+    });
+
+    it.each(['EXPIRED', 'DISMISSED'])('preserves the empty editor response for %s opportunities', async status => {
+      const { repo, stateFindFirst, sentFindFirst } = buildRepo();
+      stateFindFirst.mockResolvedValue({ ...STATE_ROW, status });
+      expect((await repo.getOpportunityDetail('org1', 'opp1')).sentReply).toBeNull();
+      expect(sentFindFirst).not.toHaveBeenCalled();
+    });
+    it('restores the latest saved content and input settings for a NEW opportunity in the same project', async () => {
+      const { repo, stateFindFirst, sentFindFirst } = buildRepo();
+      stateFindFirst.mockResolvedValue(STATE_ROW);
+      const draft = { id: 'draft', inputData: { strategy: 'AMPLIFY', mentions: ['brand'], brandStrength: 2 },
+        post: { id: 'post', state: 'DRAFT', content: 'Previously edited reply' } };
+      sentFindFirst.mockResolvedValue(draft);
+      const detail = await repo.getOpportunityDetail('org1', 'opp1', 'project');
+      expect(detail).toMatchObject({ status: 'NEW', sentReply: draft });
+      expect(sentFindFirst.mock.calls[0][0].where).toEqual({ organizationId: 'org1', projectId: 'project', opportunityId: 'opp1',
+        removedAt: null, post: { deletedAt: null, state: 'DRAFT' } });
+    });
+
+    it('returns an empty draft when no saved working copy exists', async () => {
+      const { repo, stateFindFirst, sentFindFirst } = buildRepo();
+      stateFindFirst.mockResolvedValue(STATE_ROW);
+      sentFindFirst.mockResolvedValue(null);
+      expect(await repo.getOpportunityDetail('org1', 'opp1')).toMatchObject({ status: 'NEW', sentReply: null });
     });
   });
 

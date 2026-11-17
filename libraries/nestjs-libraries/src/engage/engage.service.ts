@@ -1482,9 +1482,16 @@ export class EngageService implements OnApplicationBootstrap {
   async getOpportunityById(
     org: Organization,
     id: string,
-    projectId?: string | null
+    projectId?: string | null,
+    userId?: string
   ) {
-    return this._engageRepository.getOpportunityById(org.id, id, projectId);
+    // Preserve the flat card fields while supplying the saved editor content.
+    const [card, detail] = await Promise.all([
+      this._engageRepository.getOpportunityById(org.id, id, projectId),
+      this._engageRepository.getOpportunityDetail(org.id, id, projectId),
+    ]);
+    const [sentReply] = await this.attachSentReplySending(org, userId, detail.sentReply ? [detail.sentReply] : []);
+    return { ...card, sentReply: sentReply ?? null };
   }
 
   async getOpportunityDetail(

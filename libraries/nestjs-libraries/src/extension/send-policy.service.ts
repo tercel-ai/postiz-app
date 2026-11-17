@@ -9,6 +9,7 @@ import { Prisma } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../database/prisma/prisma.service';
 import { SEND_ACCOUNT_POLICY_KEY } from './send-policy.constants';
+import { lockSendSettingIn } from './send-coordination.utils';
 import {
   SaveSendPreferencesDto,
   SaveSystemSendPolicyDto,
@@ -100,30 +101,13 @@ export class SendPolicyService {
     };
   }
 
-  // Serialize first CURRENT_SESSION binding with policy writes, before intent rows.
+  // Independent bindings share this lock; policy changes still exclude readers.
   async lockSystemInTransaction(
     tx: Prisma.TransactionClient
   ): Promise<SendAccountPolicy> {
-    const row = await tx.settings.findUnique({
-      where: { key: SEND_ACCOUNT_POLICY_KEY },
-    });
-    const policy = this.parseSystem(row?.value, !!row);
-    if (row) {
-      const locked = await tx.settings.updateMany({
-        where: {
-          key: SEND_ACCOUNT_POLICY_KEY,
-          value: { equals: row.value as Prisma.InputJsonValue },
-        },
-        data: {
-          value: row.value as Prisma.InputJsonValue,
-          updatedAt: row.updatedAt,
-        },
-      });
-      if (locked.count !== 1)
-        throw new ConflictException('SEND_POLICY_CHANGED');
-    }
+    await lockSendSettingIn(tx, SEND_ACCOUNT_POLICY_KEY);
     // An absent key means REQUIRED; it cannot authorize an unbound current actor.
-    return policy;
+    return this.getSystem(tx);
   }
 
   // A retained revision barrier also protects tasks missed by an asynchronous scan.
@@ -175,6 +159,7 @@ export class SendPolicyService {
           value: SendAccountPolicy;
         };
       }
+      await lockSendSettingIn(tx, SEND_ACCOUNT_POLICY_KEY, true);
       const previous = await this.getSystem(tx);
       if (previous.revision !== body.expectedRevision)
         throw new ConflictException('SEND_POLICY_REVISION_CONFLICT');

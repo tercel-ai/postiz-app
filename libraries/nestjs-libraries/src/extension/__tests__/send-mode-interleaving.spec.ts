@@ -1,5 +1,4 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { Prisma } from '@prisma/client';
 import { SendModeService } from '../send-mode.service';
 import { memorySendDatabase } from './support/memory-send-database';
 
@@ -64,36 +63,30 @@ it('retries a stale producer snapshot after concurrent legacy settlement cleanup
     const snapshot = memorySendDatabase();
     for (const table of tables)
       for (const row of db.rows(table)) snapshot.seed(table, row);
-    const settings = snapshot.settings;
     const tx = new Proxy(snapshot, {
       get(target, key) {
-        if (key !== 'settings') return Reflect.get(target, key);
-        return {
-          ...settings,
-          updateMany: async (args: any) => {
+        if (key !== '$queryRaw') return Reflect.get(target, key);
+        return async (query: TemplateStringsArray, ...values: unknown[]) => {
             if (
               number === 0 &&
-              args.where.key === 'sending.organization_mode:org'
+              values[0] === 'sending.organization_mode:org'
             ) {
               producerPaused.resolve();
               await resumeProducer.promise;
             }
             const stored = db
               .rows('settings')
-              .find((row) => row.key === args.where.key);
-            const expected =
-              args.where.value?.equals === Prisma.JsonNull
-                ? null
-                : args.where.value?.equals;
+              .find((row) => row.key === values[0]);
+            const expected = snapshot.rows('settings').find(row => row.key === values[0]);
+            // PostgreSQL refuses a row lock on a row changed since the
+            // Serializable transaction snapshot. The next attempt reads anew.
             if (
-              args.where.value &&
-              JSON.stringify(stored?.value) !== JSON.stringify(expected)
+              JSON.stringify(stored?.value) !== JSON.stringify(expected?.value)
             ) {
               conflicts++;
-              return { count: 0 };
+              throw Object.assign(new Error('Row changed since snapshot'), { code: 'P2034' });
             }
-            return settings.updateMany(args);
-          },
+            return snapshot.$queryRaw(query, ...values);
         };
       },
     });
@@ -131,7 +124,7 @@ it('retries a stale producer snapshot after concurrent legacy settlement cleanup
   });
 
   // The stale snapshot still held legacy settlement metadata. The mode-row
-  // compare-and-set forces a retry against the completed cleanup snapshot.
+  // row lock forces a retry against the completed cleanup snapshot.
   expect(conflicts).toBe(1);
   expect((await service.get('org', 'admin')).mode).toBe('CONTROLLED');
   expect(

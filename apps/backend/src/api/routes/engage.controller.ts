@@ -776,9 +776,10 @@ export class EngageController {
   getOpportunityById(
     @GetOrgFromRequest() org: Organization,
     @Param('id') id: string,
+    @GetUserFromRequest() user: User,
     @Query('projectId') projectId?: string
   ) {
-    return this._engageService.getOpportunityById(org, id, projectId);
+    return this._engageService.getOpportunityById(org, id, projectId, user?.id);
   }
 
   @ApiOperation({

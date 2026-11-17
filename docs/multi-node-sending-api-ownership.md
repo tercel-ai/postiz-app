@@ -656,3 +656,82 @@ pacing and content replay protection remain separate. Late successes are counted
 once, including released historical reservations. No API, client capability or
 schema changes; deploy the backend. Already-dispatched/late outcomes are recorded
 truthfully and can exceed the limit before subsequent authorizations stop.
+
+
+## Signal Feed saved draft reads (2026-11-17)
+
+`GET /engage/opportunities` adds optional `draftReplyId` for the latest non-removed
+saved DRAFT working copy in the same organization/project. Existing `sentReplyId`
+and `replyLink` continue to identify the latest non-draft reply independently, even
+when a newer working copy exists. The draft marker grants no editing or sending
+authority and does not change opportunity status or counts. Removed/deleted
+working copies are excluded from draft recovery only; non-draft publication IDs
+and links retain their previous selection semantics, including platform removal.
+
+The existing `GET /engage/opportunities/:id` route now combines its original flat
+card read with the existing detail reader, returning the saved working copy for NEW
+opportunities as `sentReply`, including its original Post content and inputData;
+no draft yields null. SCHEDULED/REPLIED detail selects the latest non-draft reply,
+so another working copy cannot replace queued/published content. Other states
+retain the original empty editor response. The authenticated user is forwarded
+from the controller and the existing attachSentReplySending helper supplies
+`sending` and `post.sending`, including authoritative allowedActions. Detail
+selects executionProtocol/sendIntentId so historical controlled work retains its
+summary after mode handover; failed summary reads fail the request rather than
+falling back to an editable draft.
+The frontend must load detail before opening the editor and check save-draft
+acknowledgements. Existing save-draft remains DRAFT-only, uses the original scoped
+working copy, and never grants a lease, permit, claim or send intent. No schema
+migration is required; older frontends ignore the additive list field.
+
+## Segment preflight serialization conflicts (2026-11-17)
+
+Normal mode guards now use compatible `FOR SHARE` Settings row locks instead
+of no-op updates. Organization configuration mutations take system SHARE then
+organization UPDATE locks; the system capability writer takes system UPDATE.
+Normal CONTROLLED authorization reads only locked mode/transition metadata,
+not organization-wide blocker statistics. Full status projections and historical
+handover checks retain their existing readers. Repeated unchanged maintenance
+markers no longer update the organization Settings row. PostgreSQL raw-query
+40001/40P01 conflicts are normalized into the existing P2034 retry path.
+
+Segment preflight now opts into the existing `sendTransaction` exponential
+backoff with jitter for residual Prisma P2034 conflicts.
+The same database transaction is retried at most four times in total, with fresh
+mode, node, lease, execution and segment checks on each attempt. A successful
+retry only issues the existing identity challenge; it does not grant a submit
+permit or perform a platform write. Persistent conflicts still fail closed.
+
+This applies to the shared CONTROLLED Post/Reply preflight endpoint on every
+supported platform, including retained controlled work during mode handover.
+AUTONOMOUS execution, request/response fields, allowedActions, pacing, quota,
+outcome settlement and original-content retry eligibility are unchanged. Deploy
+every backend/orchestrator process using these guards; no client update,
+migration or historical resend is required. Old processes still perform no-op
+writes, so a mixed rollout retains the old contention source until they stop.
+
+### Policy and draft writers use the same coordination boundary
+
+Account-preselection policy readers now share the existing Settings row rather
+than rewriting its original JSON/timestamp. Policy saves acquire exclusive write
+intent before checking expectedRevision. Absent-policy REQUIRED defaults and the
+lastRequiredRevision barrier are preserved. Bind/edit callers still perform their
+existing account, version, ownership and pacing checks.
+
+Plan materialization and Post/Reply content operations read a locked narrow mode
+context via `lockModeIn`, avoiding dashboard blocker aggregates for configured
+CONTROLLED organizations. System disable still yields PAUSED. Autonomous and
+historical eligibility fall back to complete state checks; configuration writers
+and administrative status APIs retain their full projections. Existing API fields,
+allowedActions, quotas and unknown/confirmed-content replay rules do not change.
+No frontend/extension update or migration is required; update backend/orchestrator.
+
+The internal `lockModeIn` return contract is explicitly `SendModeContext`, limited
+to mode/revision fields and common transition metadata. It does not expose the
+dashboard's blocker/reallocation/count projection; persisted reallocation data
+is still validated. This is a TypeScript contract clarification, not an HTTP
+response change. Disposable PostgreSQL tests now also verify same-receipt browser
+settlement versus administrator recovery in both commit orders, starting from
+AUTHORIZED and UNKNOWN: a real serialization conflict retries against current
+evidence and cannot overwrite the winning terminal decision or duplicate its
+recovery receipt. Existing ownership, quota provenance and replay rules remain.

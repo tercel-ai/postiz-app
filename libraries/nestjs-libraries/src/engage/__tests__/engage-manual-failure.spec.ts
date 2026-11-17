@@ -81,7 +81,7 @@ describe('manual failure persistence', () => {
     post.error = 'Send unconfirmed: Confirmation timed out. — the reply may be live on the platform, so it will NOT be re-sent.';
     const before = structuredClone(post);
     if (withModes) (repo as any)._sendModes = {
-      lockIn: vi.fn(), activeLegacyPostIdsIn: vi.fn(async () => []),
+      lockModeIn: vi.fn(), activeLegacyPostIdsIn: vi.fn(async () => []),
     };
     await expect(repo.closeManuallyFailedReply('org-1', 'r1', 'Stop retrying.'))
       .rejects.toBeInstanceOf(ConflictException);
@@ -105,10 +105,10 @@ describe('manual failure persistence', () => {
 
   it('serializes with captured legacy work and refuses to discard its ownership', async () => {
     const { repo, tx, postUpdateMany } = buildRepo();
-    const modes = { lockIn: vi.fn(), activeLegacyPostIdsIn: vi.fn(async () => ['p1']) };
+    const modes = { lockModeIn: vi.fn(), activeLegacyPostIdsIn: vi.fn(async () => ['p1']) };
     (repo as any)._sendModes = modes;
     await expect(repo.closeManuallyFailedReply('org-1', 'r1', 'Stop.')).rejects.toBeInstanceOf(ConflictException);
-    expect(modes.lockIn).toHaveBeenCalledWith(tx, 'org-1');
+    expect(modes.lockModeIn).toHaveBeenCalledWith(tx, 'org-1');
     expect(postUpdateMany).not.toHaveBeenCalled();
   });
 

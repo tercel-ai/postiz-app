@@ -1,10 +1,17 @@
 import 'reflect-metadata';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { RequestMethod } from '@nestjs/common';
 import { EngageController } from '../engage.controller';
 
 describe('EngageController opportunity count routes', () => {
+  it('passes the authenticated user and project into the editor detail read', async () => {
+    const getOpportunityById = vi.fn(async () => ({ id: 'opportunity' }));
+    const controller = Object.assign(Object.create(EngageController.prototype), { _engageService: { getOpportunityById } });
+    const org = { id: 'org' }, user = { id: 'user' };
+    await controller.getOpportunityById(org, 'opportunity', user, 'project');
+    expect(getOpportunityById).toHaveBeenCalledExactlyOnceWith(org, 'opportunity', 'project', user.id);
+  });
   it('keeps the legacy counts route as an alias for the summary', () => {
     const paths = Reflect.getMetadata(
       PATH_METADATA,

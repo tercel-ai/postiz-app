@@ -1,7 +1,13 @@
+import { Prisma } from '@prisma/client';
 import { legacyExecutionWhere } from '@gitroom/nestjs-libraries/extension/legacy-execution';
 import { Injectable, Logger } from '@nestjs/common';
 import { Activity, ActivityMethod } from 'nestjs-temporal-core';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import {
+  AiseeNotificationChannel,
+  AiseeNotificationClient,
+  AiseeNotificationEvent,
+} from '@gitroom/nestjs-libraries/notifications/aisee-notification.client';
 import {
   DEFAULT_OPPORTUNITY_TTL_DAYS,
   EngageScanConfigService,
@@ -40,7 +46,8 @@ export class EngageHousekeepingActivity {
     private _oppState: PrismaRepository<'engageOpportunityState'>,
     private _post: PrismaRepository<'post'>,
     private _scanConfig: EngageScanConfigService,
-    private _engageRepository: EngageRepository
+    private _engageRepository: EngageRepository,
+    private _aiseeNotificationClient: AiseeNotificationClient
   ) {}
 
   private get _jobs(): MaintenanceJob[] {
@@ -118,55 +125,64 @@ export class EngageHousekeepingActivity {
     for (const platform of SCANNABLE_PLATFORMS) {
       const cutoff = opportunityExpiryCutoff(platform, ttlDays, now);
       if (!cutoff) continue;
-      const { count } = await this._post.model.post.updateMany({
-        where: {
-          state: 'QUEUE',
-          sendIntentId: null,
-          releaseId: null,
-          AND: [legacyExecutionWhere()],
-          deletedAt: null,
-          // Belt and braces with `state`: a reply that went out gains a URL, so
-          // a half-written commit cannot be swept up here as if it were stuck.
-          releaseURL: null,
-          // `is` rather than `isNot: null` — it both requires the reply to
-          // exist (so a plain scheduled POST is never touched by this) and
-          // scopes it to the platform in one condition.
-          engageSentReply: { is: { opportunity: { platform } } },
-          // Only replies whose send time has ARRIVED. Without this the sweep
-          // reaches a reply a user SCHEDULED for the future: `scheduleReply`
-          // creates it with `type: 'schedule'`, `source: 'engage'` and a future
-          // publishDate, and `createOrUpdatePost` writes `state: 'QUEUE'` — so
-          // it satisfies every other predicate here. Cancelling it would flip it
-          // to ERROR before it was ever due, and `claimPostForPublishing`
-          // requires `state: 'QUEUE'`, so it could never be sent afterwards. The
-          // user would be told it "waited past the TTL without going out" about
-          // a reply that never had its turn.
-          //
-          // This costs the sweep nothing: the auto-queued replies it exists for
-          // are created with `publishDate: new Date()`, so they are always
-          // already due. A scheduled reply is merely spared until its slot
-          // passes — after which it is swept like any other if it still fails.
-          //
-          // The house sweep for the same job on the same table takes the same
-          // position and goes further: `markStaleQueuePostsAsError` measures
-          // `publishDate` and excludes `source: 'engage'` outright, which is
-          // exactly why scheduled engage replies were safe before this job.
-          publishDate: { lte: new Date(now) },
-          OR: [
-            { createdAt: { lt: cutoff } },
-            {
-              engageSentReply: {
-                is: { opportunity: { postPublishedAt: { lt: cutoff } } },
-              },
+      const staleWhere: Prisma.PostWhereInput = {
+        state: 'QUEUE',
+        sendIntentId: null,
+        releaseId: null,
+        AND: [legacyExecutionWhere()],
+        deletedAt: null,
+        // Belt and braces with `state`: a reply that went out gains a URL, so
+        // a half-written commit cannot be swept up here as if it were stuck.
+        releaseURL: null,
+        // `is` rather than `isNot: null` — it both requires the reply to
+        // exist (so a plain scheduled POST is never touched by this) and
+        // scopes it to the platform in one condition.
+        engageSentReply: { is: { opportunity: { platform } } },
+        // Only replies whose send time has ARRIVED. Without this the sweep
+        // reaches a reply a user SCHEDULED for the future: `scheduleReply`
+        // creates it with `type: 'schedule'`, `source: 'engage'` and a future
+        // publishDate, and `createOrUpdatePost` writes `state: 'QUEUE'` — so
+        // it satisfies every other predicate here. Cancelling it would flip it
+        // to ERROR before it was ever due, and `claimPostForPublishing`
+        // requires `state: 'QUEUE'`, so it could never be sent afterwards. The
+        // user would be told it "waited past the TTL without going out" about
+        // a reply that never had its turn.
+        //
+        // This costs the sweep nothing: the auto-queued replies it exists for
+        // are created with `publishDate: new Date()`, so they are always
+        // already due. A scheduled reply is merely spared until its slot
+        // passes — after which it is swept like any other if it still fails.
+        //
+        // The house sweep for the same job on the same table takes the same
+        // position and goes further: `markStaleQueuePostsAsError` measures
+        // `publishDate` and excludes `source: 'engage'` outright, which is
+        // exactly why scheduled engage replies were safe before this job.
+        publishDate: { lte: new Date(now) },
+        OR: [
+          { createdAt: { lt: cutoff } },
+          {
+            engageSentReply: {
+              is: { opportunity: { postPublishedAt: { lt: cutoff } } },
             },
-          ],
-        },
+          },
+        ],
+      };
+      // Read the reply ids BEFORE closing the posts: once they are ERROR the
+      // predicate no longer matches, and the SentReply is the unit the user was
+      // told about. Only rows this pass actually closed are announced below.
+      const candidates = await this._post.model.post.findMany({
+        where: staleWhere,
+        select: { id: true },
+      });
+      const staleError =
+        'Expired in queue: this reply waited past the platform’s ' +
+        'opportunity TTL without going out, so the conversation it was ' +
+        'written for is no longer current. It was not sent.';
+      const { count } = await this._post.model.post.updateMany({
+        where: staleWhere,
         data: {
           state: 'ERROR',
-          error:
-            'Expired in queue: this reply waited past the platform’s ' +
-            'opportunity TTL without going out, so the conversation it was ' +
-            'written for is no longer current. It was not sent.',
+          error: staleError,
           // `claimedAt` is deliberately preserved — it is the reply-side input
           // to getLastPlatformWriteAt (the platform write floor), not merely a
           // lease column. See EngageRepository.markOpportunityTargetGone.
@@ -175,11 +191,62 @@ export class EngageHousekeepingActivity {
       });
       total += count;
       if (count) parts.push(`${platform}=${count}@${ttlDays[platform]}d`);
+      if (count) {
+        // A candidate that published between the read and the write stays
+        // PUBLISHED and must not be reported as a failure.
+        const closed = await this._post.model.post.findMany({
+          where: {
+            id: { in: candidates.map((p) => p.id) },
+            state: 'ERROR',
+            error: staleError,
+          },
+          select: {
+            organizationId: true,
+            projectId: true,
+            engageSentReply: { select: { id: true } },
+          },
+        });
+        await this._notifyRepliesExpired(closed, platform);
+      }
     }
 
     return `closed ${total} stale queued engage replies${
       parts.length ? ` (${parts.join(', ')})` : ''
     }`;
+  }
+
+  /**
+   * Announce replies this sweep closed without sending.
+   *
+   * This is the only terminal path for a generated, already-paid-for reply that
+   * nobody sent, so without it the user's only clue is a row quietly turning
+   * into ERROR. Same event and per-reply dedup key as the on-demand failure
+   * paths (`engage.reply_failed:{sentReplyId}`), so a reply already reported
+   * through one of those is not announced twice.
+   */
+  private async _notifyRepliesExpired(
+    closed: Array<{
+      organizationId: string;
+      projectId: string | null;
+      engageSentReply: { id: string } | null;
+    }>,
+    platform: string
+  ): Promise<void> {
+    for (const post of closed) {
+      const reply = post.engageSentReply;
+      if (!reply) continue;
+      await this._aiseeNotificationClient.notify({
+        organizationId: post.organizationId,
+        eventKey: AiseeNotificationEvent.ENGAGE_REPLY_FAILED,
+        dedupKey: `engage.reply_failed:${reply.id}`,
+        data: {
+          platform,
+          sent_reply_id: reply.id,
+          project_id: post.projectId || undefined,
+        },
+        channel: AiseeNotificationChannel.ENGAGE,
+      });
+    }
   }
 
   /**

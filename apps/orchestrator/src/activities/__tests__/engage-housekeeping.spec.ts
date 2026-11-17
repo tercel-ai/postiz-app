@@ -24,6 +24,9 @@ function build(
 ) {
   const updateMany = vi.fn(async () => ({ count: 0 }));
   const postUpdateMany = vi.fn(async () => ({ count: 0 }));
+  // Stale-reply sweep reads candidates before writing and the closed rows after.
+  const postFindMany = vi.fn(async () => [] as any[]);
+  const notify = vi.fn(async () => true);
   const getLiveScanUnitKeys = vi.fn(async () => ({
     keywords: new Set<string>(),
     targets: new Set<string>(),
@@ -39,17 +42,20 @@ function build(
   );
   const activity = new EngageHousekeepingActivity(
     { model: { engageOpportunityState: { updateMany } } } as any,
-    { model: { post: { updateMany: postUpdateMany } } } as any,
+    { model: { post: { updateMany: postUpdateMany, findMany: postFindMany } } } as any,
     {
       getOpportunityTtlDaysMap: vi.fn(async () => ttl),
       getScanCursorOrphanTtlDays: vi.fn(async () => cursors.orphanTtlDays ?? 30),
     } as any,
-    { getLiveScanUnitKeys, deleteOrphanedScanCursors } as any
+    { getLiveScanUnitKeys, deleteOrphanedScanCursors } as any,
+    { notify } as any
   );
   return {
     activity,
     updateMany,
     postUpdateMany,
+    postFindMany,
+    notify,
     getLiveScanUnitKeys,
     deleteOrphanedScanCursors,
   };
@@ -239,6 +245,55 @@ describe('EngageHousekeepingActivity — stale queued replies', () => {
     await activity.runDueMaintenanceJobs();
 
     expect(replyCallFor(postUpdateMany, 'devto')).toBeUndefined();
+  });
+
+  it('announces every reply this pass actually closed, keyed per reply', async () => {
+    const { activity, postUpdateMany, postFindMany, notify } = build({ x: 3 });
+    postUpdateMany.mockResolvedValue({ count: 2 });
+    postFindMany
+      .mockResolvedValueOnce([{ id: 'post-1' }, { id: 'post-2' }])
+      .mockResolvedValueOnce([
+        {
+          organizationId: 'org-1',
+          projectId: 'project-1',
+          engageSentReply: { id: 'reply-1' },
+        },
+        {
+          organizationId: 'org-1',
+          projectId: null,
+          engageSentReply: { id: 'reply-2' },
+        },
+      ]);
+
+    await activity.runDueMaintenanceJobs();
+
+    expect(notify).toHaveBeenCalledTimes(2);
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        organizationId: 'org-1',
+        eventKey: 'engage.reply_failed',
+        dedupKey: 'engage.reply_failed:reply-1',
+        channel: 'engage',
+        data: {
+          platform: 'x',
+          sent_reply_id: 'reply-1',
+          project_id: 'project-1',
+        },
+      })
+    );
+    // The per-reply key is what stops a reply already reported by the on-demand
+    // failure paths from being announced a second time.
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({ dedupKey: 'engage.reply_failed:reply-2' })
+    );
+  });
+
+  it('does not announce when the sweep closed nothing', async () => {
+    const { activity, notify } = build({ x: 3 });
+
+    await activity.runDueMaintenanceJobs();
+
+    expect(notify).not.toHaveBeenCalled();
   });
 
   it('runs even when the opportunity sweep throws', async () => {

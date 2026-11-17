@@ -4,6 +4,23 @@ import { memorySendDatabase } from './support/memory-send-database';
 
 beforeEach(() => vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true'));
 afterEach(() => vi.unstubAllEnvs());
+it('does not rewrite an unchanged reallocation marker on each maintenance poll', async () => {
+  const db = memorySendDatabase();
+  db.seed('userOrganization', { organizationId: 'org', userId: 'admin', role: 'ADMIN', disabled: false });
+  db.seed('post', { id: 'post', organizationId: 'org', state: 'QUEUE', parentPostId: null });
+  const modes = new SendModeService(db);
+  await modes.save('org', 'admin', { expectedOrganizationId: 'org', expectedUserId: 'admin', mode: 'CONTROLLED',
+    expectedRevision: 0, requestId: 'switch' });
+  const issues = [{ postId: 'post', code: 'SEND_BINDING_REQUIRED' }];
+  await modes.recordReallocationIssues('org', issues);
+  const settings = db.settings;
+  const update = vi.spyOn(settings, 'updateMany');
+  db.settings = settings;
+  await modes.recordReallocationIssues('org', issues);
+  expect(update).not.toHaveBeenCalled();
+  await modes.recordReallocationIssues('org', [{ postId: 'post', code: 'SEND_PROJECT_REQUIRED' }]);
+  expect(update).toHaveBeenCalledOnce();
+});
 it('counts every blocked queued root while bounding public issue details and removing settled entries', async () => {
   const db = memorySendDatabase();
   db.seed('userOrganization', { organizationId: 'org', userId: 'admin', role: 'ADMIN', disabled: false });

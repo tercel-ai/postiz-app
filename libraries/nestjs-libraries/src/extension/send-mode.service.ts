@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma/prisma.service';
-import { canonicalSendAccount, sendHash, sendJson, sendTransaction } from './send-coordination.utils';
+import { canonicalSendAccount, lockSendSettingIn, sendHash, sendJson, sendTransaction } from './send-coordination.utils';
 import {
   BeginBrowserWriteDto,
   BrowserWriteOutcomeDto,
@@ -136,6 +136,16 @@ export interface SendModeState {
   controlledDrain?: (SendModeTransitionState & { issues: Array<{ postId: string; code: string }> }) | null;
   reallocation: { remainingCount: number; completedCount: number; blockedCount: number;
     issues: Array<{ postId: string; code: string }> } | null;
+}
+/** Common metadata only; admission callers must not depend on dashboard counts. */
+type SendModeTransitionContext = Pick<SendModeTransitionState,
+  'targetMode' | 'requestedAt' | 'requestedByUserId' | 'initialPendingCount'>;
+export interface SendModeContext extends Pick<SendModeState,
+  'organizationId' | 'mode' | 'configuredMode' | 'revision' | 'systemEnabled' |
+  'systemRevision' | 'autonomousAllowed'> {
+  transition: SendModeTransitionContext | null;
+  legacyDrain: SendModeTransitionContext | null;
+  controlledDrain?: SendModeTransitionContext | null;
 }
 const validRevision = (value: unknown): value is number =>
   Number.isInteger(value) &&
@@ -603,7 +613,7 @@ export class SendModeService {
 
   async recordReallocationIssues(organizationId: string, issues: Array<{ postId: string; code: string }>) {
     return sendTransaction(this.db, async tx => {
-      await this.lockIn(tx, organizationId);
+      await this.lockIn(tx, organizationId, { write: true });
       const row = await tx.settings.findUnique({ where: { key: organizationSendModeKey(organizationId) } });
       const marker = this.parseReallocation(row?.value);
       if (!marker || this.parseOrganization(row?.value).mode !== 'CONTROLLED') return;
@@ -611,10 +621,10 @@ export class SendModeService {
       const ids = new Set(posts.map(post => post.id));
       const { reallocation: _old, ...value } = row!.value as Prisma.JsonObject;
       const currentIssues = issues.filter(issue => ids.has(issue.postId));
-      await tx.settings.updateMany({ where: { key: row!.key }, data: { value: sendJson({ ...value,
+      await this.updateModeSettingIn(tx, row!, sendJson({ ...value,
         ...(posts.length ? { reallocation: { ...marker,
           blockedPostIds: [...new Set(currentIssues.map(issue => issue.postId))], issues: currentIssues.slice(0, 100) } } : {}),
-      }) } });
+      }));
     });
   }
 
@@ -837,7 +847,7 @@ export class SendModeService {
       const organizationId = row.key.slice(SEND_MODE_ORGANIZATION_PREFIX.length);
       try {
         results.push(await sendTransaction(this.db, async tx => {
-          const state = await this.lockIn(tx, organizationId);
+          const state = await this.lockModeIn(tx, organizationId);
           if (state.mode !== 'CONTROLLED') return 0;
           const setting = await tx.settings.findUnique({ where: { key: row.key } });
           const config = this.parseOrganization(setting?.value);
@@ -879,14 +889,14 @@ export class SendModeService {
       try {
         results.push(
           await sendTransaction(this.db, async (tx) => {
-            let state = await this.lockIn(tx, organizationId);
+            let state = await this.lockIn(tx, organizationId, { write: true });
             const stored = await tx.settings.findUnique({ where: { key: row.key } });
             const previous = this.parseOrganization(stored?.value).transition;
             if (previous?.version === 1) {
               const normalized = await this.normalizeTransitionIn(tx, organizationId, previous);
-              await tx.settings.updateMany({ where: { key: row.key }, data: { value: sendJson({
+              await this.updateModeSettingIn(tx, stored!, sendJson({
                 mode: 'AUTONOMOUS', revision: state.revision, transition: normalized,
-              }) } });
+              }));
               state = await this.stateIn(tx, organizationId);
             }
             const setting = await tx.settings.findUnique({ where: { key: row.key } });
@@ -894,10 +904,10 @@ export class SendModeService {
             const reverse = parseControlledDrain(setting?.value);
             if (config.mode === 'AUTONOMOUS' && reverse) {
               const { controlledDrain: _reverse, legacyDrain: _legacy, reallocation: _allocation, ...rest } = setting!.value as Prisma.JsonObject;
-              await tx.settings.updateMany({ where: { key: row.key }, data: { value: sendJson({ ...rest,
+              await this.updateModeSettingIn(tx, setting!, sendJson({ ...rest,
                 ...(state.controlledDrain?.remainingCount ? { controlledDrain: reverse } : {}),
                 ...(state.legacyDrain?.remainingCount ? { legacyDrain: config.legacyDrain } : {}),
-              }) } });
+              }));
               return false;
             }
             if (config.legacyDrain) {
@@ -908,10 +918,10 @@ export class SendModeService {
               const reallocation = this.parseReallocation(setting?.value) ??
                 await this.newReallocationIn(tx, organizationId, config.legacyDrain.requestedByUserId);
               const { legacyDrain: _old, reallocation: _allocation, ...value } = setting!.value as Prisma.JsonObject;
-              await tx.settings.updateMany({ where: { key: row.key }, data: { value: sendJson({ ...value,
+              await this.updateModeSettingIn(tx, setting!, sendJson({ ...value,
                 ...(state.legacyDrain!.remainingCount ? { legacyDrain: config.legacyDrain } : {}),
                 ...(reallocation ? { reallocation } : {}),
-              }) } });
+              }));
               return false;
             }
             if (!config.transition || !state.systemEnabled) return false;
@@ -919,11 +929,11 @@ export class SendModeService {
               throw new ServiceUnavailableException('SEND_MODE_REVISION_EXHAUSTED');
             await this.initializeAutomationOwnersIn(tx, organizationId, config.transition.requestedByUserId);
             const reallocation = await this.newReallocationIn(tx, organizationId, config.transition.requestedByUserId);
-            await tx.settings.updateMany({ where: { key: row.key }, data: { value: sendJson({
+            await this.updateModeSettingIn(tx, setting!, sendJson({
               mode: 'CONTROLLED', revision: state.revision + 1,
               ...(state.transition!.remainingCount ? { legacyDrain: await this.normalizeTransitionIn(tx, organizationId, config.transition) } : {}),
               ...(reallocation ? { reallocation } : {}),
-            }) } });
+            }));
             return true;
           })
         );
@@ -938,30 +948,56 @@ export class SendModeService {
     return results;
   }
 
-  // Both configuration writers and send authorizers acquire rows in this order.
-  private async lockSettingIn(tx: Prisma.TransactionClient, key: string) {
-    const row = await tx.settings.findUnique({ where: { key } });
-    if (!row) {
+  // Callers hold the exclusive organization lock. Maintenance must not create a
+  // new row version when its existing transition/reallocation marker is unchanged.
+  private async updateModeSettingIn(tx: Prisma.TransactionClient,
+    row: { key: string; value: Prisma.JsonValue }, value: Prisma.InputJsonValue) {
+    if (sendHash(row.value) === sendHash(value)) return;
+    await tx.settings.updateMany({ where: { key: row.key }, data: { value } });
+  }
+
+  // Readers coexist; only configuration mutations require an exclusive row lock.
+  private async lockSettingIn(tx: Prisma.TransactionClient, key: string, write = false) {
+    if (!await lockSendSettingIn(tx, key, write)) {
       // JSON null is an internal lock sentinel: absent configuration semantics remain unchanged.
+      // Concurrent first-use inserts retry through the existing Serializable transaction.
       await tx.settings.create({
         data: { key, type: 'object', value: Prisma.JsonNull },
       });
-      return;
     }
-    const value =
-      row.value === null
-        ? Prisma.JsonNull
-        : (row.value as Prisma.InputJsonValue);
-    const result = await tx.settings.updateMany({
-      where: { key, value: { equals: value } },
-      data: { value, updatedAt: row.updatedAt },
-    });
-    if (result.count !== 1) throw retryConflict();
   }
 
-  async lockIn(tx: Prisma.TransactionClient, organizationId: string) {
+  private async lockRowsIn(tx: Prisma.TransactionClient, organizationId: string, write = false) {
+    // Always system then organization. Take write intent up front, never upgrade
+    // a shared organization lock after reading a configuration to be changed.
     await this.lockSettingIn(tx, SEND_MODE_SYSTEM_KEY);
-    await this.lockSettingIn(tx, organizationSendModeKey(organizationId));
+    await this.lockSettingIn(tx, organizationSendModeKey(organizationId), write);
+  }
+
+  async lockIn(tx: Prisma.TransactionClient, organizationId: string, options: { write?: boolean } = {}) {
+    await this.lockRowsIn(tx, organizationId, options.write);
+    return this.stateIn(tx, organizationId);
+  }
+
+  /** Locked mode/transition context for writers that do not need dashboard counts. */
+  async lockModeIn(tx: Prisma.TransactionClient, organizationId: string): Promise<SendModeContext> {
+    await this.lockRowsIn(tx, organizationId);
+    const row = await tx.settings.findUnique({ where: { key: organizationSendModeKey(organizationId) } });
+    const configured = this.parseOrganization(row?.value);
+    const system = await this.systemIn(tx);
+    const reverse = parseControlledDrain(row?.value);
+    // Validate persisted metadata even when this caller does not need its counts.
+    this.parseReallocation(row?.value);
+    // Authorization needs the locked mode, not the dashboard's organization-wide
+    // blocker counts. Reading every active writer here introduces SSI dependency
+    // cycles between otherwise independent sends in the same organization.
+    if (configured.mode === 'CONTROLLED') {
+      return { organizationId, mode: system.effectiveEnabled ? 'CONTROLLED' as const : 'PAUSED' as const,
+        configuredMode: configured.mode, revision: configured.revision, systemEnabled: system.effectiveEnabled,
+        systemRevision: system.value.revision, autonomousAllowed: false,
+        transition: configured.transition, legacyDrain: configured.legacyDrain, controlledDrain: reverse };
+    }
+    // Autonomous eligibility and historical handovers depend on actual obligations.
     return this.stateIn(tx, organizationId);
   }
 
@@ -970,9 +1006,11 @@ export class SendModeService {
     organizationId: string,
     reference: { rootPostId?: string; executionId?: string; drainDiscovery?: boolean } = {}
   ) {
-    const state = await this.lockIn(tx, organizationId);
+    const state = await this.lockModeIn(tx, organizationId);
+    if (state.mode === 'CONTROLLED') return state;
     const row = await tx.settings.findUnique({ where: { key: organizationSendModeKey(organizationId) } });
-    if (state.mode !== 'CONTROLLED' && !(state.systemEnabled && ((reference.drainDiscovery && state.controlledDrain) || await controlledDrainAllowsIn(tx, organizationId, parseControlledDrain(row?.value), reference))))
+    const reverse = parseControlledDrain(row?.value);
+    if (!(state.systemEnabled && ((reference.drainDiscovery && state.controlledDrain) || await controlledDrainAllowsIn(tx, organizationId, reverse, reference))))
       throw new ConflictException('SEND_MODE_CONTROLLED_REQUIRED');
     return state;
   }
@@ -982,7 +1020,7 @@ export class SendModeService {
     organizationId: string,
     existingPostIds?: string[]
   ) {
-    const state = await this.lockIn(tx, organizationId);
+    const state = await this.lockModeIn(tx, organizationId);
     if (existingPostIds?.length && await tx.post.findFirst({ where: { organizationId,
       id: { in: existingPostIds }, executionProtocol: 'LEGACY_QUARANTINED' } }))
       throw new ConflictException('LEGACY_CONTENT_QUARANTINED');
@@ -1009,7 +1047,7 @@ export class SendModeService {
   }
 
   async autonomousDrainPostIdsIn(tx: Prisma.TransactionClient, organizationId: string): Promise<string[] | null> {
-    const state = await this.lockIn(tx, organizationId);
+    const state = await this.lockModeIn(tx, organizationId);
     // Switching never transfers an old lease to another legacy executor.
     if (state.configuredMode === 'CONTROLLED') return [];
     if (state.mode !== 'AUTONOMOUS' || !state.autonomousAllowed)
@@ -1221,7 +1259,7 @@ export class SendModeService {
           userId: string;
         };
       }
-      const current = await this.lockIn(tx, organizationId);
+      const current = await this.lockIn(tx, organizationId, { write: true });
       if (current.revision !== body.expectedRevision)
         throw new ConflictException('SEND_MODE_REVISION_CONFLICT');
       if (body.mode === 'CONTROLLED' && !current.systemEnabled)
@@ -1330,7 +1368,7 @@ export class SendModeService {
           userId: string;
         };
       }
-      const current = await this.lockIn(tx, organizationId);
+      const current = await this.lockIn(tx, organizationId, { write: true });
       if (current.revision !== body.expectedRevision)
         throw new ConflictException('SEND_MODE_REVISION_CONFLICT');
       if (!current.transition)
@@ -1381,7 +1419,7 @@ export class SendModeService {
           ReturnType<SendModeService['getSystem']>
         >;
       }
-      await this.lockSettingIn(tx, SEND_MODE_SYSTEM_KEY);
+      await this.lockSettingIn(tx, SEND_MODE_SYSTEM_KEY, true);
       const current = await this.systemIn(tx);
       if (current.value.revision !== body.expectedRevision)
         throw new ConflictException('SEND_MODE_REVISION_CONFLICT');
@@ -1542,7 +1580,7 @@ export class SendModeService {
     const requestId = sendHash(['autonomous-effect-v1', operationKey]);
     const requestHash = sendHash(request);
     const admitted = await sendTransaction(this.db, async (tx) => {
-      const state = await this.lockIn(tx, organizationId);
+      const state = await this.lockIn(tx, organizationId, { write: true });
       const prior = await tx.sendMutationReceipt.findFirst({
         where: {
           organizationId,
@@ -2464,7 +2502,7 @@ export class SendModeService {
       const userId = actor.kind === 'USER' ? actor.userId : null;
       const actorKey = maintenance ? await this.maintenanceActorIn(tx, organizationId, actor) : null;
       if (!maintenance) await this.assertRecoveryAdministratorIn(tx, organizationId, userId);
-      await this.lockIn(tx, organizationId);
+      await this.lockIn(tx, organizationId, { write: true });
       const key = { organizationId, userId, operation: 'legacy-post-recovery', requestId: body.requestId };
       const auditKey = `${SEND_MAINTENANCE_RECOVERY_PREFIX}${organizationId}:${body.requestId}`;
       const requestHash = sendHash(maintenance ? { postId, body, actor } : { postId, body });
@@ -2623,7 +2661,7 @@ export class SendModeService {
     return sendTransaction(this.db, async tx => {
       const member = await this.memberIn(tx, organizationId, userId);
       if (!browser && !['ADMIN', 'SUPERADMIN'].includes(member.role)) throw new ForbiddenException('ORGANIZATION_ADMIN_REQUIRED');
-      await this.lockIn(tx, organizationId);
+      await this.lockIn(tx, organizationId, { write: true });
       const key = { organizationId, userId, operation: browser ? 'browser-reply-recovery' : 'legacy-reply-recovery', requestId: body.requestId };
       const requestHash = sendHash({ sentReplyId, expectedRecoveryRevision: body.expectedRecoveryRevision,
         ...(browser ? { reviewConfirmed: (body as BrowserReplyRecoveryDto).reviewConfirmed === true } : { executorStopped: attestation.executorStopped, noPendingSubmit: attestation.noPendingSubmit,

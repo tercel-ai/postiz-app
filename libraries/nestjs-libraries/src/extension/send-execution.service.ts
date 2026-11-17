@@ -230,7 +230,7 @@ export class SendExecutionService {
         expiresAt: new Date(now.getTime() + 30_000).toISOString(),
         serverNow: now.toISOString(),
       };
-    });
+    }, { backoffOnConflict: true });
   }
 
   async start(
@@ -313,6 +313,9 @@ export class SendExecutionService {
       throw new ConflictException(
         'SEND_OUTCOME_CONFLICT_REQUIRES_RECONCILIATION'
       );
+    // After commit: the send is already a fact, and the notification is a side
+    // channel that must not be able to undo it.
+    await this.sends.notifySendOutcome(auth.org, id);
     return result;
   }
 
@@ -323,7 +326,7 @@ export class SendExecutionService {
     lease: string,
     body: StopSendDto
   ) {
-    return sendTransaction(this.db, async (tx) => {
+    const result = await sendTransaction(this.db, async (tx) => {
       const { execution } = await this.authenticate(tx, auth, id, lease, true);
       const outcome = {
         status: 'definitely_not_submitted' as const,
@@ -371,6 +374,9 @@ export class SendExecutionService {
         throw new ConflictException('STOP_CONFIRMATION_REQUIRED');
       return this.sends.outcomeIn(tx, execution, index, outcome, now);
     });
+    // A stop is a terminal fact too: the post/reply will not be sent.
+    await this.sends.notifySendOutcome(auth.org, id);
+    return result;
   }
 
   async status(auth: NodeAuthentication, id: string, lease: string) {

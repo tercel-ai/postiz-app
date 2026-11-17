@@ -383,7 +383,7 @@ export class PlanExecutionService {
       });
       if (!plan) throw new NotFoundException('Operation plan not found');
       // Historical plan snapshots are audit data, never defaults for new drafts.
-      const controlled = (await this.modes.lockIn(tx, org)).mode === 'CONTROLLED';
+      const controlled = (await this.modes.lockModeIn(tx, org)).mode === 'CONTROLLED';
       const data = posts.map((post) => ({
         ...post,
         integrationId: null,

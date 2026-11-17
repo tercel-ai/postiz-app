@@ -5,6 +5,58 @@ import { SendModeService } from '../../extension/send-mode.service';
 import { memorySendDatabase } from '../../extension/__tests__/support/memory-send-database';
 
 const now = new Date('2026-11-13T08:00:00Z');
+it('includes saved editor content on the existing opportunity read without changing flat publication fields', async () => {
+  const draft = { id: 'draft', post: { state: 'DRAFT', content: 'Previously edited content' } };
+  const card = { id: 'opportunity', status: 'NEW', channelAvatar: 'avatar', sentReplyId: null as string | null, replyLink: null as string | null };
+  const repository = { getOpportunityById: vi.fn(async () => card),
+    getOpportunityDetail: vi.fn(async () => ({ sentReply: draft })) };
+  const service = Object.assign(Object.create(EngageService.prototype), { _engageRepository: repository });
+  expect(await service.getOpportunityById({ id: 'org' }, 'opportunity', 'project')).toEqual({ ...card, sentReply: draft });
+  expect(repository.getOpportunityById).toHaveBeenCalledWith('org', 'opportunity', 'project');
+  expect(repository.getOpportunityDetail).toHaveBeenCalledWith('org', 'opportunity', 'project');
+});
+
+it.each(['QUEUED', 'RESERVED', 'RECONCILING', 'SUCCEEDED'])('returns authoritative %s permissions at both editor summary locations', async status => {
+  const reply = { id: 'reply', postId: 'post', post: { id: 'post', state: status === 'SUCCEEDED' ? 'PUBLISHED' : 'QUEUE',
+    content: 'Saved reply', executionProtocol: 'ACCOUNT_BOUND_V1', sendIntentId: 'intent' } };
+  const sending = { rootPostId: 'post', status, allowedActions: { edit: { allowed: status === 'QUEUED' }, retry: { allowed: false } } };
+  const getSendingSummary = vi.fn(async () => sending);
+  const service = Object.assign(Object.create(EngageService.prototype), {
+    _engageRepository: { getOpportunityById: vi.fn(async () => ({ id: 'opportunity', replyLink: 'saved-link' })),
+      getOpportunityDetail: vi.fn(async () => ({ sentReply: reply })) },
+    // A historical controlled reply still needs its summary after mode handover.
+    _sendModes: { isControlled: vi.fn(async () => false) },
+    _postsService: { getSendingSummary },
+  });
+  const result = await service.getOpportunityById({ id: 'org' }, 'opportunity', 'project', 'user');
+  expect(result.replyLink).toBe('saved-link');
+  expect(result.sentReply.sending).toEqual(sending);
+  expect(result.sentReply.post.sending).toEqual(sending);
+  expect(getSendingSummary).toHaveBeenCalledExactlyOnceWith('org', 'user', 'post');
+  expect(reply).not.toHaveProperty('sending');
+});
+
+it('keeps autonomous legacy draft reads unchanged without calling controlled summary APIs', async () => {
+  const draft = { id: 'draft', postId: 'post', post: { id: 'post', state: 'DRAFT', content: 'Human draft', executionProtocol: 'LEGACY' } };
+  const getSendingSummary = vi.fn();
+  const service = Object.assign(Object.create(EngageService.prototype), {
+    _engageRepository: { getOpportunityById: vi.fn(async () => ({ id: 'opportunity' })),
+      getOpportunityDetail: vi.fn(async () => ({ sentReply: draft })) },
+    _sendModes: { isControlled: vi.fn(async () => false) }, _postsService: { getSendingSummary },
+  });
+  expect((await service.getOpportunityById({ id: 'org' }, 'opportunity', 'project', 'user')).sentReply).toEqual(draft);
+  expect(getSendingSummary).not.toHaveBeenCalled();
+});
+
+it('does not turn a failed permission lookup into an editable draft response', async () => {
+  const service = Object.assign(Object.create(EngageService.prototype), {
+    _engageRepository: { getOpportunityById: vi.fn(async () => ({ id: 'opportunity' })),
+      getOpportunityDetail: vi.fn(async () => ({ sentReply: { id: 'reply', postId: 'post', post: { id: 'post', sendIntentId: 'intent' } } })) },
+    _sendModes: { isControlled: vi.fn(async () => true) },
+    _postsService: { getSendingSummary: vi.fn(async () => { throw new Error('SEND_OWNER_CHANGED'); }) },
+  });
+  await expect(service.getOpportunityById({ id: 'org' }, 'opportunity', 'project', 'user')).rejects.toThrow('SEND_OWNER_CHANGED');
+});
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(now); vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true'); });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 function fixture() {
