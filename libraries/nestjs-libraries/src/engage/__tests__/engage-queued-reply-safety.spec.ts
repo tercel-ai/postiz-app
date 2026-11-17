@@ -98,6 +98,66 @@ it('keeps full safe unclaimed legacy reply editing available', async () => {
   expect(f.db.rows('post')[0]).toMatchObject({ content: 'edited', contentRevision: 2 });
   expect(f.db.rows('engageSentReply')[0].inputData).toEqual({ strategy: 'new' });
 });
+
+it.each(['AUTONOMOUS', 'CONTROLLED'])('edits the original DRAFT beside a failed scheduled sibling in %s without releasing or recreating either record', async mode => {
+  const f = fixture(); f.post.state = 'DRAFT';
+  f.db.rows('settings')[0].value = { mode, revision: 1 };
+  f.db.seed('engageOpportunityState', { id: 'state', organizationId: 'org', projectId: 'project', opportunityId: 'opportunity', status: 'SCHEDULED' });
+  f.db.seed('post', { id: 'sibling-post', organizationId: 'org', projectId: 'project', state: 'ERROR', content: 'failed content', sendIntentId: 'intent' });
+  f.db.seed('engageSentReply', { id: 'failed-sibling', organizationId: 'org', projectId: 'project', opportunityId: 'opportunity', postId: 'sibling-post' });
+  f.db.seed('sendIntent', { id: 'intent', organizationId: 'org', rootPostId: 'sibling-post', status: 'FAILED_FINAL', hasConfirmedSegments: false });
+  const before = structuredClone({ state: f.db.rows('engageOpportunityState'), sibling: f.db.rows('post')[1], intents: f.db.rows('sendIntent') });
+  await f.repo.updateScheduledReply('org', 'reply', { content: 'saved edit', inputData: { strategy: 'QUESTION_LED', mentions: ['brand'], brandStrength: 2 } });
+  expect(f.post).toMatchObject({ id: 'post', state: 'DRAFT', content: 'saved edit', contentRevision: 2, releaseId: null, claimedAt: null });
+  expect(f.db.rows('engageSentReply')[0]).toMatchObject({ id: 'reply', inputData: { strategy: 'QUESTION_LED', mentions: ['brand'], brandStrength: 2 } });
+  expect({ state: f.db.rows('engageOpportunityState'), sibling: f.db.rows('post')[1], intents: f.db.rows('sendIntent') }).toEqual(before);
+  expect(f.db.rows('post')).toHaveLength(2); expect(f.db.rows('engageSentReply')).toHaveLength(2);
+  expect(await f.claim()).toEqual([]);
+});
+
+it.each(['QUEUED', 'RECONCILING', 'SUCCEEDED'])('preserves the sibling %s intent while saving a separate private DRAFT', async status => {
+  const f = fixture(); f.post.state = 'DRAFT';
+  f.db.seed('engageOpportunityState', { id: 'state', organizationId: 'org', projectId: 'project', opportunityId: 'opportunity', status: 'SCHEDULED' });
+  f.db.seed('sendIntent', { id: 'sibling-intent', organizationId: 'org', rootPostId: 'other-post', status, hasConfirmedSegments: status === 'SUCCEEDED' });
+  const before = structuredClone(f.db.rows('sendIntent'));
+  await f.repo.updateScheduledReply('org', 'reply', { content: 'private edit' });
+  expect(f.post.state).toBe('DRAFT'); expect(f.db.rows('sendIntent')).toEqual(before);
+  expect(f.db.rows('engageOpportunityState')[0].status).toBe('SCHEDULED');
+});
+
+it.each(['claim', 'authorized', 'unknown', 'confirmed', 'deleted', 'quarantined', 'captured', 'intent'])(
+  'retains %s evidence protection while editing an original DRAFT', async kind => {
+    const f = fixture(); f.post.state = 'DRAFT';
+    if (kind === 'claim') Object.assign(f.post, { releaseId: 'claim_old', claimedAt: now });
+    if (['authorized', 'unknown', 'confirmed'].includes(kind)) {
+      const grant = await f.modes.beginBrowserWrite('org', 'user', { expectedOrganizationId: 'org', expectedUserId: 'user', requestId: 'old', platform: 'x', sentReplyId: 'reply', contentHash: 'a'.repeat(64) });
+      if (kind !== 'authorized') await f.modes.settleBrowserWrite('org', 'user', grant.id, { expectedOrganizationId: 'org', expectedUserId: 'user', status: kind.toUpperCase() } as any);
+    }
+    if (kind === 'deleted') f.post.deletedAt = now;
+    if (kind === 'quarantined') f.post.executionProtocol = 'LEGACY_QUARANTINED';
+    if (kind === 'intent') f.post.sendIntentId = 'intent';
+    if (kind === 'captured') f.db.rows('settings')[0].value = { mode: 'CONTROLLED', revision: 2, legacyDrain: { version: 2, targetMode: 'CONTROLLED', requestedAt: now.toISOString(), requestedByUserId: 'user', eligiblePostIds: ['post'], eligiblePostOccurrences: { post: now.toISOString() }, effectReceiptIds: [] } };
+    await expect(f.repo.updateScheduledReply('org', 'reply', { content: 'unsafe edit' })).rejects.toThrow();
+    expect(f.post.content).toBe('original');
+  }
+);
+
+it('cannot schedule an original DRAFT through the content-edit route', async () => {
+  const f = fixture(); f.post.state = 'DRAFT';
+  await expect(f.repo.updateScheduledReply('org', 'reply', { content: 'edit', publishDate: new Date(+now + 3600000) })).rejects.toThrow('draft must be enqueued');
+  expect(f.post).toMatchObject({ state: 'DRAFT', content: 'original' });
+});
+
+it('does not edit another organization or revive published and failed original replies', async () => {
+  for (const state of ['PUBLISHED', 'ERROR']) {
+    const f = fixture(); f.post.state = state;
+    await expect(f.repo.updateScheduledReply('org', 'reply', { content: 'edit' })).rejects.toThrow();
+    expect(f.post.content).toBe('original');
+  }
+  const f = fixture(); f.post.state = 'DRAFT';
+  await expect(f.repo.updateScheduledReply('other-org', 'reply', { content: 'edit' })).rejects.toThrow('not found');
+  expect(f.post.content).toBe('original');
+});
 it.each(['future', 'api'])('does not browser-claim a %s queued reply', async kind => {
   const f = fixture();
   if (kind === 'future') f.post.publishDate = new Date(+now + 86400000);

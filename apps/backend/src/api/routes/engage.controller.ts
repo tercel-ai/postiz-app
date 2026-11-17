@@ -1492,7 +1492,8 @@ export class EngageController {
   }
 
   @ApiOperation({
-    summary: 'Edit content / schedule of a scheduled (QUEUE) engage reply',
+    summary: 'Edit the original saved DRAFT or scheduled QUEUE engage reply',
+    description: 'DRAFT content edits preserve the original reply and never claim or enqueue its opportunity. A DRAFT cannot be rescheduled through this route. Existing versioned coordinated edits and QUEUE scheduling protections remain authoritative.',
   })
   @ApiResponse({
     status: 400,

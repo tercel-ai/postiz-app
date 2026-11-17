@@ -609,6 +609,44 @@ upsertDraft and all sending/account/UNKNOWN guards remain authoritative. This is
 read/display correction, not a release of queued account bindings or automatic
 submission. Deploy backend before frontend; no migration or historical rewrite.
 
+### Original draft editing and opportunity claim consistency
+
+Live API diagnosis found a saved DRAFT and a different ERROR reply with a
+FAILED_FINAL intent / NOT_SUBMITTED segment on one SCHEDULED opportunity. The
+Awaiting review list correctly selected the DRAFT Post; opportunity detail
+correctly selected the separate attempted reply. The website incorrectly mixed
+that detail's settings with the DRAFT and called opportunity-level save-draft,
+whose new-work gate correctly refused the already-claimed opportunity.
+
+The correction reads and edits the clicked EngageSentReply by its original ID.
+The existing PATCH route now permits safe original DRAFT content/settings edits
+under its existing mode lock and conditional update, without enqueue, claim,
+intent creation, state reset, sibling cleanup or workflow start. Original QUEUE
+rescheduling and coordinated versioned editing remain unchanged; a DRAFT cannot
+be rescheduled through the content-edit route. Claim/admission/UNKNOWN, deleted,
+quarantined and confirmed-original protections remain enforced. The coarse
+SCHEDULED claim is intentionally preserved, including when a sibling failed;
+editing a private draft does not grant authority to send a second reply.
+
+Deploy backend before the website's exact-ID draft-save callback. Old servers
+reject the new DRAFT PATCH safely and the website keeps the editor open. No
+database repair, deletion, cancellation, schema migration or historical replay
+is required. Developer diagnostics attempted Prisma reads only after validating
+the configured database name; connectivity was unavailable. Record-level live
+evidence came from authenticated existing website GET responses, not a DB write.
+
+Verification: 297 focused repository/safety cases passed (including 44 original
+Reply safety cases). The updated safety suite against HEAD's original source in
+an isolated source snapshot reproduced six failures; all 44 pass with the fix.
+The final permitted full suite, with external DB/Redis connections disabled and
+frozen apps/extension excluded, reported 5825 passed, 4 failed and 112 skipped.
+The four failures remain the existing engage-scan-ingest scoring assertions.
+Production backend typecheck and whitespace checks passed. Website checks report
+25 draft regressions passed and 543 full-suite passes / 1 existing URL-assertion
+failure; both typechecks passed. No production build, deployment or live business
+mutation was performed. The website exact-ID GET was verified in Chrome; successful
+DRAFT PATCH/reopen remains a post-deployment check.
+
 
 ### Review corrections for draft recovery (2026-11-17)
 

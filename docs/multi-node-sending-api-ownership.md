@@ -684,6 +684,27 @@ acknowledgements. Existing save-draft remains DRAFT-only, uses the original scop
 working copy, and never grants a lease, permit, claim or send intent. No schema
 migration is required; older frontends ignore the additive list field.
 
+### Existing Reply drafts beside another claimed reply
+
+An opportunity can have multiple EngageSentReply/Post records. Its SCHEDULED
+status is a reply-claim marker, not an assertion that every linked Post is QUEUE
+or that a timer remains active. A terminal failed coordinated attempt retains its
+claim/audit context; a separate pre-existing human DRAFT can still be present.
+Do not reset the opportunity or cancel/retry the sibling just to edit that draft.
+
+The existing `GET /engage/sent/:id` is the exact-record editor read. Opportunity
+detail can legitimately select another reply and must not supply the clicked
+draft's content, strategy, mentions or sending permissions. The existing
+`PATCH /engage/sent/:id` accepts content/settings edits to an original unclaimed
+legacy DRAFT as well as its existing QUEUE editing behavior. It uses the same
+mode lock and conditional Post update; DRAFT remains DRAFT, and the opportunity,
+sibling records, intents and executions are unchanged. DRAFT scheduling through
+this route is rejected; normal enqueue/claim is still required for publication.
+Deleted/removed, claimed/admitted, quarantined and intent-owned originals retain
+their protections; coordinated originals still use the versioned coordinator
+editor. Generation/new-draft `save-draft` keeps its existing actionable-status
+gate, including rejecting SCHEDULED. No new endpoint, field or migration.
+
 ## Segment preflight serialization conflicts (2026-11-17)
 
 Normal mode guards now use compatible `FOR SHARE` Settings row locks instead

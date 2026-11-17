@@ -6559,8 +6559,13 @@ export class EngageRepository {
       const post = reply.post;
       if (post.sendIntentId || !isLegacyExecution(post.executionProtocol))
         throw new ConflictException('SEND_INTENT_IMMUTABLE');
-      if (post.state !== 'QUEUE')
+      if (!['DRAFT', 'QUEUE'].includes(post.state))
         throw new BadRequestException('Reply has already been sent — cannot edit');
+      // Saving an existing working copy is not a new reply claim. A sibling
+      // send can own SCHEDULED while this original remains a private DRAFT.
+      // Scheduling still requires the normal enqueue/claim path.
+      if (post.state === 'DRAFT' && data.publishDate)
+        throw new BadRequestException('A draft must be enqueued before it can be rescheduled');
       if (post.deletedAt || post.releaseId || post.claimedAt || post.releaseURL ||
           this._sendModes && (await this._sendModes.activeLegacyPostIdsIn(tx, organizationId)).includes(post.id))
         throw new ConflictException('LEGACY_CONTENT_DRAIN_REQUIRED');
@@ -6576,7 +6581,7 @@ export class EngageRepository {
       }
       if (data.content !== undefined || data.inputData !== undefined || data.publishDate) {
         const changed = await tx.post.updateMany({
-          where: { id: post.id, organizationId, state: 'QUEUE', sendIntentId: null,
+          where: { id: post.id, organizationId, state: post.state, sendIntentId: null,
             deletedAt: null, releaseId: null, releaseURL: null, claimedAt: null,
             contentRevision: post.contentRevision, routeRevision: post.routeRevision, publishDate: post.publishDate, AND: [legacyExecutionWhere()] },
           data: { ...(data.content !== undefined ? { content: data.content } : {}),
