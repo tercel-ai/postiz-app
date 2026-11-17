@@ -715,8 +715,10 @@ Serializable lookup/write transaction with bounded conflict retry. Coordinated
 automatic drafts retain their separate ACCOUNT_BOUND_V1/AUTOMATION scope; QUEUE,
 claim, quota, confirmation and UNKNOWN semantics are unchanged.
 
-Existing human copies are selected by Post.updatedAt, then reply.updatedAt,
-createdAt and ID. NEW opportunity detail and draft upsert use this ordering; Feed
+Existing human copies are selected by server-owned inputData._draftSavedAt, then
+createdAt and ID, through the same latestDraft selector. Missing/invalid legacy
+save provenance falls back to createdAt, never either general updatedAt clock.
+NEW opportunity detail and human draft upsert use this ordering; Feed
 draftReplyId selects the most recently saved copy while non-draft publication IDs
 and links retain their original creation-order contract. Existing explicit-ID
 draft PATCH updates the selected original, without generation or another row.
@@ -724,6 +726,26 @@ Regeneration remains version history, not implicit sending authority. Historical
 duplicate records are neither deleted nor repurposed. No schema change is needed.
 Deploy the backend for nullable upsert and latest-save ordering; the website can
 use the already-deployed exact-ID DRAFT PATCH independently.
+
+Context-review correction: Post.updatedAt and Reply.updatedAt are general metadata
+clocks and cannot identify the last content save. Failure annotations and author
+enrichment must not promote old content. Only human DRAFT upsert/create and safe
+exact-ID human DRAFT PATCH write _draftSavedAt inside the same transaction as the
+content. Partial PATCH preserves omitted saved settings. This is an optional,
+server-owned key in the existing inputData JSON, not a request DTO field, state,
+column or migration. Existing clients ignore it and continue sending ordinary
+content/strategy/brandStrength/mentions. All human read selectors use one complete
+save/creation/ID comparison, including timestamp ties. Automatic QUEUE and
+coordinated automatic DRAFT producers retain their original findFirst lookup,
+payload and mode/claim semantics; they neither sort by the human save marker nor
+write it. Legacy automatic DRAFT input is also not restamped as a human save.
+
+The existing general timestamps, per-record revisions and best-effort per-
+opportunity generationHistory cannot supply atomic per-original content-save
+provenance; the narrowly scoped JSON key avoids changing their existing meanings.
+Unmarked historical duplicates are preserved, with no guessed rewrite or cleanup.
+Deploy all manual-draft read/write API instances together for the new save clock;
+there is no DDL or migration command. Deployment is performed only by the user.
 
 ## Segment preflight serialization conflicts (2026-11-17)
 

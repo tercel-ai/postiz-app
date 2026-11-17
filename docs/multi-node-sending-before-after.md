@@ -603,9 +603,12 @@ Cross-entry verification exposed repeated creation without regeneration: SQL
 `sendOrigin != AUTOMATION` does not match NULL, while human draft creation writes
 NULL. Upsert now explicitly includes that legacy origin, preserving automation,
 protocol and scope isolation. Its existing Serializable transaction/retry boundary
-still covers lookup and writes. Upsert and NEW detail select the last saved Post,
-with deterministic reply timestamp/creation/ID tie breaks. The Feed draft marker
-uses saved Post time independently from publication/link selection. This fixes
+still covers lookup and writes. Human upsert and NEW detail select the last saved
+working copy using the server-owned inputData._draftSavedAt key, with deterministic
+creation/ID tie breaks. The Feed draft marker uses the identical selector,
+independently from publication/link selection. Legacy records without save
+provenance fall back to creation order. General metadata timestamps are ignored.
+This fixes
 new copies and supports pre-existing duplicates without deleting historical rows.
 
 The website uses exact-ID PATCH for an existing original when saving/handing off
@@ -630,6 +633,32 @@ bidirectional edits, latest saved card/editor/Step 2 preview agreement, refresh
 recovery, and original restoration. No platform send, regeneration, deletion or
 direct database operation occurred. Live tests used exact-ID saves on the current
 server; the new backend NULL lookup/latest-old-copy ordering remain pending deploy.
+
+### Context review correction and deployment handoff
+
+Review reproduced three problems in the superseded patch: Post.updatedAt could
+promote an old draft after an error-only update; list/detail tie breaks differed;
+and unconditional upsert ordering also changed automatic producers. The corrected
+code separates content-save provenance from metadata by adding a server-owned key
+to the existing inputData JSON. Only human DRAFT saves update it atomically with
+the original content/settings; partial edits preserve omitted settings. The pure
+latestDraft selector is reused for human upsert, NEW detail and the Feed marker.
+Automatic QUEUE/coordinated DRAFT queries and payloads retain the pre-change
+findFirst semantics. No general timestamp, mode, claim, authorization, quota,
+audit evidence, UNKNOWN protection or automatic scheduling rule is repurposed.
+
+Four context cases fail on the superseded source and pass on the corrected
+isolated source. Tests additionally cover nullable origin reuse, pure selector
+ties, malformed/legacy JSON, content-only saves, metadata-only failure updates,
+automatic payload isolation and existing sending protections. Final working-tree
+full suite: 5839 passed, 4 pre-existing scan-scoring failures, 112 skipped; frozen
+apps/extension excluded and external DB/Redis disabled. Isolated selected-source
+full suite: 5830 passed, the same 4 scoring failures, 112 skipped, plus the same
+three pre-existing symlink-dependent frontend setup failures as the isolated
+baseline. Production backend typecheck passed. Existing frontend draft/send
+regressions: 74 passed. No migration, live database operation, platform send or
+deployment was performed. Only the user deploys this revision; post-deployment
+browser verification of the new save provenance remains outstanding.
 
 ## Signal Feed draft recovery (2026-11-17)
 
