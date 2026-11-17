@@ -502,7 +502,7 @@ export class SendQuotaService {
       throw new ConflictException('QUOTA_BUCKET_CONFLICT');
     if (
       budget.enforce !== false &&
-      bucket.confirmedUnits + bucket.heldUnits + budget.units > budget.limit
+      bucket.confirmedUnits + budget.units > budget.limit
     )
       throw new ForbiddenException({ message: 'SEND_QUOTA_EXHAUSTED', error: 'Forbidden', statusCode: 403, quota: {
         scope: budget.scope, dimension: budget.dimension, limit: budget.limit,
@@ -511,7 +511,7 @@ export class SendQuotaService {
       } });
   }
 
-  /** Read the same ledger or historical baseline as reservation without allocating quota. */
+  /** Daily usage counts confirmed writes only; reservations retain audit evidence. */
   async assertAvailable(tx: Prisma.TransactionClient, org: string, budgets: SendBudget[], now: Date) {
     for (const budget of [...budgets].sort((a, b) => a.key.localeCompare(b.key))) {
       this.validateBudget(budget, now);
@@ -651,6 +651,8 @@ export class SendQuotaService {
     confirmed: boolean,
     now: Date
   ) {
+    // RELEASED means capacity returned, not proof of non-submission.
+    if (confirmed) await this.correctLateConfirmation(tx, org, executionId, index, now);
     const rows = await tx.sendQuotaReservation.findMany({
       where: {
         organizationId: org,

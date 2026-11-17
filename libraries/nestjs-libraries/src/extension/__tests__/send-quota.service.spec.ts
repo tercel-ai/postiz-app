@@ -51,6 +51,7 @@ describe('quota reservation ledger', () => {
     await db.$transaction((tx: any) => q.correctLateConfirmation(tx, 'org', 'old', 0, now));
     await db.$transaction((tx: any) => q.correctLateConfirmation(tx, 'org', 'old', 0, now));
     expect(db.rows('sendQuotaBucket')[0]).toMatchObject({ confirmedUnits: 1, heldUnits: 1 });
+    await db.$transaction((tx: any) => q.settle(tx, 'org', 'new', 0, true, now));
     await expect(db.$transaction((tx: any) => q.reserve(tx, 'org', 'third', 0, [budget({ limit: 2 })], now)))
       .rejects.toThrow('SEND_QUOTA_EXHAUSTED');
   });
@@ -479,8 +480,7 @@ describe('quota continuity across organization sending modes', () => {
     await f.db.$transaction((tx: any) => f.quotas.reserve(tx, 'org', 'second', 0, [reopenedBudget], now));
     expect(f.db.rows('sendQuotaBucket').find(row => row.id === reopenedBudget.key))
       .toMatchObject({ confirmedUnits: 2, heldUnits: 1 });
-    await expect(f.db.$transaction((tx: any) => f.quotas.reserve(tx, 'org', 'third', 0, [reopenedBudget], now)))
-      .rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+    await f.db.$transaction((tx: any) => f.quotas.assertAvailable(tx, 'org', [reopenedBudget], now));
     f.db.seed('sendExecution', { id: 'second', organizationId: 'org', projectId: 'project', platform: 'x', action: 'POST',
       canonicalAccountKey: account.canonicalAccountKey, sendIntentId: intent.id, status: 'CONFIRMED' });
     f.db.seed('sendSegment', { organizationId: 'org', executionId: 'second', segmentIndex: 0, status: 'CONFIRMED', authorizedAt: now });
@@ -524,6 +524,7 @@ it('settles contradictory late confirmations into every mode epoch exactly once'
   expect(f.db.rows('sendQuotaBucket').find(row => row.id === reopened.key)).toMatchObject({ confirmedUnits: 2, heldUnits: 1 });
   expect(f.db.rows('sendQuotaReservation').filter(row => row.executionId === 'old-released').map(row => row.state))
     .toEqual(['COMMITTED', 'COMMITTED']);
+  await f.db.$transaction((tx: any) => f.quotas.settle(tx, 'org', 'current', 0, true, now));
   await expect(f.db.$transaction((tx: any) => f.quotas.reserve(tx, 'org', 'extra', 0, [reopened], now)))
     .rejects.toThrow('SEND_QUOTA_EXHAUSTED');
 });
@@ -545,6 +546,7 @@ it.each([['x', 'x', 'reddit'], ['linkedin', 'linkedin-page', 'x']])(
     await f.db.$transaction((tx: any) => f.quotas.reserve(tx, 'org', 'one', 0, [selected], now));
     expect(f.db.rows('sendQuotaBucket').find(row => row.id === selected.key))
       .toMatchObject({ confirmedUnits: 4, heldUnits: 1 });
+    await f.db.$transaction((tx: any) => f.quotas.settle(tx, 'org', 'one', 0, true, now));
     await expect(f.db.$transaction((tx: any) => f.quotas.reserve(tx, 'org', 'two', 0, [selected], now)))
       .rejects.toThrow('SEND_QUOTA_EXHAUSTED');
   }
@@ -648,10 +650,10 @@ describe('autonomous side-effect quota baseline', () => {
 it('returns the exhausted quota and reset window without exposing ledger keys', async () => {
   const db = memorySendDatabase();
   const q = new SendQuotaService();
-  db.seed('sendQuotaBucket', { ...budget(), id: 'budget', organizationId: 'org', confirmedUnits: 0, heldUnits: 1 });
+  db.seed('sendQuotaBucket', { ...budget(), id: 'budget', organizationId: 'org', confirmedUnits: 1, heldUnits: 1 });
   const error = await db.$transaction((tx: any) => q.reserve(tx, 'org', 'next', 0, [budget()], now)).catch(error => error);
   expect(error.getResponse()).toMatchObject({ message: 'SEND_QUOTA_EXHAUSTED', error: 'Forbidden', statusCode: 403, quota: {
-    scope: 'PROJECT', dimension: 'REPLY_ROOTS_AUTO', limit: 1, confirmedUnits: 0, heldUnits: 1,
+    scope: 'PROJECT', dimension: 'REPLY_ROOTS_AUTO', limit: 1, confirmedUnits: 1, heldUnits: 1,
     requestedUnits: 1, resetAt: '2026-10-16T00:00:00.000Z', timezone: 'UTC',
   } });
   expect(JSON.stringify(error.getResponse())).not.toContain('budget');
@@ -662,10 +664,10 @@ it('returns the exhausted quota and reset window without exposing ledger keys', 
 describe('read-only quota admission', () => {
   it.each([false, true])('rejects a full quota without initializing or changing the ledger (existing bucket: %s)', async existing => {
     const db = memorySendDatabase(), quota = new SendQuotaService();
-    if (existing) db.seed('sendQuotaBucket', { id: 'budget', organizationId: 'org', ...budget(), confirmedUnits: 0, heldUnits: 1 });
+    if (existing) db.seed('sendQuotaBucket', { id: 'budget', organizationId: 'org', ...budget(), confirmedUnits: 1, heldUnits: 1 });
     else {
       db.seed('sendExecution', { id: 'uncertain', organizationId: 'org', projectId: 'project', platform: 'x', action: 'REPLY' });
-      db.seed('sendSegment', { executionId: 'uncertain', organizationId: 'org', segmentIndex: 0, authorizedAt: now, status: 'UNKNOWN' });
+      db.seed('sendSegment', { executionId: 'uncertain', organizationId: 'org', segmentIndex: 0, authorizedAt: now, confirmedAt: now, status: 'CONFIRMED' });
     }
     const before = structuredClone([db.rows('sendQuotaBucket'), db.rows('sendQuotaReservation'), db.rows('sendSegment')]);
     await expect(db.$transaction((tx: any) => quota.assertAvailable(tx, 'org', [budget()], now))).rejects.toThrow('SEND_QUOTA_EXHAUSTED');
@@ -686,6 +688,7 @@ describe('read-only quota admission', () => {
     await quota.assertAvailable(db as any, 'org', [budget()], now);
     expect(db.rows('sendQuotaBucket')).toHaveLength(0);
     await db.$transaction((tx: any) => quota.reserve(tx, 'org', 'winner', 0, [budget()], now));
+    await db.$transaction((tx: any) => quota.settle(tx, 'org', 'winner', 0, true, now));
     await expect(db.$transaction((tx: any) => quota.reserve(tx, 'org', 'loser', 0, [budget()], now))).rejects.toThrow('SEND_QUOTA_EXHAUSTED');
     expect(db.rows('sendQuotaReservation')).toHaveLength(1);
   });
@@ -700,4 +703,36 @@ it('allows a fresh quota window without changing the exhausted previous day',asy
  await quota.assertAvailable(db as any,'org',[next],later);
  expect(db.rows('sendQuotaBucket')).toHaveLength(1);expect(db.rows('sendQuotaBucket')[0].confirmedUnits).toBe(1);
  expect(db.rows('sendQuotaReservation')).toHaveLength(0);
+});
+
+describe('daily quota counts successful sends only', () => {
+  it.each(['PROJECT', 'ACCOUNT', 'ACCOUNT_CHANNEL'])('allows the fifth success after four successes and three unresolved attempts: %s', async scope => {
+    const db = memorySendDatabase(), q = new SendQuotaService();
+    const b = budget({ scope, limit: 5 });
+    db.seed('sendQuotaBucket', { ...b, id: b.key, organizationId: 'org', confirmedUnits: 4, heldUnits: 3 });
+    await db.$transaction((tx: any) => q.assertAvailable(tx, 'org', [b], now));
+    await db.$transaction((tx: any) => q.reserve(tx, 'org', 'fifth', 0, [b], now));
+    await db.$transaction((tx: any) => q.settle(tx, 'org', 'fifth', 0, true, now));
+    expect(db.rows('sendQuotaBucket')[0]).toMatchObject({ confirmedUnits: 5, heldUnits: 3 });
+    await expect(db.$transaction((tx: any) => q.reserve(tx, 'org', 'sixth', 0, [b], now)))
+      .rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+  });
+  it.each(['UNKNOWN', 'AUTHORIZED', 'NOT_SUBMITTED'])('does not count historical %s as success in a new bucket', async status => {
+    const db = memorySendDatabase(), q = new SendQuotaService();
+    db.seed('sendExecution', { id: 'old', organizationId: 'org', projectId: 'project', platform: 'x', action: 'REPLY', status: 'RECONCILING' });
+    db.seed('sendSegment', { executionId: 'old', organizationId: 'org', segmentIndex: 0, authorizedAt: now, status });
+    await db.$transaction((tx: any) => q.reserve(tx, 'org', 'next', 0, [budget()], now));
+    expect(db.rows('sendQuotaBucket')[0].confirmedUnits).toBe(0);
+    expect(db.rows('sendSegment')[0].status).toBe(status);
+    expect(db.rows('sendExecution')[0].status).toBe('RECONCILING');
+  });
+  it('counts a late successful receipt exactly once without replaying its original task', async () => {
+    const db = memorySendDatabase(), q = new SendQuotaService();
+    await db.$transaction((tx: any) => q.reserve(tx, 'org', 'uncertain', 0, [budget()], now));
+    await db.$transaction((tx: any) => q.reserve(tx, 'org', 'next', 0, [budget()], now));
+    await db.$transaction((tx: any) => q.settle(tx, 'org', 'uncertain', 0, true, now));
+    await db.$transaction((tx: any) => q.settle(tx, 'org', 'uncertain', 0, true, now));
+    expect(db.rows('sendQuotaBucket')[0]).toMatchObject({ confirmedUnits: 1, heldUnits: 1 });
+    await expect(q.assertAvailable(db as any, 'org', [budget()], now)).rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+  });
 });

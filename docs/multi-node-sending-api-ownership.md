@@ -623,3 +623,36 @@ Review clarification: raw `GET /extension/nodes` session rows also return
 `verificationExpiresAt: null`, matching sending-context/account projections for
 historical records. Node connection labels are advisory, not claim/start gates;
 backend account-evidence, authorization and idempotency checks remain mandatory.
+
+### Expired uncertainty does not reserve queue capacity (2026-11-16)
+
+Quota availability/reservation settles eligible expired UNKNOWN holds as RELEASED
+using the existing writer-expiry proof, without changing business records,
+SendIntent, execution or segment outcomes. `/status` and `allowedActions` still
+require original-content reconciliation; no retry eligibility changes. Account
+occupancy, pacing and concurrent authorization remain enforced. Confirmation
+settles previously returned capacity as actual usage exactly once, including
+across mode-revision buckets. See `organization-sending-modes.md` for the updated
+quota policy and deployment order. No request/response fields or schema change.
+
+### Medium/Quora empty preparation before native authorization (2026-11-17)
+
+The extension now prepares Quora Post/Reply composers and checks Medium Reply
+restored drafts before requesting the existing segment preflight/start. Failed
+empty preparation retains PREPARED and uses the original stop-confirmation API;
+post-dispatch uncertainty still reports UNKNOWN. No endpoint, request/response
+field, authorization policy or allowedActions changes. Existing Medium response
+matches stop before sending and require the current saved-reply verification
+path; they are not reported as a successful new execution. Rebuild/reload the
+extension; no backend migration or historical auto-retry is needed.
+
+## Confirmed-success-only daily quota (2026-11-17)
+
+The confirmed-success-only policy in postiz-app's `organization-sending-modes.md`
+supersedes the earlier HELD/expiry-based quota admission notes above. Only
+`confirmedUnits + requestedUnits` is checked against the daily limit; held/failed/
+UNKNOWN attempts do not consume successful quota. Existing account occupancy,
+pacing and content replay protection remain separate. Late successes are counted
+once, including released historical reservations. No API, client capability or
+schema changes; deploy the backend. Already-dispatched/late outcomes are recorded
+truthfully and can exceed the limit before subsequent authorizations stop.

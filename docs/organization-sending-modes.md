@@ -772,3 +772,63 @@ reuse unchanged acknowledged session bindings; AUTONOMOUS keeps the current
 browser account. Legacy STALE display text means verification is needed, not
 platform cookie expiry. Deploy the backend before the extension; no migration,
 new business state or API is needed. See the [complete contract](../../aisee-browser-extension/docs/account-bound-send-protocol.md#browser-login-continuity-without-a-verification-ttl-2026-11-16).
+
+## Uncertain content and reusable quota capacity (2026-11-16)
+
+This policy supersedes earlier statements that all UNKNOWN quota holds remain
+HELD until manual reconciliation. An uncertain task retains its original
+RECONCILING intent, UNKNOWN segment, journal, account binding and content deduplication.
+It is never automatically requeued or granted another send attempt.
+
+Quota admission and reservation now reuse the existing writer-expiry proof.
+Only an UNKNOWN segment in a RECONCILING execution with conclusively expired
+write authority can return its HELD capacity as RELEASED. Live permits, missing
+expiry evidence and exposed drafts outside the existing bounded X rule retain
+protection. Account occupancy release and platform/project cooldown remain
+separate checks; returning quota does not bypass them. This applies to account,
+channel and project quota buckets for both Post and Reply. The configured limits
+now bound confirmed writes plus still-protected reservations, rather than all
+historical uncertain attempts. A confirmed late outcome can therefore push a
+bucket above its configured limit; it is recorded once and blocks further
+admission instead of being discarded.
+
+Existing buckets release eligible holds during their next capacity check or
+reservation. New/mode-revision buckets seed eligible uncertainty as RELEASED,
+retaining ledger entries for late outcomes. Confirmation commits both remaining
+HELD and previously RELEASED reservations exactly once. RELEASED is capacity
+accounting, not evidence of non-submission or permission to resend. Autonomous
+receipts retain their existing admission/recovery rules; this change only affects
+the controlled quota ledger and preserves mode handover and actual-account rules.
+
+Deploy the backend before the updated extension. No schema migration, database
+cleanup or historical task replay is required. Old clients retain their original
+send protections; independent controlled tasks can reuse expired capacity.
+
+## Confirmed-success-only daily quota (2026-11-17)
+
+User policy clarification supersedes earlier HELD-based admission and the
+expiry-based quota-capacity release described above. Daily admission/reservation
+uses `confirmedUnits + requestedUnits <= limit`. HELD reservations are audit and
+outcome-settlement evidence, not consumed successful quota; FAILED/NOT_SUBMITTED
+and UNKNOWN do not count as success. With a limit of five, four confirmations and
+three failed/uncertain attempts leave one successful send available. No expiry
+proof or manual cleanup is required to ignore uncertainty in daily usage.
+
+The quota-only expiry sweeper is removed. Original intents, journals, UNKNOWN
+segments, content deduplication, account identity checks and retry eligibility
+remain protected. Account occupancy expiry, in-flight mutual exclusion, platform
+cooldown and project cadence retain their existing independent rules. Ignoring
+an UNKNOWN daily hold does not authorize replay of that original content.
+
+Normal and late confirmations increment actual successful usage exactly once,
+including historical RELEASED reservations and mode-revision baselines. Each new
+authorization rechecks the current successful count. Already-authorized writes or
+late confirmations may finish after the last slot was checked; record their real
+successes even above the limit and stop subsequent authorizations. This policy
+does not promise a hard bound on physically completed writes whose prior outcome
+was unknowable, or cancel already-dispatched platform requests.
+
+Existing APIs and response fields remain unchanged; heldUnits remains diagnostic.
+Deploy the backend quota change. No schema migration, data deletion, new queue,
+new API or bulk historical retry is required. Website and extension use the
+existing server decisions; no new client capability is needed for this policy.

@@ -575,3 +575,23 @@ reuse unchanged acknowledged session bindings; AUTONOMOUS keeps the current
 browser account. Legacy STALE display text means verification is needed, not
 platform cookie expiry. Deploy the backend before the extension; no migration,
 new business state or API is needed. See the [complete contract](../../aisee-browser-extension/docs/account-bound-send-protocol.md#browser-login-continuity-without-a-verification-ttl-2026-11-16).
+
+### Queue capacity isolation from uncertain content (2026-11-16)
+
+The quota service now returns expired UNKNOWN reservations at admission/reserve
+and seeds new buckets consistently, reusing `uncertainWriterExpiredIn`. Prior
+statements about retaining all historical HELD quota are superseded by the
+policy in `organization-sending-modes.md`. Original content remains quarantined;
+independent posts/replies still require account availability, actor verification,
+mode admission and pacing. Late success records actual usage exactly once.
+
+## Confirmed-success-only daily quota (2026-11-17)
+
+The confirmed-success-only policy in postiz-app's `organization-sending-modes.md`
+supersedes the earlier HELD/expiry-based quota admission notes above. Only
+`confirmedUnits + requestedUnits` is checked against the daily limit; held/failed/
+UNKNOWN attempts do not consume successful quota. Existing account occupancy,
+pacing and content replay protection remain separate. Late successes are counted
+once, including released historical reservations. No API, client capability or
+schema changes; deploy the backend. Already-dispatched/late outcomes are recorded
+truthfully and can exceed the limit before subsequent authorizations stop.

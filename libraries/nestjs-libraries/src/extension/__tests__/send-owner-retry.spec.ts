@@ -112,14 +112,14 @@ it.each(['mode','rollout','project','switch'])('does not advertise owner retry w
  if(kind==='switch')vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED','false');
  expect(await f.service.postReview('org','user',f.execution.id,'root')).toMatchObject({canRetryUnconfirmed:false});
 });
-it('keeps held quota restrictive for the new attempt and fences the old executor',async()=>{
+it('does not charge old uncertainty as success during explicit owner retry and still fences its executor',async()=>{
  const f=await uncertainPost();await retry(f);
  const newer=await f.service.reserveApi('org','root','newer',new Date());
- await expect(f.service.authorizeApiSegment('org',newer.id,0,{id:'123',idNamespace:'x.rest_id'},new Date())).rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+ await expect(f.service.authorizeApiSegment('org',newer.id,0,{id:'123',idNamespace:'x.rest_id'},new Date())).resolves.toMatchObject({granted:true});
  const result=await f.db.$transaction((tx:any)=>f.service.authorizeIn(tx,f.db.rows('sendExecution').find(e=>e.id===f.execution.id),0,{id:'123',idNamespace:'x.rest_id'},new Date()));
  expect(result).toEqual({granted:false,status:'UNKNOWN'});
  expect(f.db.rows('sendIntent')[0].activeExecutionId).toBe(newer.id);
- expect(f.db.rows('sendQuotaBucket')[0].heldUnits).toBe(1);
+ expect(f.db.rows('sendQuotaBucket')[0].heldUnits).toBe(2);
 });
 it('accepts the original node owner and rejects threads or a changed original root',async()=>{
  const f=await uncertainPost();f.db.rows('sendIntent')[0].policySnapshot.policyOwnerUserId='scheduler';
@@ -325,7 +325,7 @@ describe('owner retry of a zero-confirmed thread', () => {
   expect(next.payload.map(p=>p.id)).toEqual(['root','child-1','child-2','child-3']);
   expect(await retry(f)).toEqual({sendIntentId:f.execution.sendIntentId,status:'QUEUED'});
   expect(f.db.rows('sendIntent')[0].activeExecutionId).toBe(next.id);
-  await expect(f.service.authorizeApiSegment('org',next.id,0,{id:'123',idNamespace:'x.rest_id'},new Date())).rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+  await expect(f.service.authorizeApiSegment('org',next.id,0,{id:'123',idNamespace:'x.rest_id'},new Date())).resolves.toMatchObject({granted:true});
  });
  it.each(['confirmed-child','historical-confirmation','child-release','live-child-permit','authorized-child','missing-segment','duplicate-payload','changed-child','foreign-child','reply-thread'])('rejects unsafe %s without superseding evidence', async kind => {
   const f=await uncertainPost(4);const segments=f.db.rows('sendSegment');const child=segments[1];

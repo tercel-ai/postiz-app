@@ -245,14 +245,13 @@ it('starts a fresh cycle immediately after an empty queue receives newly created
 });
 
 
-it('honors the possible write cooldown after an UNKNOWN report without reopening the old intent or quota', async () => {
-  const f = fixture(2); await f.create();
+it('honors possible-write cooldown, then gives the next post the expired UNKNOWN capacity without reopening the original', async () => {
+  const f = fixture(1); await f.create();
   const old = (await f.claim('old-claim')).items[0]; await f.proof(old);
   await f.executions.start(auth, old.executionId, 0, old.leaseToken);
   await f.executions.outcome(auth, old.executionId, 0, old.leaseToken, { status: 'unknown', eventId: 'lost' });
   await f.create('independent');
   expect((await f.claim('fresh-permit')).items).toEqual([]);
-  const held = structuredClone(f.db.rows('sendQuotaReservation'));
   vi.setSystemTime(new Date(sendNow.getTime() + 31000));
   expect(await f.claim('expired-permit')).toMatchObject({ items: [], reason: 'ACCOUNT_COOLDOWN_ACTIVE' });
   vi.setSystemTime(new Date(sendNow.getTime() + 90_001));
@@ -260,7 +259,8 @@ it('honors the possible write cooldown after an UNKNOWN report without reopening
   expect(next?.segments[0].id).toBe('independent');
   expect(f.db.rows('sendIntent').find(row => row.id === old.sendIntentId)).toMatchObject({ status: 'RECONCILING', activeExecutionId: old.executionId });
   expect(f.db.rows('sendSegment').find(row => row.executionId === old.executionId).status).toBe('UNKNOWN');
-  expect(f.db.rows('sendQuotaReservation')).toEqual(held);
+  expect(f.db.rows('sendQuotaReservation')).toHaveLength(1);
+  expect(f.db.rows('sendQuotaReservation')[0]).toMatchObject({ executionId: old.executionId, state: 'HELD' });
   expect(f.db.rows('accountWriteState')[0]).toMatchObject({ activeExecutionId: null, rolloutReady: true });
   await expect(f.service.retry('org', 'root', 'user')).rejects.toThrow();
 });
@@ -329,7 +329,7 @@ it('requires the original lease before returning reply context', async () => {
 });
 
 it('claims an unrelated post after a reply lease and its unreported permit have expired', async () => {
-  const f = fixture(2);
+  const f = fixture(1);
   await f.create('old');
   await f.create('next');
   const old = (await f.claim('old-claim', 'old')).items[0];
@@ -947,7 +947,7 @@ it.each(['POST', 'REPLY'] as const)('leaves a quota-full %s queued without creat
  const plan={gapMs:0,budgets:[{key:'full-quota',scope:'ACCOUNT',dimension:action==='REPLY'?'REPLY_WRITES':'PLATFORM_WRITES',limit:4,units:1,
   windowStart:new Date('2026-10-15T00:00:00Z'),windowEnd:new Date('2026-10-16T00:00:00Z'),timezone:'UTC',policyVersion:'current',accountKey:'account-key'}]};
  f.quotas.resolve.mockResolvedValue(plan);
- f.db.seed('sendQuotaBucket',{...plan.budgets[0],id:'full-quota',organizationId:'org',confirmedUnits:2,heldUnits:2});
+ f.db.seed('sendQuotaBucket',{...plan.budgets[0],id:'full-quota',organizationId:'org',confirmedUnits:4,heldUnits:2});
  const original=structuredClone([f.db.rows('post'),f.db.rows('sendIntent'),f.db.rows('accountWriteState'),f.db.rows('sendQuotaBucket')]);
  const request={requestId:'quota-full',action,rootPostId:'root'};
  expect(await f.executions.claim(auth,request)).toMatchObject({items:[],reason:'SEND_QUOTA_EXHAUSTED'});
@@ -1003,4 +1003,28 @@ it('keeps a live claim response recoverable when its quota fills before start',a
  const item=original.items[0];await f.proof(item);
  await expect(f.executions.start(auth,item.executionId,0,item.leaseToken)).rejects.toThrow('SEND_QUOTA_EXHAUSTED');
  expect(f.db.rows('sendExecution')).toHaveLength(1);expect(f.db.rows('sendQuotaReservation')).toHaveLength(0);
+});
+
+it.each(['unknown', 'definitely_not_submitted'] as const)('lets independent posts use daily success quota after %s without automatically replaying the original', async outcome => {
+  const f = fixture(1);
+  await f.create('old'); await f.create('next');
+  const old = (await f.claim('first', 'old')).items[0];
+  await f.proof(old);
+  await f.executions.start(auth, old.executionId, 0, old.leaseToken);
+  vi.setSystemTime(new Date(sendNow.getTime() + 31_000));
+  if (outcome === 'unknown') await f.executions.outcome(auth, old.executionId, 0, old.leaseToken, {
+    status: 'unknown', eventId: 'original-outcome',
+  });
+  else await f.executions.stop(auth, old.executionId, 0, old.leaseToken, {
+    eventId: 'original-stop', journalDigest: 'a'.repeat(64),
+    permitHash: f.db.rows('sendSegment').find(row => row.executionId === old.executionId).permitHash,
+    lastPhase: 'CANCELLED_BEFORE_SUBMIT', noPendingSubmit: true, executorStoppedAt: new Date().toISOString(),
+  });
+  vi.setSystemTime(new Date(sendNow.getTime() + 90_001));
+  expect((await f.claim('after-outcome')).items[0]?.segments[0].id).toBe('next');
+  expect((await f.claim('original-again', 'old')).items).toEqual([]);
+  expect(f.db.rows('sendExecution').filter(row => row.sendIntentId === old.sendIntentId)).toHaveLength(1);
+  expect(f.db.rows('sendQuotaBucket')[0].confirmedUnits).toBe(0);
+  expect(f.db.rows('sendSegment').find(row => row.executionId === old.executionId).status)
+    .toBe(outcome === 'unknown' ? 'UNKNOWN' : 'NOT_SUBMITTED');
 });

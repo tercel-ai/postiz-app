@@ -150,7 +150,7 @@ describe('shared content send coordination', () => {
       new Date(late.getTime() + 60_000)
     );
   });
-  it('reserves the final shared budget unit for only one of two different accounts', async () => {
+  it('does not charge unconfirmed reservations from other accounts as successful usage', async () => {
     const { create, service, db, bindings } = setup();
     await create();
     db.seed('accountWriteState', {
@@ -202,12 +202,12 @@ describe('shared content send coordination', () => {
         now
       ),
     ]);
-    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
     expect(db.rows('sendQuotaBucket')[0]).toMatchObject({
       confirmedUnits: 0,
-      heldUnits: 1,
+      heldUnits: 2,
     });
-    expect(db.rows('sendQuotaReservation')).toHaveLength(1);
+    expect(db.rows('sendQuotaReservation')).toHaveLength(2);
   });
   it('requires stopped-executor evidence to release a permit, preserving the intent for a safe retry', async () => {
     const { create, service, db } = setup();
