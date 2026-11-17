@@ -2,6 +2,7 @@ import { withPublishNowRequestedAt } from '../extension/send-dispatch';
 import { isCurrentSessionHandover } from '../extension/send-mode-handover';
 import { SendModeService } from '../extension/send-mode.service';
 import { sendTransaction } from '../extension/send-coordination.utils';
+import { latestDraft, savedDraftInput } from './engage-draft-working-copy';
 import { isLegacyExecution, legacyExecutionWhere } from '../extension/legacy-execution';
 import {
   BadRequestException,
@@ -3005,6 +3006,8 @@ export class EngageRepository {
               select: {
                 id: true,
                 opportunityId: true,
+                createdAt: true,
+                inputData: true,
                 post: { select: { releaseURL: true, state: true } },
               },
             })
@@ -3041,9 +3044,12 @@ export class EngageRepository {
       { id: string; replyLink: string | null }
     >();
     const draftByOpp = new Map<string, string>();
+    const draftCopies = new Map<string, typeof replies>();
     for (const rep of replies) {
       if (rep.post?.state === 'DRAFT') {
-        if (!draftByOpp.has(rep.opportunityId)) draftByOpp.set(rep.opportunityId, rep.id);
+        const copies = draftCopies.get(rep.opportunityId) ?? [];
+        copies.push(rep);
+        draftCopies.set(rep.opportunityId, copies);
         continue;
       }
       if (!latestByOpp.has(rep.opportunityId)) {
@@ -3054,6 +3060,10 @@ export class EngageRepository {
       }
     }
 
+    for (const [opportunityId, copies] of draftCopies) {
+      const latest = latestDraft(copies);
+      if (latest) draftByOpp.set(opportunityId, latest.id);
+    }
     const channelAvatarById = new Map<string, string | null>();
     for (const ch of channels) {
       const meta = ch.metadata as Record<string, unknown> | null;
@@ -4013,12 +4023,9 @@ export class EngageRepository {
   ) {
     const state = data.state ?? 'DRAFT';
     const { randomUUID } = await import('crypto');
-    // Atomic: the existing-draft lookup and the Post + EngageSentReply writes run in
-    // ONE transaction, so a mid-write failure can never leave an orphan DRAFT Post
-    // without its tracking row. (A read-committed transaction does NOT by itself stop
-    // two concurrent saves from both seeing no draft and inserting two — that needs a
-    // DB-level partial unique index, deliberately skipped to avoid a migration; the
-    // realistic trigger is a double-click, which the client should debounce.)
+    // Lookup and writes share the existing Serializable transaction/retry
+    // boundary. Concurrent first saves must retry against the committed working
+    // copy instead of leaving a second draft or an orphan Post.
     return sendTransaction(this._tx.model, async (tx) => {
       if (this._sendModes) {
         if (data.coordinatedAutomatic) await this._sendModes.assertControlledIn(tx, organizationId);
@@ -4039,9 +4046,10 @@ export class EngageRepository {
         deletedAt: null,
         ...(data.coordinatedAutomatic
           ? { executionProtocol: 'ACCOUNT_BOUND_V1', sendOrigin: 'AUTOMATION' }
-          : { AND: [legacyExecutionWhere()], ...(state === 'DRAFT' ? { sendOrigin: { not: 'AUTOMATION' } } : {}) }),
+          : { AND: [legacyExecutionWhere(), ...(state === 'DRAFT' ? [{ OR: [{ sendOrigin: null }, { sendOrigin: { not: 'AUTOMATION' } }] }] : [])] }),
       };
-      const existing = await tx.engageSentReply.findFirst({
+      const humanDraft = state === 'DRAFT' && !data.coordinatedAutomatic;
+      const lookup = {
         where: {
           organizationId,
           projectId: projectId ?? null,
@@ -4053,9 +4061,15 @@ export class EngageRepository {
           postId: true,
           // Needed to re-stamp the platform below without clobbering anything
           // else the settings blob carries.
-          post: { select: { settings: true } },
+          post: { select: { settings: true as const } },
         },
-      });
+      } satisfies Prisma.EngageSentReplyFindManyArgs;
+      // Preserve automatic producer lookup semantics. Only human working copies
+      // need explicit save provenance and historical-duplicate selection.
+      const existing = humanDraft
+        ? latestDraft(await tx.engageSentReply.findMany({ ...lookup, select: { ...lookup.select, createdAt: true, inputData: true } }))
+        : await tx.engageSentReply.findFirst(lookup);
+      const inputData = humanDraft ? savedDraftInput(undefined, data.inputData) : data.inputData;
 
       if (existing) {
         if (this._sendModes && (await this._sendModes.activeLegacyPostIdsIn(tx, organizationId)).includes(existing.postId))
@@ -4082,7 +4096,7 @@ export class EngageRepository {
         });
         return tx.engageSentReply.update({
           where: { id: existing.id },
-          data: { inputData: data.inputData as Prisma.InputJsonValue },
+          data: { inputData: inputData as Prisma.InputJsonValue },
           include: {
             post: { select: { id: true, content: true, state: true, routeRevision: true, contentRevision: true, integrationId: true, accountSelectionMode: true } },
           },
@@ -4124,7 +4138,7 @@ export class EngageRepository {
           projectId: projectId ?? null,
           opportunityId,
           postId: post.id,
-          inputData: data.inputData as Prisma.InputJsonValue,
+          inputData: inputData as Prisma.InputJsonValue,
         },
         include: { post: { select: { id: true, content: true, state: true, routeRevision: true, contentRevision: true, integrationId: true, accountSelectionMode: true } } },
       });
@@ -4564,7 +4578,7 @@ export class EngageRepository {
 
     // An opportunity may now carry several replies (batch send); surface the
     // most recent for the detail panel.
-    const sentReply = await this._sentReply.model.engageSentReply.findFirst({
+    const replyQuery = {
       where: {
         organizationId,
         projectId: projectId ?? null,
@@ -4610,7 +4624,10 @@ export class EngageRepository {
           },
         },
       },
-    });
+    } satisfies Prisma.EngageSentReplyFindManyArgs;
+    const sentReply = row.status === 'NEW'
+      ? latestDraft(await this._sentReply.model.engageSentReply.findMany(replyQuery))
+      : await this._sentReply.model.engageSentReply.findFirst(replyQuery);
     return { ...merged, sentReply };
   }
 
@@ -6557,6 +6574,7 @@ export class EngageRepository {
       });
       if (!reply) throw new NotFoundException('Sent reply not found');
       const post = reply.post;
+      const humanDraft = post.state === 'DRAFT' && post.sendOrigin !== 'AUTOMATION';
       if (post.sendIntentId || !isLegacyExecution(post.executionProtocol))
         throw new ConflictException('SEND_INTENT_IMMUTABLE');
       if (!['DRAFT', 'QUEUE'].includes(post.state))
@@ -6589,8 +6607,10 @@ export class EngageRepository {
             contentRevision: { increment: 1 } },
         });
         if (changed.count !== 1) throw new ConflictException('SEND_REPLY_CHANGED');
-        if (data.inputData !== undefined) await tx.engageSentReply.update({
-          where: { id, organizationId, postId: post.id }, data: { inputData: data.inputData },
+        if (humanDraft || data.inputData !== undefined) await tx.engageSentReply.update({
+          where: { id, organizationId, postId: post.id }, data: { inputData: humanDraft
+            ? savedDraftInput(reply.inputData, data.inputData) as Prisma.InputJsonValue
+            : data.inputData },
         });
       }
       return tx.engageSentReply.findFirst({ where: { id, organizationId }, include: {

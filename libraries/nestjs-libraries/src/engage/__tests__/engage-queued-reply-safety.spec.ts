@@ -148,6 +148,23 @@ it('cannot schedule an original DRAFT through the content-edit route', async () 
   expect(f.post).toMatchObject({ state: 'DRAFT', content: 'original' });
 });
 
+it('stamps an exact human content-only save while preserving its strategy and mentions', async () => {
+  const f = fixture(); f.post.state = 'DRAFT';
+  Object.assign(f.db.rows('engageSentReply')[0].inputData, { strategy: 'QUESTION_LED', mentions: ['brand'], brandStrength: 2 });
+  await f.repo.updateScheduledReply('org', 'reply', { content: 'content-only edit' });
+  expect(f.db.rows('engageSentReply')[0].inputData).toEqual({ strategy: 'QUESTION_LED', mentions: ['brand'], brandStrength: 2, _draftSavedAt: now.toISOString() });
+  const stamp = f.db.rows('engageSentReply')[0].inputData._draftSavedAt;
+  await f.repo.recordReplyAttemptFailure('org', 'reply', 'late failure');
+  expect(f.db.rows('engageSentReply')[0].inputData._draftSavedAt).toBe(stamp);
+  expect(f.post.content).toBe('content-only edit');
+});
+
+it('does not reinterpret legacy automatic draft input as a human-save clock', async () => {
+  const f = fixture(); Object.assign(f.post, { state: 'DRAFT', sendOrigin: 'AUTOMATION' });
+  await f.repo.updateScheduledReply('org', 'reply', { content: 'automatic content', inputData: { strategy: 'automatic' } });
+  expect(f.db.rows('engageSentReply')[0].inputData).toEqual({ strategy: 'automatic' });
+});
+
 it('does not edit another organization or revive published and failed original replies', async () => {
   for (const state of ['PUBLISHED', 'ERROR']) {
     const f = fixture(); f.post.state = state;

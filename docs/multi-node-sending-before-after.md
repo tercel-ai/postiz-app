@@ -597,6 +597,40 @@ schema changes; deploy the backend. Already-dispatched/late outcomes are recorde
 truthfully and can exceed the limit before subsequent authorizations stop.
 
 
+## Latest saved Reply draft consistency (2026-11-17)
+
+Cross-entry verification exposed repeated creation without regeneration: SQL
+`sendOrigin != AUTOMATION` does not match NULL, while human draft creation writes
+NULL. Upsert now explicitly includes that legacy origin, preserving automation,
+protocol and scope isolation. Its existing Serializable transaction/retry boundary
+still covers lookup and writes. Upsert and NEW detail select the last saved Post,
+with deterministic reply timestamp/creation/ID tie breaks. The Feed draft marker
+uses saved Post time independently from publication/link selection. This fixes
+new copies and supports pre-existing duplicates without deleting historical rows.
+
+The website uses exact-ID PATCH for an existing original when saving/handing off
+edited draft content, keeps the same root and enqueues only through the original
+authorized path. The Awaiting review card defaults to saved content/settings;
+old generated versions are available only by explicit history selection. Normal
+generation, QUEUE editing, versioned coordinated editing, retries, account
+identity, preflight, journal/permits and uncertain-result protections are retained.
+Backend deployment is required for NULL upsert and latest-copy selection; the
+website exact-ID path uses already-deployed PATCH support. No schema or historical
+record rewrite/deletion is performed.
+
+Verification: nullable-origin regression tests model SQL NULL comparison semantics
+and require repeated edits to update the same record with no inserts. Read tests
+cover last-save identity and unchanged publication links. The full permitted
+backend suite reports 5828 passed, 4 existing scan-scoring failures, 112 skipped;
+frozen apps/extension is excluded and external DB/Redis connections are disabled.
+Production backend and frontend typechecks pass. Frontend draft/send focused
+tests: 74 passed; full Node suite: 549 passed, 1 existing URL assertion failure.
+Browser tests proved same Reply/Post IDs and four historical copies before/after
+bidirectional edits, latest saved card/editor/Step 2 preview agreement, refresh
+recovery, and original restoration. No platform send, regeneration, deletion or
+direct database operation occurred. Live tests used exact-ID saves on the current
+server; the new backend NULL lookup/latest-old-copy ordering remain pending deploy.
+
 ## Signal Feed draft recovery (2026-11-17)
 
 Previously saved human Reply drafts were excluded from the list's reply lookup,

@@ -705,6 +705,26 @@ their protections; coordinated originals still use the versioned coordinator
 editor. Generation/new-draft `save-draft` keeps its existing actionable-status
 gate, including rejecting SCHEDULED. No new endpoint, field or migration.
 
+### Latest saved working copy and nullable legacy origins (2026-11-17)
+
+Human legacy DRAFT lookup accepts both NULL sendOrigin and non-AUTOMATION origins.
+SQL nullable NOT alone excluded the NULL origin written by ordinary draft creation,
+so each opportunity-level save could insert another Post/Reply. The explicit NULL
+branch now shares the existing legacy/protected protocol predicates and the same
+Serializable lookup/write transaction with bounded conflict retry. Coordinated
+automatic drafts retain their separate ACCOUNT_BOUND_V1/AUTOMATION scope; QUEUE,
+claim, quota, confirmation and UNKNOWN semantics are unchanged.
+
+Existing human copies are selected by Post.updatedAt, then reply.updatedAt,
+createdAt and ID. NEW opportunity detail and draft upsert use this ordering; Feed
+draftReplyId selects the most recently saved copy while non-draft publication IDs
+and links retain their original creation-order contract. Existing explicit-ID
+draft PATCH updates the selected original, without generation or another row.
+Regeneration remains version history, not implicit sending authority. Historical
+duplicate records are neither deleted nor repurposed. No schema change is needed.
+Deploy the backend for nullable upsert and latest-save ordering; the website can
+use the already-deployed exact-ID DRAFT PATCH independently.
+
 ## Segment preflight serialization conflicts (2026-11-17)
 
 Normal mode guards now use compatible `FOR SHARE` Settings row locks instead

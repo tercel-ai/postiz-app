@@ -149,6 +149,10 @@ function buildRepo() {
     cb({
       engageSentReply: {
         findFirst: sentFindFirst,
+        findMany: async (query: any) => {
+          const result = await sentFindFirst(query);
+          return Array.isArray(result) ? result : result ? [result] : [];
+        },
         create: sentCreate,
         update: sentUpdate,
       },
@@ -597,6 +601,17 @@ describe('EngageRepository — two-table reads', () => {
       expect(item).toMatchObject({ draftReplyId: 'draft', sentReplyId: 'published', replyLink: 'https://example.test/reply' });
     });
 
+    it('uses last-saved draft identity without changing creation-ordered publication links', async () => {
+      const { repo, stateFindMany, stateCount, sentFindMany } = buildRepo();
+      stateFindMany.mockResolvedValue([STATE_ROW]); stateCount.mockResolvedValue(1);
+      sentFindMany.mockResolvedValue([
+        { id: 'newly-created', opportunityId: 'opp1', createdAt: new Date('2026-11-16'), inputData: {}, post: { state: 'DRAFT' } },
+        { id: 'published', opportunityId: 'opp1', updatedAt: new Date('2026-11-15'), post: { state: 'PUBLISHED', releaseURL: 'saved-url' } },
+        { id: 'recently-edited', opportunityId: 'opp1', createdAt: new Date('2026-11-15'), inputData: { _draftSavedAt: '2026-11-17T00:00:00Z' }, post: { state: 'DRAFT' } },
+      ]);
+      expect((await repo.listOpportunities('org1', {} as any)).items[0]).toMatchObject({ draftReplyId: 'recently-edited', sentReplyId: 'published', replyLink: 'saved-url' });
+    });
+
     it('retains confirmed platform-removed publication IDs and links separately from a newer draft', async () => {
       const { repo, stateFindMany, stateCount, sentFindMany } = buildRepo();
       stateFindMany.mockResolvedValue([{ ...STATE_ROW, status: 'REPLIED' }]); stateCount.mockResolvedValue(1);
@@ -797,14 +812,15 @@ describe('EngageRepository — two-table reads', () => {
       expect(sentFindFirst).not.toHaveBeenCalled();
     });
     it('restores the latest saved content and input settings for a NEW opportunity in the same project', async () => {
-      const { repo, stateFindFirst, sentFindFirst } = buildRepo();
+      const { repo, stateFindFirst, sentFindMany } = buildRepo();
       stateFindFirst.mockResolvedValue(STATE_ROW);
       const draft = { id: 'draft', inputData: { strategy: 'AMPLIFY', mentions: ['brand'], brandStrength: 2 },
         post: { id: 'post', state: 'DRAFT', content: 'Previously edited reply' } };
-      sentFindFirst.mockResolvedValue(draft);
+      sentFindMany.mockResolvedValue([draft]);
       const detail = await repo.getOpportunityDetail('org1', 'opp1', 'project');
       expect(detail).toMatchObject({ status: 'NEW', sentReply: draft });
-      expect(sentFindFirst.mock.calls[0][0].where).toEqual({ organizationId: 'org1', projectId: 'project', opportunityId: 'opp1',
+      expect(sentFindMany.mock.calls[0][0].orderBy).toEqual({ createdAt: 'desc' });
+      expect(sentFindMany.mock.calls[0][0].where).toEqual({ organizationId: 'org1', projectId: 'project', opportunityId: 'opp1',
         removedAt: null, post: { deletedAt: null, state: 'DRAFT' } });
     });
 
@@ -5156,8 +5172,8 @@ describe('EngageRepository.getOrgScanStatus', () => {
         projectId: null,
         opportunityId: 'opp1',
         post: { organizationId: 'org1', projectId: null, state: 'DRAFT', deletedAt: null, sendIntentId: null,
-          AND: [{ OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] }],
-          sendOrigin: { not: 'AUTOMATION' } },
+          AND: [{ OR: [{ executionProtocol: null }, { executionProtocol: 'LEGACY' }] },
+            { OR: [{ sendOrigin: null }, { sendOrigin: { not: 'AUTOMATION' } }] }] },
       });
       // A DRAFT engage Post is created (not published, no claim).
       expect(postCreate.mock.calls[0][0].data).toMatchObject({
@@ -5206,6 +5222,27 @@ describe('EngageRepository.getOrgScanStatus', () => {
       // Upsert — never creates a second draft.
       expect(postCreate).not.toHaveBeenCalled();
       expect(sentCreate).not.toHaveBeenCalled();
+    });
+
+    it.each([null, 'MANUAL'])('finds and updates a human draft with nullable origin %s instead of inserting another', async origin => {
+      const { repo, sentFindFirst, sentUpdate, postUpdate, postCreate, sentCreate } = buildRepo();
+      // Model PostgreSQL nullable NOT semantics: NULL != AUTOMATION is UNKNOWN,
+      // not true. The explicit NULL branch must qualify the existing record.
+      function qualifies(where: any): boolean {
+        if (where.AND && !where.AND.every(qualifies)) return false;
+        if (where.OR && !where.OR.some(qualifies)) return false;
+        if (!('sendOrigin' in where)) return true;
+        const filter = where.sendOrigin;
+        return filter && typeof filter === 'object' ? origin !== null && origin !== filter.not : origin === filter;
+      }
+      sentFindFirst.mockImplementation(async query => qualifies(query.where.post) ? { id: 'original', postId: 'post', post: { settings: '{}' } } : null);
+      sentUpdate.mockResolvedValue({ id: 'original' }); postUpdate.mockResolvedValue({ id: 'post' });
+      for (const content of ['manual edit', 'newer manual edit']) {
+        expect(await repo.upsertDraft('org', 'opp', { platform: 'x', content, inputData: {} }, 'project')).toEqual({ id: 'original' });
+      }
+      expect(postCreate).not.toHaveBeenCalled(); expect(sentCreate).not.toHaveBeenCalled();
+      expect(postUpdate).toHaveBeenCalledTimes(2);
+      expect(sentFindFirst.mock.calls[0][0]).not.toHaveProperty('orderBy');
     });
 
     // A draft written before the platform fix carries providerIdentifier
@@ -5817,5 +5854,69 @@ describe('controlled automatic draft isolation', () => {
     await repo.upsertDraft('org1', 'opp1', { platform: 'x', content: 'automatic', inputData: {}, state: 'DRAFT', coordinatedAutomatic: true }, 'project1');
     expect(sentFindFirst.mock.calls[0][0].where.post).toMatchObject({ state: 'DRAFT', sendIntentId: null, executionProtocol: 'ACCOUNT_BOUND_V1', sendOrigin: 'AUTOMATION' });
     expect(postCreate.mock.calls[0][0].data).toMatchObject({ state: 'DRAFT', executionProtocol: 'ACCOUNT_BOUND_V1', sendOrigin: 'AUTOMATION' });
+  });
+});
+
+describe('review context regression', () => {
+  function ordered(rows: any[], query: any) {
+    const order = Array.isArray(query.orderBy) ? query.orderBy : [query.orderBy];
+    return rows.slice().sort((a, b) => {
+      for (const clause of order) {
+        const key = Object.keys(clause)[0], rule = clause[key];
+        const av = typeof rule === 'object' ? a[key][Object.keys(rule)[0]] : a[key];
+        const bv = typeof rule === 'object' ? b[key][Object.keys(rule)[0]] : b[key];
+        const direction = typeof rule === 'object' ? Object.values(rule)[0] : rule;
+        if (av > bv) return direction === 'desc' ? -1 : 1;
+        if (av < bv) return direction === 'desc' ? 1 : -1;
+      }
+      return 0;
+    })[0];
+  }
+  it('an error-only annotation must not promote older text over the last saved draft', async () => {
+    const { repo, stateFindFirst, sentFindFirst, sentFindMany } = buildRepo();
+    const older = { id: 'older', opportunityId: 'opp1', postId: 'old-post',
+      createdAt: new Date('2026-11-01'), updatedAt: new Date('2026-11-01'),
+      post: { id: 'old-post', state: 'DRAFT', content: 'Old text', updatedAt: new Date('2026-11-01') } };
+    const saved = { id: 'saved', opportunityId: 'opp1', postId: 'saved-post',
+      createdAt: new Date('2026-11-02'), updatedAt: new Date('2026-11-02'),
+      post: { id: 'saved-post', state: 'DRAFT', content: 'New saved manual text', updatedAt: new Date('2026-11-02') } };
+    stateFindFirst.mockResolvedValue(STATE_ROW);
+    sentFindFirst.mockResolvedValueOnce({ postId: older.postId });
+    const write = vi.fn(async (query: any) => {
+      expect(query.data).toEqual({ error: 'Late failure annotation' });
+      older.post.updatedAt = new Date('2026-11-03');
+      return { count: 1 };
+    });
+    (repo as any)._post.model.post.updateMany = write;
+    await repo.recordReplyAttemptFailure('org1', older.id, 'Late failure annotation');
+    expect(older.post.content).toBe('Old text');
+    sentFindFirst.mockImplementation(async (query: any) => ordered([saved, older], query));
+    sentFindMany.mockResolvedValue([saved, older]);
+    expect((await repo.getOpportunityDetail('org1', 'opp1')).sentReply?.id).toBe(saved.id);
+  });
+  it('list and detail must resolve the same draft when Post timestamps tie', async () => {
+    const { repo, stateFindFirst, stateFindMany, stateCount, sentFindFirst, sentFindMany } = buildRepo();
+    const rows = [
+      { id: 'created-later', opportunityId: 'opp1', createdAt: new Date('2026-11-02'), updatedAt: new Date('2026-11-02'), post: { state: 'DRAFT', updatedAt: new Date('2026-11-04') } },
+      { id: 'saved-later', opportunityId: 'opp1', createdAt: new Date('2026-11-01'), updatedAt: new Date('2026-11-03'), post: { state: 'DRAFT', updatedAt: new Date('2026-11-04') } },
+    ];
+    stateFindFirst.mockResolvedValue(STATE_ROW); stateFindMany.mockResolvedValue([STATE_ROW]); stateCount.mockResolvedValue(1);
+    sentFindMany.mockResolvedValue(rows);
+    sentFindFirst.mockImplementation(async (query: any) => ordered(rows, query));
+    const card = (await repo.listOpportunities('org1', {} as any)).items[0] as any;
+    const detail = await repo.getOpportunityDetail('org1', 'opp1');
+    expect(card.draftReplyId).toBe(detail.sentReply?.id);
+  });
+
+  it.each([{ state: 'QUEUE' as const }, { state: 'DRAFT' as const, coordinatedAutomatic: true }])('retains automatic producer lookup and payload semantics: %j', async options => {
+    const { repo, sentFindFirst, sentUpdate } = buildRepo();
+    sentFindFirst.mockResolvedValue({ id: 'automatic-original', postId: 'post', post: { settings: '{}' } });
+    sentUpdate.mockResolvedValue({ id: 'automatic-original' });
+    const inputData = { strategy: 'EXPERT_ANSWER', brandStrength: 50 };
+    await repo.upsertDraft('org', 'opp', { ...options, platform: 'x', content: 'automatic', inputData });
+    expect(sentFindFirst).toHaveBeenCalledTimes(1);
+    expect(sentFindFirst.mock.calls[0][0]).not.toHaveProperty('orderBy');
+    expect(sentUpdate.mock.calls[0][0].data.inputData).toEqual(inputData);
+    expect(sentUpdate.mock.calls[0][0].data.inputData).not.toHaveProperty('_draftSavedAt');
   });
 });
