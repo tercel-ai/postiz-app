@@ -25,6 +25,38 @@ export class IntegrationRepository {
     private _integrationProject: PrismaRepository<'integrationProject'>
   ) { }
 
+  async createExtensionAccount(org: string, platform: string, namespace: string, id: string,
+    handle: string, name: string, picture: string | undefined, maxChannels: number | null | undefined) {
+    if (maxChannels === undefined) throw new BadRequestException('ACCOUNT_CREATION_NOT_ALLOWED');
+    const uploaded = picture ? await this.storage.uploadSimple(picture) : undefined;
+    const db = this._integration.model as PrismaService;
+    return sendTransaction(db, async tx => {
+      const result = await new SocialAccountIdentityService(db).resolveIn(tx, org, platform, namespace, id, {
+        source: 'EXTENSION', canCreate: true, maxChannels, handle, name,
+      });
+      if (!result.account) throw new BadRequestException(result.blockCode ?? 'ACCOUNT_IDENTITY_UNRESOLVED');
+      if (uploaded && !result.account.picture) {
+        return tx.integration.update({ where: { id: result.account.id, organizationId: org }, data: { picture: uploaded } });
+      }
+      return result.account;
+    });
+  }
+
+  async toutiaoAccountNeedsPicture(org: string, integrationId: string, accountId: string): Promise<boolean> {
+    const account = await this._integration.model.integration.findFirst({
+      where: { id: integrationId, organizationId: org, providerIdentifier: 'toutiao', identityNamespace: 'toutiao.user_id', internalId: accountId, deletedAt: null, picture: null },
+      select: { id: true },
+    });
+    return !!account;
+  }
+
+  async setToutiaoAccountPicture(org: string, integrationId: string, accountId: string, picture: string) {
+    return this._integration.model.integration.updateMany({
+      where: { id: integrationId, organizationId: org, providerIdentifier: 'toutiao', identityNamespace: 'toutiao.user_id', internalId: accountId, deletedAt: null, picture: null },
+      data: { picture },
+    });
+  }
+
   getMentions(platform: string, q: string) {
     return this._mentions.model.mentions.findMany({
       where: {

@@ -66,6 +66,13 @@ function fixture() {
   return { db, service, report };
 }
 describe('terminal identity synchronization', () => {
+  it('registers a Toutiao account without enrolling it for sending', async () => {
+    const f = fixture();
+    const result: any = await f.report('node-a', { platform: 'toutiao', id: '1234567890123456', identityNamespace: 'toutiao.user_id', handle: '1234567890123456', name: '示例用户', evidenceKind: 'LIVE_PAGE_ACTOR' });
+    expect(result.results[0].verificationStatus).toBe('VERIFIED');
+    expect(f.db.rows('integration')[0]).toMatchObject({ providerIdentifier: 'toutiao', internalId: '1234567890123456', identityNamespace: 'toutiao.user_id', name: '示例用户' });
+    expect(f.db.rows('accountWriteState')).toHaveLength(0);
+  });
   it('reports profile conflicts without creating or verifying a parallel account', async () => {
     const f = fixture();
     f.db.seed('integration', {

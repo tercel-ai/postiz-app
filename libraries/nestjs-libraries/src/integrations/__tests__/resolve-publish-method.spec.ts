@@ -34,6 +34,11 @@ describe('isExtensionOnlyProvider', () => {
 });
 
 describe('resolvePublishMethod — auto (no user choice)', () => {
+  it('routes Toutiao micro-posts through the extension and rejects the API route', () => {
+    for (const choice of [undefined, 'extension'] as const)
+      expect(resolvePublishMethod({ platform: 'toutiao', hasBoundIntegration: true, choice })).toBe('extension');
+    expect(() => resolvePublishMethod({ platform: 'toutiao', hasBoundIntegration: true, choice: 'api' })).toThrow();
+  });
   it('extension-only platform -> extension even without a bound account', () => {
     expect(
       resolvePublishMethod({ platform: 'hackernews', hasBoundIntegration: false })

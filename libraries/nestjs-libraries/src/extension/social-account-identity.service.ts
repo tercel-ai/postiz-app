@@ -29,6 +29,7 @@ const SOCIAL_IDENTITIES: Record<string, SocialIdentityContract> = {
   quora: { namespace: 'quora.user_id', pattern: /^[1-9][0-9]*$/ },
   hackernews: { namespace: 'hackernews.handle', pattern: /^[A-Za-z0-9_-]{2,15}$/ },
   devto: { namespace: 'devto.user_id', pattern: /^[1-9][0-9]*$/ },
+  toutiao: { namespace: 'toutiao.user_id', pattern: /^[1-9][0-9]*$/ },
 };
 export function stableSocialIdentity(
   platform: string,

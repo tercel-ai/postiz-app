@@ -243,11 +243,18 @@ export class IntegrationsController {
       let maxChannels: number | null | undefined;
       try { maxChannels = await this._permissionsService.channelCreationLimit(org.id, user.id); }
       catch { /* Existing actors still report when creation entitlement is unavailable. */ }
-      return this._extensionNodes.report(org.id, user.id, nodeId, nodeToken, body, {
+      const result = await this._extensionNodes.report(org.id, user.id, nodeId, nodeToken, body, {
         canCreateChannels: maxChannels !== undefined, maxChannels,
       });
+      const results = result && typeof result === 'object' && !Array.isArray(result) && 'results' in result && Array.isArray(result.results)
+        ? result.results : [];
+      if (body.platforms.some(entry => entry.platform === 'toutiao' && entry.picture)) {
+        await this._integrationService.syncVerifiedToutiaoAvatar(org.id, body, results);
+      }
+      return result;
     }
     let canCreateChannels = false;
+    let maxChannels: number | null | undefined;
     try {
       const ability = await this._permissionsService.check(
         org.id,
@@ -262,6 +269,9 @@ export class IntegrationsController {
         AuthorizationActions.Create,
         Sections.CHANNEL
       );
+      if (canCreateChannels && body.platforms.some(entry => entry.platform === 'toutiao')) {
+        maxChannels = await this._permissionsService.channelCreationLimit(org.id, user.id);
+      }
     } catch (err) {
       // Recording sessions is what this endpoint is FOR; creating a channel is
       // the extra. An allowance that could not be resolved therefore costs the
@@ -274,6 +284,7 @@ export class IntegrationsController {
 
     return this._integrationService.reportExtensionSession(org.id, body, {
       canCreateChannels,
+      maxChannels,
     });
   }
 

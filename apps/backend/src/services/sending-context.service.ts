@@ -5,7 +5,7 @@ import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/pro
 import { SendPolicyService } from '@gitroom/nestjs-libraries/extension/send-policy.service';
 import { SendModeService } from '@gitroom/nestjs-libraries/extension/send-mode.service';
 import { accountBindingError } from '@gitroom/nestjs-libraries/extension/account-binding-error';
-import { canonicalControlledPlatform, CONTROLLED_SEND_PLATFORMS } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
+import { canonicalControlledPlatform, CONTROLLED_SEND_PLATFORMS, CONTROLLED_REPLY_PLATFORMS } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
 import { matchesAccountSession, projectAccountTerminal, terminalAvailability } from '@gitroom/nestjs-libraries/extension/extension-node.projection';
 import { sendTransaction } from '@gitroom/nestjs-libraries/extension/send-coordination.utils';
 
@@ -75,7 +75,8 @@ export class SendingContextService {
           name: account.name, handle: account.profile, picture: account.picture,
           projectAssigned: !!relation && !relation.disabled, detectedByExtension: terminals.length > 0,
           actions: Object.fromEntries(actions.map(action => {
-            const reason = block ?? accountBindingError(account, relation, org, project, platform, action);
+            const reason = block ?? (action === 'REPLY' && !(CONTROLLED_REPLY_PLATFORMS as readonly string[]).includes(platform)
+              ? 'CONTROLLED_PLATFORM_UNSUPPORTED' : accountBindingError(account, relation, org, project, platform, action));
             return [action, { canSelect: !reason, reason, availability: terminalAvailability(terminals, action) }];
           })), terminals,
         };
@@ -88,7 +89,9 @@ export class SendingContextService {
           const id = effective?.integrationId ?? null;
           return [action, { integrationId: configured?.integrationId ?? null, effectiveIntegrationId: id,
             source: !id ? 'UNBOUND' : configured?.integrationId ? 'PROJECT' : 'ORGANIZATION',
-            blockCode: id ? accountBindingError(byId.get(id), byRelation.get(id), org, project, platform, action) : 'SEND_BINDING_REQUIRED' }];
+            blockCode: action === 'REPLY' && !(CONTROLLED_REPLY_PLATFORMS as readonly string[]).includes(platform)
+              ? 'CONTROLLED_PLATFORM_UNSUPPORTED'
+              : id ? accountBindingError(byId.get(id), byRelation.get(id), org, project, platform, action) : 'SEND_BINDING_REQUIRED' }];
         })),
       ]));
       return { ...base, requireAccountSelection: policy?.requirePreselectedAccount ?? null, accounts: choices, defaults };

@@ -32,6 +32,9 @@ function makeService(rowsByPlatform: Record<string, Row[]> = {}) {
       id: 'created_1',
       metadata: null,
     })),
+    createExtensionAccount: vi.fn(async () => ({ id: 'created_1', metadata: null })),
+    toutiaoAccountNeedsPicture: vi.fn(async () => true),
+    setToutiaoAccountPicture: vi.fn(async () => undefined),
   };
 
   const service = new IntegrationService(
@@ -56,6 +59,47 @@ function report(platforms: any[], checkedAt = '2026-09-08T06:05:06.943Z') {
 
 describe('IntegrationService.reportExtensionSession — creating a channel', () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it('only attaches a controlled Toutiao avatar after the same account was verified', async () => {
+    const { service, repository } = makeService();
+    const body = report([{ platform: 'toutiao', loggedIn: true, id: '123', identityNamespace: 'toutiao.user_id',
+      verificationStatus: 'VERIFIED', evidenceKind: 'LIVE_PAGE_ACTOR', picture: 'https://example.test/avatar.png' }]);
+    await service.syncVerifiedToutiaoAvatar('org_1', body, [{ platform: 'toutiao', integrationId: 'account', verificationStatus: 'UNKNOWN' }]);
+    expect(repository.toutiaoAccountNeedsPicture).not.toHaveBeenCalled();
+    await service.syncVerifiedToutiaoAvatar('org_1', body, [{ platform: 'toutiao', integrationId: 'account', verificationStatus: 'VERIFIED' }]);
+    expect(repository.setToutiaoAccountPicture).toHaveBeenCalledWith('org_1', 'account', '123', 'https://files.aisee.live/new.jpeg');
+  });
+
+  it('creates a Toutiao session-only account using the stable user ID and channel limit', async () => {
+    const { service, repository } = makeService();
+    await service.reportExtensionSession('org_1', report([{ platform: 'toutiao', loggedIn: true,
+      id: '1234567890123456', handle: '1234567890123456', name: '示例用户' }]),
+      { canCreateChannels: true, maxChannels: 2 });
+    expect(repository.createExtensionAccount).toHaveBeenCalledWith('org_1', 'toutiao', 'toutiao.user_id',
+      '1234567890123456', '1234567890123456', '示例用户', undefined, 2);
+    expect(repository.recordExtensionSession).toHaveBeenCalled();
+    expect(repository.createOrUpdateIntegration).not.toHaveBeenCalled();
+  });
+
+  it('does not claim a new Toutiao account was synchronized when its creation entitlement is unavailable', async () => {
+    const { service, repository } = makeService();
+    await expect(service.reportExtensionSession('org_1', report([{ platform: 'toutiao', loggedIn: true,
+      id: '123', handle: '123' }]), { canCreateChannels: true })).rejects.toThrow('ACCOUNT_CREATION_NOT_ALLOWED');
+    expect(repository.createExtensionAccount).not.toHaveBeenCalled();
+  });
+
+  it('still records subsequent platforms when Toutiao channel creation is unavailable', async () => {
+    const row = { id: 'existing-x', internalId: '456', profile: 'example', metadata: null };
+    const { service, repository } = makeService({ x: [row] });
+    const response = await service.reportExtensionSession('org_1', report([
+      { platform: 'toutiao', loggedIn: true, id: '123', handle: '123' },
+      { platform: 'x', loggedIn: true, id: '456', handle: 'example' },
+    ]));
+    expect(response).toEqual({ failures: [{ platform: 'toutiao', code: 'ACCOUNT_CREATION_NOT_ALLOWED' }] });
+    expect(repository.recordExtensionSession).toHaveBeenCalledWith(
+      [row], row.id, 'example', expect.any(Date), {},
+    );
+  });
 
   it('should create the channel when a handle-only platform has no row yet', async () => {
     const { service, repository } = makeService();

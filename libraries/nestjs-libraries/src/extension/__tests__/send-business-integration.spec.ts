@@ -8,7 +8,7 @@ import { EngageController } from '../../../../../apps/backend/src/api/routes/eng
 import { IntegrationsController } from '../../../../../apps/backend/src/api/routes/integrations.controller';
 import { PostsController } from '../../../../../apps/backend/src/api/routes/posts.controller';
 import { PostsService } from '../../database/prisma/posts/posts.service';
-import { CONTROLLED_SEND_PLATFORMS } from '../controlled-platforms';
+import { CONTROLLED_SEND_PLATFORMS, CONTROLLED_REPLY_PLATFORMS } from '../controlled-platforms';
 import { validateSync } from 'class-validator';
 import { ClaimSendDto, EnqueueSendDto, QueueStoredReplyDto } from '../send-execution.dto';
 import { SendIntentsController } from '../../../../../apps/backend/src/api/routes/send-executions.controller';
@@ -514,7 +514,7 @@ describe('action-specific project account projections', () => {
     service._engageRepository = { listReplyAccountIntegrations: vi.fn().mockResolvedValue([]) };
     service._projectValidation = { assertProjectAccess: vi.fn() };
     await service.listReplyAccounts({ id: 'org' }, 'project');
-    expect(service._engageRepository.listReplyAccountIntegrations.mock.calls[0][2]).toEqual([...CONTROLLED_SEND_PLATFORMS, 'linkedin-page']);
+    expect(service._engageRepository.listReplyAccountIntegrations.mock.calls[0][2]).toEqual([...CONTROLLED_REPLY_PLATFORMS, 'linkedin-page']);
     vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'false');
     await service.listReplyAccounts({ id: 'org' }, 'project');
     expect(service._engageRepository.listReplyAccountIntegrations.mock.calls[1][2]).toEqual(['x']);

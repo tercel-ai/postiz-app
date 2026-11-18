@@ -19,7 +19,8 @@ export type ScanTaskPlatform =
   | 'devto'
   | 'hackernews'
   | 'medium'
-  | 'quora';
+  | 'quora'
+  | 'toutiao';
 export type ScanTaskType = 'keyword' | 'channel' | 'tracked';
 
 /** Where the extension should resume from (mirrors EngageScanCursor). */

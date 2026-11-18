@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { stableSocialIdentity } from '../social-account-identity.service';
 import { setupSend, sendNow } from './support/send-fixture';
-import { controlledReplySettings, hasControlledReplyTarget } from '../controlled-platforms';
+import { CONTROLLED_REPLY_PLATFORMS, CONTROLLED_SEND_PLATFORMS, controlledReplySettings, hasControlledReplyTarget } from '../controlled-platforms';
 
 const identities = [
   ['linkedin', 'linkedin.fs_miniProfile', 'ACoAAaBc_123'],
@@ -13,6 +13,13 @@ const identities = [
 afterEach(() => vi.unstubAllEnvs());
 
 describe('controlled platform coverage', () => {
+  it('accepts only a canonical micro-post target for Toutiao replies', () => {
+    expect(CONTROLLED_REPLY_PLATFORMS).toContain('toutiao');
+    expect(CONTROLLED_REPLY_PLATFORMS.every(platform => (CONTROLLED_SEND_PLATFORMS as readonly string[]).includes(platform))).toBe(true);
+    expect(controlledReplySettings('toutiao', '1', 'https://www.toutiao.com/w/1/')).toEqual({ replyToId: '1', replyUrl: 'https://www.toutiao.com/w/1/' });
+    expect(hasControlledReplyTarget('toutiao', { replyUrl: 'https://www.toutiao.com/w/1/' })).toBe(true);
+    expect(hasControlledReplyTarget('toutiao', { replyUrl: 'https://www.toutiao.com/article/1/' })).toBe(false);
+  });
   it('preserves the existing X and Reddit reply contract', () => {
     expect(controlledReplySettings('x', '1', 'unused')).toEqual({ reply_to_tweet_id: '1' });
     expect(controlledReplySettings('reddit', 't3_1')).toEqual({ replyToId: 't3_1' });

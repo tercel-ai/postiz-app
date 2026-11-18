@@ -99,6 +99,14 @@ function snap(over: any = {}) {
 describe('EngageScanTasksService.sync — claim (bootstrap)', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('creates Toutiao keyword units but not unsupported account or channel units', () => {
+    const { svc } = build();
+    const units = (svc as any)._enumerateUnits({ keywords: [{ keyword: ' DeepSeek ', enabled: true }],
+      monitoredChannels: [{ platform: 'toutiao', channelId: '123' }],
+      trackedAccounts: [{ platform: 'toutiao', username: '456' }] }, ['toutiao']);
+    expect(units).toEqual([{ platform: 'toutiao', scanType: 'keyword', scanKey: 'deepseek' }]);
+  });
+
   it('returns [] when the org has no enabled config', async () => {
     const { svc } = build({ orgContext: null });
     expect(await svc.sync('org1', {})).toEqual({ accepted: 0, nextTasks: [] });

@@ -685,6 +685,8 @@ export class EngageScanTasksService {
       // the raw column against `supported` would classify a legacy `"Reddit"`
       // row as a channel here and as an author target in every SQL filter.
       const platform = normalizePlatform(t.platform) as ScanTaskPlatform;
+      // Toutiao currently supports keyword search only, not author firehoses.
+      if (platform === 'toutiao') continue;
       if (!supported.has(platform)) {
         this.logger.debug(
           `[scan-units] skipping ${t.platform}:${t.key} — platform not in the resolved allowlist`

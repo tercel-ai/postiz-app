@@ -54,6 +54,13 @@ describe('publishExtensionReply — commit on confirmed extension success', () =
 
   const author = { handle: 'alice', id: 't2_1', name: 'Alice' };
 
+  it('does not treat a searchable Toutiao post as a confirmed reply', async () => {
+    const { service, updateReplyUrl } = build({ ...draftCtx, platform: 'toutiao' });
+    await expect(service.publishExtensionReply(org, 'u1', 'r1', 'https://www.toutiao.com/w/123/'))
+      .rejects.toThrow('TOUTIAO_REPLY_PERMALINK_UNVERIFIED');
+    expect(updateReplyUrl).not.toHaveBeenCalled();
+  });
+
   it('backfills+publishes, claims, snapshots keywords, and charges on success', async () => {
     const {
       service,

@@ -26,7 +26,7 @@ import {
   GenerationHistoryEntry,
 } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
-import { CONTROLLED_SEND_PLATFORMS } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
+import { CONTROLLED_REPLY_PLATFORMS } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
 import { PostsService, RESCHEDULE_LOCKOUT_MS } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
@@ -1222,7 +1222,7 @@ export class EngageService implements OnApplicationBootstrap {
     return this._engageRepository.listReplyAccountIntegrations(
       org.id,
       projectId,
-      controlled ? [...CONTROLLED_SEND_PLATFORMS, 'linkedin-page'] : ACCOUNT_REPLY_PLATFORMS,
+      controlled ? [...CONTROLLED_REPLY_PLATFORMS, 'linkedin-page'] : ACCOUNT_REPLY_PLATFORMS,
       controlled
     );
   }
@@ -2864,6 +2864,9 @@ export class EngageService implements OnApplicationBootstrap {
     platform: string,
     url: string
   ): Promise<void> {
+    if (platform === 'toutiao') {
+      throw new BadRequestException('TOUTIAO_REPLY_PERMALINK_UNVERIFIED');
+    }
     if (!(SCANNABLE_PLATFORMS as readonly string[]).includes(platform)) {
       throw new BadRequestException(
         `Reply-URL backfill is not supported for platform "${platform}"`

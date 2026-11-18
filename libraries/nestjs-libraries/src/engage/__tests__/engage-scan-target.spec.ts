@@ -36,6 +36,10 @@ const row = (over: Partial<Parameters<typeof toChannelShape>[0]> = {}) => ({
 });
 
 describe('scanTypeFor / normalizePlatform', () => {
+  it('rejects Toutiao author and channel targets while keyword scanning is supported', () => {
+    expect(() => buildScanTargetKey('toutiao', '123', 'tracked')).toThrow(/keyword search only/);
+    expect(() => buildScanTargetKey('toutiao', '123', 'channel')).toThrow(/keyword search only/);
+  });
   it('derives channel scope for reddit and tracked scope for everything else', () => {
     expect(scanTypeFor('reddit')).toBe('channel');
     for (const p of ['x', 'linkedin', 'devto', 'hackernews', 'medium', 'quora']) {

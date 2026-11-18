@@ -13,7 +13,7 @@ export const VALID_CHANNELS = [
   // NOTE: values must equal the provider `identifier` strings registered in
   // integration.manager.ts (they are matched against Post.providerIdentifier).
   // 'hackernews' has no hyphen there.
-  'listmonk', 'gmb', 'wrapcast', 'nostr', 'vk', 'quora', 'hackernews'
+  'listmonk', 'gmb', 'wrapcast', 'nostr', 'vk', 'quora', 'hackernews', 'toutiao'
 ] as const;
 
 export type Channel = (typeof VALID_CHANNELS)[number];

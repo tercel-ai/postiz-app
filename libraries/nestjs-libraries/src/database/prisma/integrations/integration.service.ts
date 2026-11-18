@@ -9,6 +9,7 @@ import {
   Inject,
   Injectable,
   Logger,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { IntegrationRepository } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.repository';
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
@@ -400,9 +401,19 @@ export class IntegrationService {
   async reportExtensionSession(
     org: string,
     report: ExtensionSessionReportDto,
-    opts: { canCreateChannels?: boolean } = {}
+    opts: { canCreateChannels?: boolean; maxChannels?: number | null } = {}
   ) {
     const checkedAt = new Date(report.checkedAt);
+    const failures: Array<{ platform: string; code: string }> = [];
+    const recordCreation = async (entry: ExtensionSessionReportDto['platforms'][number]) => {
+      try {
+        await this.createChannelFromExtensionSession(org, entry, checkedAt, !!opts.canCreateChannels, opts.maxChannels);
+      } catch (error) {
+        if (entry.platform !== 'toutiao' || report.platforms.length === 1) throw error;
+        const message = error instanceof Error ? error.message : '';
+        failures.push({ platform: 'toutiao', code: /^[A-Z][A-Z0-9_]{2,100}$/.test(message) ? message : 'ACCOUNT_CREATION_FAILED' });
+      }
+    };
 
     for (const entry of report.platforms) {
       const rows = await this._integrationRepository.getIntegrationsForPlatform(
@@ -411,20 +422,18 @@ export class IntegrationService {
       );
 
       if (rows.length === 0) {
-        await this.createChannelFromExtensionSession(
-          org,
-          entry,
-          checkedAt,
-          !!opts.canCreateChannels
-        );
+        await recordCreation(entry);
         continue;
       }
 
       // Signed out of the platform entirely: nobody matches, and there is no
       // handle to record — every row goes back to API with the check stamped.
-      const matchedId = entry.loggedIn
-        ? matchExtensionSessionCandidate(entry, rows)
-        : null;
+      const matchedId = !entry.loggedIn ? null : entry.platform === 'toutiao'
+        ? rows.find(row => !!entry.id && row.internalId === entry.id)?.id ?? null
+        : matchExtensionSessionCandidate(entry, rows);
+      if (entry.platform === 'toutiao' && entry.loggedIn && !matchedId && entry.id && /^[1-9][0-9]*$/.test(entry.id)) {
+        await recordCreation(entry);
+      }
       const handle = entry.loggedIn ? entry.handle ?? entry.name ?? null : null;
 
       const matchedRow = matchedId
@@ -447,6 +456,22 @@ export class IntegrationService {
           ...(picture ? { picture } : {}),
         }
       );
+    }
+    if (failures.length) return { failures };
+  }
+
+  /** Re-host an avatar only after the node has verified the same stable actor. */
+  async syncVerifiedToutiaoAvatar(org: string, report: ExtensionSessionReportDto,
+    results: Array<{ platform: string; integrationId: string | null; verificationStatus: string }>) {
+    const entry = report.platforms.find(item => item.platform === 'toutiao' && item.loggedIn && item.verificationStatus === 'VERIFIED' && item.evidenceKind === 'LIVE_PAGE_ACTOR' && item.identityNamespace === 'toutiao.user_id' && item.id && item.picture);
+    const result = results.find(item => item.platform === 'toutiao' && item.verificationStatus === 'VERIFIED' && item.integrationId);
+    if (!entry?.id || !entry.picture || !result?.integrationId) return;
+    try {
+      if (!await this._integrationRepository.toutiaoAccountNeedsPicture(org, result.integrationId, entry.id)) return;
+      const picture = await this.storeReportedAvatar(entry.picture);
+      if (picture) await this._integrationRepository.setToutiaoAccountPicture(org, result.integrationId, entry.id, picture);
+    } catch (err) {
+      this.logger.warn(`[extension-session] Toutiao avatar sync failed: ${(err as Error)?.message || err}`);
     }
   }
 
@@ -477,10 +502,15 @@ export class IntegrationService {
     org: string,
     entry: ExtensionSessionReportDto['platforms'][number],
     checkedAt: Date,
-    canCreateChannels: boolean
+    canCreateChannels: boolean,
+    maxChannels?: number | null
   ) {
+    if (entry.platform === 'toutiao' && entry.loggedIn && (!canCreateChannels || maxChannels === undefined)) {
+      throw new ServiceUnavailableException('ACCOUNT_CREATION_NOT_ALLOWED');
+    }
     if (!entry.loggedIn || !canCreateChannels) return;
-    if (!isExtensionPublishablePlatform(entry.platform)) return;
+    if (!isExtensionPublishablePlatform(entry.platform) && entry.platform !== 'toutiao') return;
+    if (entry.platform === 'toutiao' && !/^[1-9][0-9]*$/.test(entry.id ?? '')) return;
 
     const seed = buildExtensionSessionSeed(entry);
     if (!seed) return;
@@ -494,7 +524,9 @@ export class IntegrationService {
         ? await this.fetchReportedAvatar(seed.picture)
         : undefined;
 
-      const created = await this.createOrUpdateIntegration(
+      const created = entry.platform === 'toutiao'
+        ? await this._integrationRepository.createExtensionAccount(org, 'toutiao', 'toutiao.user_id', seed.internalId, seed.username, seed.name, picture, maxChannels)
+        : await this.createOrUpdateIntegration(
         undefined,
         false,
         org,
@@ -521,6 +553,7 @@ export class IntegrationService {
         checkedAt
       );
     } catch (err) {
+      if (entry.platform === 'toutiao') throw err;
       console.warn(
         `[extension-session] could not create ${entry.platform} channel for org ${org}:`,
         (err as Error)?.message || err

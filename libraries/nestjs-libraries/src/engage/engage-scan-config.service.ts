@@ -22,6 +22,7 @@ export interface ScanFreshnessHours {
   hackernews: number;
   medium: number;
   quora: number;
+  toutiao: number;
 }
 export const DEFAULT_SCAN_FRESHNESS_HOURS: ScanFreshnessHours = {
   x: 24,
@@ -31,6 +32,7 @@ export const DEFAULT_SCAN_FRESHNESS_HOURS: ScanFreshnessHours = {
   hackernews: 24,
   medium: 24,
   quora: 24,
+  toutiao: 24,
 };
 
 // Per-call page size for X keyword scans (X `max_results`). Resolution order:
@@ -104,6 +106,7 @@ export const DEFAULT_OPPORTUNITY_TTL_DAYS_BY_PLATFORM: OpportunityTtlDays = {
   devto: 30,
   medium: 30,
   quora: 30,
+  toutiao: 3,
 };
 
 /**
@@ -201,7 +204,8 @@ export type ScanPlatform =
   | 'devto'
   | 'hackernews'
   | 'medium'
-  | 'quora';
+  | 'quora'
+  | 'toutiao';
 export type ScanPhase = 'initial' | 'incremental';
 export type ScanPath = 'workflow' | 'extension';
 
@@ -229,6 +233,7 @@ export const SCANNABLE_PLATFORMS: readonly ScanPlatform[] = [
   'hackernews',
   'medium',
   'quora',
+  'toutiao',
 ];
 
 /**
@@ -257,6 +262,7 @@ export const PLATFORM_HOSTS: Record<ScanPlatform, readonly string[]> = {
   hackernews: ['news.ycombinator.com'],
   medium: ['medium.com'],
   quora: ['quora.com'],
+  toutiao: ['toutiao.com'],
 };
 
 /**
@@ -390,6 +396,10 @@ export const DEFAULT_SCAN_PACING: EngageScanPacing = {
       initial: { maxPages: 1, pageSize: 20, pageDelayMs: 1500, jitterMs: 600 },
       incremental: { maxPages: 1, pageSize: 20, pageDelayMs: 1500, jitterMs: 600 },
     },
+    toutiao: {
+      initial: { maxPages: 1, pageSize: 10, pageDelayMs: 1500, jitterMs: 600 },
+      incremental: { maxPages: 1, pageSize: 10, pageDelayMs: 1500, jitterMs: 600 },
+    },
   },
   extension: {
     x: {
@@ -426,6 +436,10 @@ export const DEFAULT_SCAN_PACING: EngageScanPacing = {
     quora: {
       initial: { maxPages: 1, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
       incremental: { maxPages: 1, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
+    },
+    toutiao: {
+      initial: { maxPages: 1, pageSize: 10, pageDelayMs: 8000, jitterMs: 60000 },
+      incremental: { maxPages: 1, pageSize: 10, pageDelayMs: 8000, jitterMs: 60000 },
     },
     interUnit: { delayMs: 60000, jitterMs: 60000 },
     session: { hourlyRequestCap: 60 },

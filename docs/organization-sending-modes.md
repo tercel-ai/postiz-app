@@ -945,3 +945,27 @@ previous run exactly. Explicitly including the changed test files in a separate
 type check retained the staged baseline's 22 diagnostics with no additions. The
 original staged diff was unchanged; only these lock/test/documentation follow-ups
 were left unstaged. Every generated test database was removed.
+
+# Toutiao account discovery
+
+Toutiao session reports can register or match an account in either sending
+mode using `toutiao.user_id`. Toutiao micro-posts use the extension in both
+sending modes, as do replies with verified native comment receipts. An unverified browser page does not prove logout. No schema
+migration is required for the existing identity namespace fields.
+If Toutiao channel creation fails in a legacy multi-platform report, the
+response lists that failure and the other platforms still synchronize.
+
+# Platform action capability
+
+Controlled post and reply support are tracked separately. A platform's
+presence in the sending list does not by itself authorize replies; reply
+discovery, automatic replies and enqueue must also allow that platform in the
+reply list. A response that only indicates submission or
+review must not be recorded as a confirmed post. The new extension and backend
+must be deployed together; account continuity and platform results still need
+integrated verification after deployment.
+
+Toutiao keyword scans use the extension and fetch full micro-post details;
+tracked-author and channel scans are not supported. A confirmed reply stores its
+real comment ID; no independent comment permalink was established. If the native
+receipt cannot be matched to the post, actor and text, the result is unconfirmed.

@@ -44,6 +44,14 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(now); vi.stubEnv('ACCOUN
 afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 
 describe('shared Project, Post and Reply sending context', () => {
+  it('allows Toutiao post and reply account selection', async () => {
+    const { service, db } = setup();
+    db.integration.findMany.mockResolvedValue([{ ...account, providerIdentifier: 'toutiao', identityNamespace: 'toutiao.user_id' }]);
+    const result = await service.get('org', 'user', 'project');
+    expect(result.accounts[0].actions.POST.canSelect).toBe(true);
+    expect(result.accounts[0].actions.REPLY.canSelect).toBe(true);
+    expect(result.defaults.toutiao.REPLY.blockCode).not.toBe('CONTROLLED_PLATFORM_UNSUPPORTED');
+  });
   it('aggregates actual project authorization, defaults and reported terminals with consistent account IDs', async () => {
     const { service, db, policies } = setup();
     const result = await service.get('org', 'user', 'project');

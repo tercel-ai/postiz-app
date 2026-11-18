@@ -283,6 +283,12 @@ const PLATFORM_NATIVE_FORMATS: Record<string, PlatformNativeFormat> = {
     form: 'short',
     rules: [HASHTAG_RULE],
   },
+  toutiao: {
+    label: 'Toutiao micro-posts',
+    style: 'concise and conversational, with a concrete observation or takeaway',
+    markup: 'none',
+    form: 'short',
+  },
   devto: {
     label: 'dev.to',
     style: 'technical, tutorial-style',

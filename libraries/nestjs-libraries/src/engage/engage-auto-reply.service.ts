@@ -1,5 +1,5 @@
 import { SendModeService } from '../extension/send-mode.service';
-import { CONTROLLED_SEND_PLATFORMS } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
+import { CONTROLLED_REPLY_PLATFORMS } from '@gitroom/nestjs-libraries/extension/controlled-platforms';
 import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
 import { AutomaticSendProducerService } from '../extension/automatic-send-producer.service';
 import { SendCoordinatorService } from '../extension/send-coordinator.service';
@@ -554,7 +554,7 @@ export class EngageAutoReplyService implements OnModuleInit {
       const projectId = config.projectId!;
       const policies = (config.replyPolicies ?? {}) as Record<string, EngageReplyPolicy>;
       if (coordinated) {
-        if (!Object.keys(policies).some(platform => (CONTROLLED_SEND_PLATFORMS as readonly string[]).includes(platform.toLowerCase()))) continue;
+        if (!Object.keys(policies).some(platform => (CONTROLLED_REPLY_PLATFORMS as readonly string[]).includes(platform.toLowerCase()))) continue;
         const blockedReason = await this.automaticReplyBlockReason(org.id, projectId);
         if (blockedReason) {
           this.logger.warn(`[reply-gate] ${projectId} SKIP ${blockedReason}`);
@@ -579,7 +579,7 @@ export class EngageAutoReplyService implements OnModuleInit {
       for (const rawPlatform of Object.keys(policies)) {
         const platform = rawPlatform.toLowerCase();
         // Controlled producers must not charge generation for an unsupported write adapter.
-        if (coordinated && !(CONTROLLED_SEND_PLATFORMS as readonly string[]).includes(platform)) continue;
+        if (coordinated && !(CONTROLLED_REPLY_PLATFORMS as readonly string[]).includes(platform)) continue;
         if (!coordinated && blockedPlatforms.includes(platform)) continue;
         if ((perPlatformCount.get(platform) ?? 0) >= pacing.maxPerPoll) continue;
 

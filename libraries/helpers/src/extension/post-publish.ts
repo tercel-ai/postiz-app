@@ -64,7 +64,8 @@ export type PublishPlatform =
   | 'hackernews'
   | 'medium'
   | 'quora'
-  | 'devto';
+  | 'devto'
+  | 'toutiao';
 
 /**
  * SINGLE SOURCE OF TRUTH for the platforms the browser extension can actually
@@ -84,6 +85,7 @@ export const EXTENSION_PUBLISHABLE_PLATFORMS: readonly PublishPlatform[] = [
   'medium',
   'quora',
   'devto',
+  'toutiao',
 ];
 
 /**
@@ -95,6 +97,7 @@ export const SINGLE_SEGMENT_PLATFORMS: readonly PublishPlatform[] = [
   'medium',
   'quora',
   'devto',
+  'toutiao',
 ];
 
 /** Platforms that require a `title` on the post item (article/story headline). */
@@ -116,6 +119,7 @@ export const TITLE_REQUIRED_PLATFORMS: readonly PublishPlatform[] = [
  * image must still publish rather than stall forever in QUEUE.
  */
 export const IMAGE_CAPABLE_PLATFORMS: readonly PublishPlatform[] = [
+  'toutiao',
   'x',
   'reddit',
   'linkedin',
@@ -159,6 +163,7 @@ export const DEFAULT_SEGMENT_GAP_S: Record<PublishPlatform, SegmentGapRange> = {
   medium: DEFAULT_SEGMENT_GAP_RANGE,
   quora: DEFAULT_SEGMENT_GAP_RANGE,
   devto: DEFAULT_SEGMENT_GAP_RANGE,
+  toutiao: DEFAULT_SEGMENT_GAP_RANGE,
 };
 
 /** Hard ceiling (seconds) any configured segment gap is clamped to. */

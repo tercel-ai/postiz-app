@@ -29,7 +29,7 @@ import {
   sessionActorKey,
   observationProvider,
 } from './extension-node.protocol';
-import { CONTROLLED_SEND_PLATFORMS } from './controlled-platforms';
+import { CONTROLLED_SEND_PLATFORMS, CONTROLLED_REPLY_PLATFORMS } from './controlled-platforms';
 import { organizationSendModeKey } from './send-mode.service';
 import { matchesAccountSession, nodeConnectionStatus, projectAccountTerminal, terminalAvailability } from './extension-node.projection';
 
@@ -326,7 +326,7 @@ export class ExtensionNodeService {
         );
         const actions = [
           capability.post && 'POST',
-          capability.reply && 'REPLY',
+          capability.reply && (CONTROLLED_REPLY_PLATFORMS as readonly string[]).includes(platform) && 'REPLY',
         ].filter(Boolean) as ('POST' | 'REPLY')[];
         if (!actions.length) continue;
         const pending = await tx.post.findFirst({

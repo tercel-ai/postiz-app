@@ -2,7 +2,7 @@ import { ACCOUNT_CHANGE_CANCELLATION, canChangePostAccount, canEditUnsentReply, 
 import { preserveDispatchTarget, readPublishNowRequestedAt, withPublishNowRequestedAt } from './send-dispatch';
 import { assertAutonomousAccountIn, controlledBlockedPlatformsIn } from './send-mode-handover';
 import { SendModeService } from './send-mode.service';
-import { CONTROLLED_SEND_PLATFORMS, canonicalControlledPlatform, controlledReplySettings, hasControlledReplyTarget } from './controlled-platforms';
+import { CONTROLLED_SEND_PLATFORMS, CONTROLLED_REPLY_PLATFORMS, canonicalControlledPlatform, controlledReplySettings, hasControlledReplyTarget } from './controlled-platforms';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { hashSecret } from './extension-node.protocol';
 import { sendBusinessSummary, type SendActionDecision } from './send-business-summary';
@@ -177,7 +177,7 @@ export class SendCoordinatorService {
           : !opportunity || opportunity.deletedAt || opportunity.repliesDisabledAt ||
             !state || !['NEW', 'AUTO_QUEUED'].includes(state.status) ? 'REPLY_OPPORTUNITY_NOT_ACTIONABLE'
           : !opportunity.externalPostId ? 'REPLY_TARGET_REQUIRED'
-          : !root.providerIdentifier || !(CONTROLLED_SEND_PLATFORMS as readonly string[]).includes(canonicalControlledPlatform(root.providerIdentifier)) ? 'CONTROLLED_PLATFORM_UNSUPPORTED'
+          : !root.providerIdentifier || !(CONTROLLED_REPLY_PLATFORMS as readonly string[]).includes(canonicalControlledPlatform(root.providerIdentifier)) ? 'CONTROLLED_PLATFORM_UNSUPPORTED'
           : root.integrationId && root.accountSelectionMode == null ? 'SEND_BINDING_RECONFIRMATION_REQUIRED' : null;
         if (!reason) {
           try {
@@ -1228,9 +1228,9 @@ export class SendCoordinatorService {
         options.explicitIntegrationId === undefined
       )
         throw new BadRequestException('SEND_BINDING_RECONFIRMATION_REQUIRED');
-      if (!(CONTROLLED_SEND_PLATFORMS as readonly string[]).includes(canonicalControlledPlatform(first.providerIdentifier!)))
+      if (!((reply ? CONTROLLED_REPLY_PLATFORMS : CONTROLLED_SEND_PLATFORMS) as readonly string[]).includes(canonicalControlledPlatform(first.providerIdentifier!)))
         throw new BadRequestException('CONTROLLED_PLATFORM_UNSUPPORTED');
-      if (posts.length > 1 && ['medium', 'quora', 'devto'].includes(canonicalControlledPlatform(first.providerIdentifier!)))
+      if (posts.length > 1 && ['medium', 'quora', 'devto', 'toutiao'].includes(canonicalControlledPlatform(first.providerIdentifier!)))
         throw new BadRequestException('CONTROLLED_PLATFORM_THREAD_UNSUPPORTED');
       const policy = await this.policies.snapshotInTransaction(
         tx,

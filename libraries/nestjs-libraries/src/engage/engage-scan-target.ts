@@ -104,6 +104,7 @@ export function buildScanTargetKey(
         `Supported: ${[...SCANNABLE_PLATFORMS].join(', ')}.`
     );
   }
+  if (platform === 'toutiao') throw new BadRequestException('Toutiao currently supports keyword search only.');
   if (scanTypeFor(platform) !== expectedScope) {
     throw new BadRequestException(
       expectedScope === 'channel'

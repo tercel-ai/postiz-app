@@ -105,6 +105,7 @@ export const PLATFORM_REPLY_RISK_CEILING: Record<ScanPlatform, number> = {
   quora: 15,
   medium: 10,
   hackernews: 10,
+  toutiao: 10,
 };
 
 /** Admin-tunable override of PLATFORM_REPLY_RISK_CEILING, as `{ platform: n }`. */
@@ -266,6 +267,11 @@ export const OPERATION_PLAN_REPLY_VOLUME: Record<ScanPlatform, ReplyVolume> = {
     typical: '1-2',
     max: 2,
     why: 'an answer is long-form and IS the unit of value on Quora, so two good ones is a full day — one good answer still outperforms three thin ones',
+  },
+  toutiao: {
+    typical: '1-2',
+    max: 2,
+    why: 'replies to micro-posts should be relevant and spaced throughout the day',
   },
 };
 
