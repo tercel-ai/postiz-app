@@ -47,6 +47,7 @@ describe('legacy reply quarantine fences', () => {
 
   it('rechecks quarantine at the publish write after the context read, without claiming or billing', async () => {
     const { db, repo, service, claim, snapshot, billing } = fixture();
+    Object.assign(service, { _sendModes: { getConfirmedBrowserReply: vi.fn().mockResolvedValue({}) } });
     const update = repo.updateReplyUrl.bind(repo);
     vi.spyOn(repo, 'updateReplyUrl').mockImplementation(async (...args) => {
       Object.assign(db.rows('post')[0], quarantined);
@@ -62,6 +63,7 @@ describe('legacy reply quarantine fences', () => {
 
   it.each([null, 'LEGACY'])('preserves live %s legacy publish callbacks', async executionProtocol => {
     const { db, service, billing } = fixture({ executionProtocol });
+    Object.assign(service, { _sendModes: { getConfirmedBrowserReply: vi.fn().mockResolvedValue({}) } });
     await service.publishExtensionReply({ id: 'org' } as any, 'user', 'reply', null);
     expect(db.rows('post')[0].state).toBe('PUBLISHED');
     expect(billing.deductIfOverage).toHaveBeenCalledOnce();

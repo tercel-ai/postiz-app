@@ -210,3 +210,59 @@ describe('settling an owned legacy reply claim', () => {
     expect(db.rows('post')[0].releaseId).toBe('lease-a');
   });
 });
+
+describe('shared browser reply receipts', () => {
+  it('finds a linkless confirmed legacy callback by the original user and saved reply', async () => {
+    const { db, service } = setup();
+    db.seed('engageSentReply', { id: 'reply', postId: 'post', opportunityId: 'opp', organizationId: 'org' });
+    db.seed('engageOpportunity', { id: 'opp', platform: 'x' });
+    const { postId: _parent, ...admission } = request;
+    const grant = await service.beginBrowserWrite('org', 'user', { ...admission, sentReplyId: 'reply' });
+    await expect(service.getConfirmedBrowserReply('org', 'user', undefined, 'post', 'x', null)).resolves.toBeNull();
+    await service.settleBrowserWrite('org', 'user', grant.id, { ...owner, status: 'CONFIRMED' });
+    await expect(service.getConfirmedBrowserReply('org', 'user', undefined, 'post', 'x', null)).resolves.toEqual({});
+    await expect(service.getConfirmedBrowserReply('org', 'user', grant.id, 'post', 'x', null)).resolves.toEqual({});
+    await expect(service.getConfirmedBrowserReply('org', 'other', undefined, 'post', 'x', null)).resolves.toBeNull();
+    await expect(service.getConfirmedBrowserReply('org', 'user', undefined, 'other', 'x', null)).resolves.toBeNull();
+  });
+
+  it('keeps an old Hacker News parent ID out of releaseId while accepting its original receipt', async () => {
+    const { db, service } = setup();
+    db.seed('engageSentReply', { id: 'reply', postId: 'post', opportunityId: 'opp', organizationId: 'org' });
+    db.seed('engageOpportunity', { id: 'opp', platform: 'hackernews' });
+    const { postId: _parent, ...admission } = request;
+    const grant = await service.beginBrowserWrite('org', 'user', { ...admission, platform: 'hackernews', sentReplyId: 'reply' });
+    const url = 'https://news.ycombinator.com/item?id=456';
+    await service.settleBrowserWrite('org', 'user', grant.id, { ...owner, status: 'CONFIRMED', platformPostId: '123', url });
+    await expect(service.getConfirmedBrowserReply('org', 'user', grant.id, 'post', 'hackernews', url)).resolves.toEqual({});
+  });
+
+  it('returns the reply ID from the original outcome instead of its parent ID', async () => {
+    const { db, service } = setup();
+    db.seed('engageSentReply', { id: 'reply', postId: 'post', opportunityId: 'opp', organizationId: 'org' });
+    db.seed('engageOpportunity', { id: 'opp', platform: 'x' });
+    const { postId: _parent, ...admission } = request;
+    const grant = await service.beginBrowserWrite('org', 'user', { ...admission, sentReplyId: 'reply' });
+    const url = 'https://x.com/user/status/123';
+    const confirmed = { ...owner, status: 'CONFIRMED' as const, commentId: '123', platformPostId: '111', url };
+
+    await expect(service.settleBrowserWrite('org', 'user', grant.id, { ...confirmed, status: 'UNKNOWN' }))
+      .rejects.toThrow('INVALID_BROWSER_WRITE_OUTCOME');
+    await expect(service.getConfirmedBrowserReply('org', 'user', grant.id, 'post', 'x', url)).resolves.toBeNull();
+    await service.settleBrowserWrite('org', 'user', grant.id, confirmed);
+    await service.settleBrowserWrite('org', 'user', grant.id, confirmed);
+    await expect(service.getConfirmedBrowserReply('org', 'user', grant.id, 'post', 'x', url)).resolves.toEqual({ releaseId: '123' });
+    await expect(service.getConfirmedBrowserReply('org', 'user', 'other-effect', 'post', 'x', url)).resolves.toBeNull();
+    await expect(service.getConfirmedBrowserReply('org', 'user', grant.id, 'post', 'reddit', url)).resolves.toBeNull();
+    await expect(service.getConfirmedBrowserReply('org', 'user', grant.id, 'post', 'x', 'https://x.com/user/status/111')).resolves.toBeNull();
+    await expect(service.getConfirmedBrowserReply('org', 'other', grant.id, 'post', 'x', url)).resolves.toBeNull();
+    await expect(service.getConfirmedBrowserReply('org', 'user', grant.id, 'other', 'x', url)).resolves.toBeNull();
+  });
+
+  it('rejects comment IDs for ordinary posts', async () => {
+    const { service } = setup();
+    const grant = await service.beginBrowserWrite('org', 'user', request);
+    await expect(service.settleBrowserWrite('org', 'user', grant.id, { ...owner, status: 'CONFIRMED', commentId: '123' }))
+      .rejects.toThrow('INVALID_BROWSER_WRITE_OUTCOME');
+  });
+});

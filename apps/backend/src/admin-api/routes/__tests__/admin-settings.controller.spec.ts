@@ -4,6 +4,7 @@ import { AdminSettingsController } from '../admin-settings.controller';
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import { OperationPlanService } from '@gitroom/nestjs-libraries/database/prisma/operation-plan/operation-plan.service';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
+import { LEGACY_PROVIDER_ALLOWLIST_KEY, USER_PROVIDER_ALLOWLIST_KEY } from '@gitroom/nestjs-libraries/integrations/user-provider-policy';
 import {
   canonicalOperationPlanPlatform,
   PlatformCadence,
@@ -31,6 +32,39 @@ function makeController(value: unknown) {
   );
   return { controller, settingsService, integrationManager };
 }
+
+describe('User provider allowlist', () => {
+  it('reads legacy only until a global override is saved, including an empty override', async () => {
+    const { controller, settingsService } = makeController(null);
+    settingsService.get.mockResolvedValueOnce(null).mockResolvedValueOnce(['x', 'reddit']);
+    expect(await controller.getSetting(USER_PROVIDER_ALLOWLIST_KEY))
+      .toEqual({ key: USER_PROVIDER_ALLOWLIST_KEY, source: 'legacy', value: ['x', 'reddit'] });
+    expect(settingsService.get).toHaveBeenLastCalledWith('operation_plan.allowed_platforms');
+
+    settingsService.get.mockClear().mockResolvedValueOnce([]);
+    expect(await controller.getSetting(USER_PROVIDER_ALLOWLIST_KEY))
+      .toEqual({ key: USER_PROVIDER_ALLOWLIST_KEY, source: 'global', value: [] });
+    expect(settingsService.get).toHaveBeenCalledExactlyOnceWith(USER_PROVIDER_ALLOWLIST_KEY);
+  });
+
+  it('validates and saves the global override without changing operation plans', async () => {
+    const { controller, settingsService } = makeController(null);
+    await expect(controller.upsertSetting(USER_PROVIDER_ALLOWLIST_KEY, { value: ['unknown'] }))
+      .rejects.toThrow('INVALID_USER_PROVIDER_ALLOWLIST');
+    expect(settingsService.set).not.toHaveBeenCalled();
+    await controller.upsertSetting(USER_PROVIDER_ALLOWLIST_KEY, { value: ['x', 'x', 'toutiao'] });
+    expect(settingsService.set).toHaveBeenCalledExactlyOnceWith(USER_PROVIDER_ALLOWLIST_KEY, ['x', 'toutiao'], { type: 'json' });
+  });
+
+  it('preserves empty and historical string values on independent operation plan writes', async () => {
+    const { controller, settingsService } = makeController(null);
+    await controller.upsertSetting(LEGACY_PROVIDER_ALLOWLIST_KEY, { value: [], type: 'json' });
+    await controller.upsertSetting(LEGACY_PROVIDER_ALLOWLIST_KEY, { value: 'x,reddit', type: 'string' });
+    expect(settingsService.set.mock.calls.map(([key, value]) => [key, value])).toEqual([
+      [LEGACY_PROVIDER_ALLOWLIST_KEY, []], [LEGACY_PROVIDER_ALLOWLIST_KEY, 'x,reddit'],
+    ]);
+  });
+});
 
 describe('AdminSettingsController platform cadence', () => {
   it('returns every registered provider with its effective default when the setting is absent', async () => {

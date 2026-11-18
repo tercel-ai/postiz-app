@@ -1555,7 +1555,8 @@ export class EngageController {
       user?.id,
       id,
       body.url,
-      body.author
+      body.author,
+      body.browserWriteId
     );
   }
 

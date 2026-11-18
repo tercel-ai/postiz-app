@@ -396,6 +396,7 @@ describe('EngageScanIngestService.persistOpportunities', () => {
   });
 });
 
+// These persistence fixtures exercise posts above the current score threshold.
 function rawPost(over: any = {}): any {
   return {
     id: 'r1',
@@ -407,7 +408,7 @@ function rawPost(over: any = {}): any {
     postPublishedAt: recentlyPublished(),
     channelId: 'webdev',
     metricLikes: 0, metricReplies: 0, metricRetweets: 0, metricQuotes: 0,
-    metricScore: 200, metricComments: 50,
+    metricScore: 850, metricComments: 50,
     ...over,
   };
 }
@@ -478,7 +479,7 @@ function oppRow(over: any = {}): any {
     postPublishedAt: recentlyPublished(),
     metricLikes: 0, metricReplies: 0, metricRetweets: 0, metricQuotes: 0,
     metricBookmarks: 0, metricViews: 0, metricShares: 0, metricSaves: 0,
-    metricScore: 200, metricUpvoteRatio: null, metricComments: 50,
+    metricScore: 850, metricUpvoteRatio: null, metricComments: 50,
     ...over,
   };
 }

@@ -388,6 +388,7 @@ export class SendExecutionService {
         select: {
           segmentIndex: true,
           status: true,
+          authorizedAt: true,
           submitBefore: true,
           result: true,
         },

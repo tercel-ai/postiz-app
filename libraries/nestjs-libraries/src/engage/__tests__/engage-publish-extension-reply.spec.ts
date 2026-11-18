@@ -61,6 +61,41 @@ describe('publishExtensionReply — commit on confirmed extension success', () =
     expect(updateReplyUrl).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['toutiao', '7709401464397447974', undefined],
+    ['hackernews', '123', 'https://news.ycombinator.com/item?id=123'],
+    ['reddit', 't1_def', 'https://www.reddit.com/r/test/comments/abc/topic/def/'],
+  ])('persists the original verified %s reply ID through the shared callback', async (platform, releaseId, url) => {
+    const { service, updateReplyUrl } = build({ ...draftCtx, platform });
+    const getConfirmedBrowserReply = vi.fn().mockResolvedValue({ releaseId });
+    Object.assign(service, { _sendModes: { getConfirmedBrowserReply } });
+    await expect(service.publishExtensionReply(org, 'u1', 'r1', url, undefined, 'original-effect'))
+      .resolves.toMatchObject({ state: 'PUBLISHED', replyUrl: url ?? null });
+    expect(getConfirmedBrowserReply).toHaveBeenCalledWith('org-1', 'u1', 'original-effect', 'p1', platform, url);
+    expect(updateReplyUrl).toHaveBeenCalledWith('org-1', 'r1', url ?? null, undefined, {
+      markPublished: true, releaseId,
+    });
+  });
+
+  it('rejects a reference to a different browser receipt', async () => {
+    const { service, updateReplyUrl, postOverage } = build({ ...draftCtx, platform: 'hackernews' });
+    const getConfirmedBrowserReply = vi.fn().mockResolvedValue(null);
+    Object.assign(service, { _sendModes: { getConfirmedBrowserReply } });
+    await expect(service.publishExtensionReply(org, 'u1', 'r1', undefined, undefined, 'other-effect'))
+      .rejects.toThrow('CONFIRMED_BROWSER_REPLY_RECEIPT_REQUIRED');
+    expect(updateReplyUrl).not.toHaveBeenCalled();
+    expect(postOverage.deductIfOverage).not.toHaveBeenCalled();
+  });
+
+  it('does not settle or charge the same URL-less publication twice', async () => {
+    const { service, updateReplyUrl, postOverage } = build({ ...draftCtx, platform: 'toutiao', state: 'PUBLISHED',
+      releaseId: '7709401464397447974' });
+    await expect(service.publishExtensionReply(org, 'u1', 'r1', undefined, undefined, 'original-effect'))
+      .resolves.toMatchObject({ alreadyPublished: true });
+    expect(updateReplyUrl).not.toHaveBeenCalled();
+    expect(postOverage.deductIfOverage).not.toHaveBeenCalled();
+  });
+
   it('backfills+publishes, claims, snapshots keywords, and charges on success', async () => {
     const {
       service,
@@ -161,7 +196,10 @@ describe('publishExtensionReply — commit on confirmed extension success', () =
     const { service, updateReplyUrl, claimOpportunityForReply, postOverage } =
       build(draftCtx);
 
-    const res = await service.publishExtensionReply(org, 'u1', 'r1', undefined, author);
+    const getConfirmedBrowserReply = vi.fn().mockResolvedValue({});
+    Object.assign(service, { _sendModes: { getConfirmedBrowserReply } });
+    const res = await service.publishExtensionReply(org, 'u1', 'r1', undefined, author, 'original-effect');
+    expect(getConfirmedBrowserReply).toHaveBeenCalledWith('org-1', 'u1', 'original-effect', 'p1', 'x', undefined);
 
     // The commit must still land: DRAFT→PUBLISHED with releaseURL null —
     // leaving the row DRAFT is what makes a live reply re-sendable (duplicate).
@@ -175,12 +213,34 @@ describe('publishExtensionReply — commit on confirmed extension success', () =
 
   it('URL-less publish skips the author enrichment (it needs the reply URL)', async () => {
     const { service } = build(draftCtx);
+    Object.assign(service, { _sendModes: { getConfirmedBrowserReply: vi.fn().mockResolvedValue({}) } });
     const postsService = (service as any)._postsService;
 
     await service.publishExtensionReply(org, 'u1', 'r1', undefined, undefined);
 
     // Background enrich resolves the author FROM the reply URL — nothing to do.
     expect(postsService.fetchEngageXAuthor).not.toHaveBeenCalled();
+  });
+
+  it.each(['x', 'toutiao'])('does not publish or bill an empty %s callback without a confirmed browser receipt', async platform => {
+    const { service, updateReplyUrl, claimOpportunityForReply, postOverage } = build({ ...draftCtx, platform });
+    Object.assign(service, { _sendModes: { getConfirmedBrowserReply: vi.fn().mockResolvedValue(null) } });
+    await expect(service.publishExtensionReply(org, 'u1', 'r1')).rejects.toThrow('CONFIRMED_BROWSER_REPLY_RECEIPT_REQUIRED');
+    expect(updateReplyUrl).not.toHaveBeenCalled();
+    expect(claimOpportunityForReply).not.toHaveBeenCalled();
+    expect(postOverage.deductIfOverage).not.toHaveBeenCalled();
+  });
+
+  it('preserves a reply link saved while a URL-less callback was in flight', async () => {
+    const { service, updateReplyUrl, getSentReplyContext, claimOpportunityForReply, postOverage } = build(draftCtx);
+    Object.assign(service, { _sendModes: { getConfirmedBrowserReply: vi.fn().mockResolvedValue({}) } });
+    getSentReplyContext.mockResolvedValueOnce(draftCtx)
+      .mockResolvedValueOnce({ ...draftCtx, state: 'PUBLISHED', releaseURL: xUrl });
+    updateReplyUrl.mockRejectedValueOnce(Object.assign(new Error('Publication already committed'), { code: 'P2025' }));
+    await expect(service.publishExtensionReply(org, 'u1', 'r1', undefined, undefined, 'original-effect'))
+      .resolves.toMatchObject({ state: 'PUBLISHED', replyUrl: xUrl, alreadyPublished: true });
+    expect(claimOpportunityForReply).not.toHaveBeenCalled();
+    expect(postOverage.deductIfOverage).not.toHaveBeenCalled();
   });
 
   it('throws when the reply is not found', async () => {

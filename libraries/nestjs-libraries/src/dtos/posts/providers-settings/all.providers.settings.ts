@@ -57,7 +57,8 @@ export type AllProvidersSettings =
   | ProviderExtension<'vk', None>
   // Quora feed posts are a plain text body with no extra settings, so it shares
   // the empty-settings shape with threads/mastodon/etc.
-  | ProviderExtension<'quora', None>;
+  | ProviderExtension<'quora', None>
+  | ProviderExtension<'toutiao', None>;
 
 type None = NonNullable<unknown>;
 
@@ -95,6 +96,7 @@ export const allProviders = (setEmpty?: any) => {
     { value: setEmpty, name: 'nostr' },
     { value: setEmpty, name: 'vk' },
     { value: setEmpty, name: 'quora' },
+    { value: setEmpty, name: 'toutiao' },
   ].filter((f) => f.value);
 };
 

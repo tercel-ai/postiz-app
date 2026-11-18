@@ -6772,10 +6772,10 @@ export class EngageRepository {
     // this call is the moment the reply went live. The human manual-paste path
     // leaves it unset: its post is already PUBLISHED (created so by
     // confirmManualReply), so a backfill there only fills the URL.
-    opts: { markPublished?: boolean } = {}
+    opts: { markPublished?: boolean; releaseId?: string } = {}
   ) {
-    // Join the opportunity for its platform: X gets releaseId derived from the
-    // tweet URL so metrics sync can read it, X/Reddit get author enrichment
+    // Join the opportunity for its platform. X retains its URL-derived ID for
+    // link-only callbacks. X/Reddit get author enrichment
     // merged into settings — everything below is genuinely platform-specific
     // enrichment, gated per-branch, not a reason to refuse the write outright.
     // The caller (service) has already validated the URL matches this
@@ -6814,8 +6814,7 @@ export class EngageRepository {
         data: { releaseURL: url },
       });
     }
-    const releaseId =
-      platform === 'x' && url ? parseXTweetId(url) ?? undefined : undefined;
+    const releaseId = (platform === 'x' && url ? parseXTweetId(url) : undefined) ?? opts.releaseId;
 
     // If this reply was recorded without a connected account, resolve one now —
     // so the Sent card can say who replied and metrics sync has an account to
@@ -6883,7 +6882,10 @@ export class EngageRepository {
     return this._post.model.post.update({
       // Recheck at the write boundary; a prior context read cannot authorize
       // reviving quarantined content or bypassing coordinated settlement.
-      where: { organizationId, deletedAt: null, sendIntentId: null, id: reply.postId, AND: [legacyExecutionWhere()] },
+      where: { organizationId, deletedAt: null, sendIntentId: null, id: reply.postId, AND: [legacyExecutionWhere()],
+        ...(opts.markPublished
+          ? { OR: [{ state: { not: 'PUBLISHED' } }, ...(url ? [{ releaseURL: null }] : [])] }
+          : { state: 'PUBLISHED' }) },
       data: {
         // Empty/absent URL persists as null (never '') so every "awaiting its
         // link" check — which tests releaseURL for null — keeps working.

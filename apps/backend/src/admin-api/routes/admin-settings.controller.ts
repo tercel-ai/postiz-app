@@ -34,6 +34,7 @@ import { SEND_ACCOUNT_POLICY_KEY, SendPolicyService } from '@gitroom/nestjs-libr
 import { SaveSystemSendPolicyDto } from '@gitroom/nestjs-libraries/extension/send-policy.dto';
 import { SendModeService, SEND_MODE_SYSTEM_KEY, SEND_MODE_ORGANIZATION_PREFIX, SEND_MAINTENANCE_RECOVERY_PREFIX } from '@gitroom/nestjs-libraries/extension/send-mode.service';
 import { SaveSystemSendModeDto } from '@gitroom/nestjs-libraries/extension/send-mode.dto';
+import { resolveUserProviderPolicy, USER_PROVIDER_ALLOWLIST_KEY } from '@gitroom/nestjs-libraries/integrations/user-provider-policy';
 
 const RESERVED_KEYS = ['ai_model_pricing', SEND_ACCOUNT_POLICY_KEY, SEND_MODE_SYSTEM_KEY];
 const reservedKey = (key: string) => RESERVED_KEYS.includes(key) || (key.startsWith(SEND_MODE_ORGANIZATION_PREFIX) || key.startsWith(SEND_MAINTENANCE_RECOVERY_PREFIX));
@@ -251,6 +252,13 @@ export class AdminSettingsController {
 
   @Get('/settings/:key')
   async getSetting(@Param('key') key: string) {
+    if (key === USER_PROVIDER_ALLOWLIST_KEY) {
+      const { source, allowedProviderIds } = await resolveUserProviderPolicy(
+        this._settingsService,
+        this._integrationManager.getAllowedSocialsIntegrations(),
+      );
+      return { key, source, value: allowedProviderIds };
+    }
     const value = await this._settingsService.get(key);
     if (key === OPERATION_PLAN_PLATFORM_CADENCE_KEY) {
       const platforms = this._integrationManager.getSocialProviderList()
@@ -281,6 +289,15 @@ export class AdminSettingsController {
         `Setting "${key}" is managed by a dedicated API, use the corresponding endpoint instead`,
         400
       );
+    }
+    if (key === USER_PROVIDER_ALLOWLIST_KEY) {
+      const registered = new Set(this._integrationManager.getAllowedSocialsIntegrations());
+      const ids: unknown = body.value;
+      if (!Array.isArray(ids) || ids.some(id => typeof id !== 'string' || !registered.has(id))) {
+        throw new HttpException('INVALID_USER_PROVIDER_ALLOWLIST', 400);
+      }
+      await this._settingsService.set(key, [...new Set<string>(ids)], { type: 'json', description: body.description });
+      return { key, upserted: true };
     }
     await this._settingsService.set(key, body.value, {
       type: body.type,

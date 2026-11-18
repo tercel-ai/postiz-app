@@ -54,6 +54,7 @@ describe('isThreadCapablePlatform', () => {
       medium: false,
       quora: false,
       devto: false,
+      toutiao: false,
     });
   });
 

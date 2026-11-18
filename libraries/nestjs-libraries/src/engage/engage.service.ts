@@ -2644,7 +2644,8 @@ export class EngageService implements OnApplicationBootstrap {
     userId: string | undefined,
     sentReplyId: string,
     url?: string | null,
-    author?: EngageAuthorProfile
+    author?: EngageAuthorProfile,
+    browserWriteId?: string
   ) {
     const ctx = await this._engageRepository.getSentReplyContext(
       org.id,
@@ -2656,9 +2657,7 @@ export class EngageService implements OnApplicationBootstrap {
     if (ctx.sendIntentId || !isLegacyExecution(ctx.executionProtocol))
       throw new BadRequestException('ACCOUNT_BOUND_PROTOCOL_REQUIRED');
 
-    // Already published with a URL → a repeat success callback. No-op so we never
-    // double-charge or re-claim.
-    if (ctx.state === 'PUBLISHED' && ctx.releaseURL) {
+    if (ctx.state === 'PUBLISHED' && (ctx.releaseURL || !url)) {
       return {
         id: sentReplyId,
         state: 'PUBLISHED',
@@ -2678,23 +2677,33 @@ export class EngageService implements OnApplicationBootstrap {
       );
     }
 
-    // Same format validation as the manual backfill path. URL-less is allowed:
-    // the extension can confirm a send without capturing the permalink, and the
-    // commit (DRAFT→PUBLISHED) must still land — a record left in DRAFT for a
-    // reply that IS live reads as re-sendable and invites a duplicate post. The
-    // published-without-URL row surfaces the manual "submit link" flow instead.
+    // A linkless publication needs the original browser write. The older
+    // link-only callback and the manual link endpoint keep their URL validation.
     if (url) {
       await this._validateReplyUrl(ctx.platform, url);
     }
 
-    // Backfill URL + (X) releaseId/integration + author AND flip DRAFT→PUBLISHED.
-    await this._engageRepository.updateReplyUrl(
-      org.id,
-      sentReplyId,
-      url || null,
-      author,
-      { markPublished: true }
-    );
+    let releaseId: string | undefined;
+    if (!url || browserWriteId !== undefined) {
+      if (!userId || (browserWriteId !== undefined && (typeof browserWriteId !== 'string' || !/^\S{1,128}$/.test(browserWriteId))))
+        throw new BadRequestException('CONFIRMED_BROWSER_REPLY_RECEIPT_REQUIRED');
+      const receipt = await this._sendModes?.getConfirmedBrowserReply(org.id, userId, browserWriteId, ctx.postId, ctx.platform, url);
+      if (!receipt) throw new BadRequestException('CONFIRMED_BROWSER_REPLY_RECEIPT_REQUIRED');
+      releaseId = receipt.releaseId;
+    }
+
+    try {
+      await this._engageRepository.updateReplyUrl(org.id, sentReplyId, url || null, author,
+        { markPublished: true, ...(releaseId ? { releaseId } : {}) });
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'P2025') {
+        const latest = await this._engageRepository.getSentReplyContext(org.id, sentReplyId);
+        if (latest?.state === 'PUBLISHED' && (!url || latest.releaseURL) && !latest.deletedAt &&
+            !latest.sendIntentId && isLegacyExecution(latest.executionProtocol))
+          return { id: sentReplyId, state: 'PUBLISHED', replyUrl: latest.releaseURL, alreadyPublished: true };
+      }
+      throw error;
+    }
 
     // The reply is live on the platform; recording it wins over claim bookkeeping.
     // Claim the SAME (org, project) state row the draft was saved under — omitting

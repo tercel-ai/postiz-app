@@ -255,10 +255,10 @@ export class IntegrationManager {
     return extensionPublishProviderIds();
   }
 
-  async getAllIntegrations() {
+  async getAllIntegrations(allowedProviderIds?: readonly string[]) {
     return {
       social: await Promise.all(
-        socialIntegrationList.map(async (p) => ({
+        socialIntegrationList.filter(p => !allowedProviderIds || allowedProviderIds.includes(p.identifier)).map(async (p) => ({
           name: p.name,
           identifier: p.identifier,
           toolTip: p.toolTip,

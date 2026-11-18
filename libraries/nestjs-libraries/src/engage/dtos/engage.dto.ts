@@ -1675,6 +1675,12 @@ export class SubmitManualReplyUrlDto {
 export class PublishExtensionReplyDto {
   @IsOptional()
   @IsString()
+  @Matches(/^\S+$/)
+  @MaxLength(128)
+  browserWriteId?: string;
+
+  @IsOptional()
+  @IsString()
   @MaxLength(2048)
   url?: string;
 

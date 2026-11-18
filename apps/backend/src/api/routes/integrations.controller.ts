@@ -64,6 +64,8 @@ import { PermissionsService } from '@gitroom/backend/services/auth/permissions/p
 // too old to act on", so diagnostics and attribution can never disagree.
 import { isExtensionSessionStale } from '@gitroom/nestjs-libraries/database/prisma/integrations/extension-session.utils';
 import { ExtensionNodeService } from '@gitroom/nestjs-libraries/extension/extension-node.service';
+import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
+import { resolveUserProviderPolicy } from '@gitroom/nestjs-libraries/integrations/user-provider-policy';
 
 @ApiTags('Integrations')
 @Controller('/integrations')
@@ -77,7 +79,8 @@ export class IntegrationsController {
     private _aiseeClient: AiseeCreditService,
     private _permissionsService: PermissionsService,
     @Optional() private _extensionNodes?: ExtensionNodeService,
-    @Optional() private _sendModes?: SendModeService
+    @Optional() private _sendModes?: SendModeService,
+    @Optional() private _settingsService?: SettingsService,
   ) {}
 
   private async controlled(org: string) {
@@ -114,8 +117,14 @@ export class IntegrationsController {
   @ApiOkResponse({
     description: 'Returns all available social integrations',
   })
-  getIntegrations() {
-    return this._integrationManager.getAllIntegrations();
+  async getIntegrations() {
+    if (!this._settingsService) throw new ServiceUnavailableException('USER_PROVIDER_POLICY_UNAVAILABLE');
+    const { allowedProviderIds } = await resolveUserProviderPolicy(
+      this._settingsService,
+      this._integrationManager.getAllowedSocialsIntegrations(),
+    );
+    const result = await this._integrationManager.getAllIntegrations(allowedProviderIds);
+    return { ...result, allowedProviderIds };
   }
 
   @Get('/:identifier/internal-plugs')

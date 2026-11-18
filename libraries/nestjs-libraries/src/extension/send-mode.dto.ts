@@ -150,6 +150,12 @@ export class BrowserWriteOutcomeDto extends BrowserWriteOwnerDto {
 
   @IsOptional()
   @IsString()
+  @Matches(/^\S+$/)
+  @MaxLength(2048)
+  commentId?: string;
+
+  @IsOptional()
+  @IsString()
   @Matches(/^https?:\/\//)
   @MaxLength(4096)
   url?: string;

@@ -2285,6 +2285,9 @@ export class SendModeService {
         (typeof body.platformPostId !== 'string' ||
           !body.platformPostId.trim() ||
           body.platformPostId.length > 2048)) ||
+      (body.commentId !== undefined &&
+        (body.status !== 'CONFIRMED' || typeof body.commentId !== 'string' ||
+          !/^\S+$/.test(body.commentId) || body.commentId.length > 2048)) ||
       (body.url !== undefined &&
         (typeof body.url !== 'string' ||
           !/^https?:\/\//.test(body.url) ||
@@ -2302,12 +2305,15 @@ export class SendModeService {
       const current = this.effectResult(row.result);
       if (current.source !== 'BROWSER' || current.browserUserId !== userId)
         throw new ForbiddenException('BROWSER_WRITE_OWNER_REQUIRED');
+      if (body.commentId !== undefined && current.action !== 'COMMENT')
+        throw new BadRequestException('INVALID_BROWSER_WRITE_OUTCOME');
       if (current.actor && body.actor && sendHash(current.actor) !== sendHash(body.actor))
         throw new ConflictException('BROWSER_WRITE_OUTCOME_CONFLICT');
       if ((current.status === 'NOT_SUBMITTED' || current.status === 'CONFIRMED' && current.hasResult === true) && body.actor && !current.actor)
         throw new ConflictException('BROWSER_WRITE_OUTCOME_CONFLICT');
       const result = {
         ...(body.platformPostId ? { postId: body.platformPostId } : {}),
+        ...(body.commentId ? { commentId: body.commentId } : {}),
         ...(body.url ? { url: body.url } : {}),
       };
       if (['CONFIRMED', 'NOT_SUBMITTED'].includes(current.status)) {
@@ -2372,6 +2378,34 @@ export class SendModeService {
       await this.releaseUnsentReplyClaimIn(tx, organizationId, next);
       return { id, status: next.status, organizationId, userId };
     });
+  }
+
+  /** Read confirmed reply evidence from the original browser write. */
+  async getConfirmedBrowserReply(
+    organizationId: string, userId: string, browserWriteId: string | undefined, postId: string, platform: string,
+    url: string | null | undefined,
+  ): Promise<{ releaseId?: string } | null> {
+    const scope = { organizationId, userId, operation: AUTONOMOUS_EFFECT_OPERATION };
+    const receipt = await this.db.sendMutationReceipt.findFirst({
+      where: browserWriteId ? { ...scope, id: browserWriteId } : { ...scope, AND: [
+        { result: { path: ['postIds'], equals: [postId] } },
+        { result: { path: ['platform'], equals: platform } },
+        { result: { path: ['action'], equals: 'COMMENT' } },
+        { result: { path: ['status'], equals: 'CONFIRMED' } },
+      ] },
+      select: { result: true },
+    });
+    if (!receipt) return null;
+    const result = this.effectResult(receipt.result);
+    if (result.source !== 'BROWSER' || result.browserUserId !== userId || result.platform !== platform ||
+        result.action !== 'COMMENT' || result.status !== 'CONFIRMED' || !result.hasResult ||
+        result.postIds?.length !== 1 || result.postIds[0] !== postId) return null;
+    const observed = result.result as { commentId?: unknown; url?: unknown } | undefined;
+    if (!observed || (observed.url || null) !== (url || null)) return null;
+    // Legacy postId can identify the parent item. Only an explicit reply ID
+    // from the original outcome is suitable for releaseId.
+    return typeof observed.commentId === 'string' && /^\S{1,2048}$/.test(observed.commentId)
+      ? { releaseId: observed.commentId } : {};
   }
 
   private async legacyPostRecoveryIn(tx: Prisma.TransactionClient, organizationId: string, postId: string) {

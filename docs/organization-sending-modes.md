@@ -946,6 +946,19 @@ type check retained the staged baseline's 22 diagnostics with no additions. The
 original staged diff was unchanged; only these lock/test/documentation follow-ups
 were left unstaged. Every generated test database was removed.
 
+# User-facing provider catalog
+
+`providers.user_allowed_platforms` is a global Settings override for the user
+catalog returned by `GET /integrations`. A stored empty array hides every
+provider. An absent override reads `operation_plan.allowed_platforms`; an empty
+legacy value keeps the unrestricted catalog. Management reads the effective
+array and its source from the existing admin settings endpoint. Each setting is
+saved independently. The fallback reads the legacy allowlist only until an
+explicit user catalog is saved. Saving publishing cadence writes the platform
+allowlist only if the administrator edited that control. Operation-plan, scan
+and draft quota continue using their own allowlist and its existing empty
+value semantics.
+
 # Toutiao account discovery
 
 Toutiao session reports can register or match an account in either sending

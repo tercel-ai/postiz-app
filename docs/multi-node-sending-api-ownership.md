@@ -798,3 +798,32 @@ settlement versus administrator recovery in both commit orders, starting from
 AUTHORIZED and UNKNOWN: a real serialization conflict retries against current
 evidence and cannot overwrite the winning terminal decision or duplicate its
 recovery receipt. Existing ownership, quota provenance and replay rules remain.
+
+### Original reply receipt evidence
+
+The authenticated extension execution status exposes the segment's existing
+`authorizedAt` so readback can exclude comments known to predate authorization.
+`submitBefore` limits the original click, and does not limit subsequent
+recovery. Unique exact matches can confirm without a timestamp. The controlled
+owner retry API continues to distinguish active work, duplicate-risk review,
+confirmed publication and accepted requeue. Platform reading does not change
+admission.
+
+Autonomous reply adapters in the extension identify the comment's own ID and
+optional permalink. They report `commentId` on the confirmed browser-write
+outcome. The publish-reply callback references that outcome with
+`browserWriteId`. The backend verifies the original saved Post, organization,
+user, platform and optional link, then copies the verified ID into `releaseId`
+and uses the existing Engage publish and billing workflow. Legacy outcomes
+can confirm publication. Their `platformPostId` may point to the parent item,
+so only an explicitly recorded comment ID is used as a reply ID. The existing
+X URL-derived ID and link-only callbacks still work. Deploy the backend before
+the extension.
+
+A URL-less publication requires a confirmed browser write for the same reply,
+organization, user and platform, even when the extension could not read a
+comment ID. Older callbacks without a write ID can use their scoped confirmed
+ledger entry. The extension can resubmit a confirmed receipt through
+**Check status** after a callback failure. Manual links still use the existing
+published-reply metadata endpoint. A concurrent receipt replay preserves a link
+saved by another request.
