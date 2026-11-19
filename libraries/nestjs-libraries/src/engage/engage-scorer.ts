@@ -138,6 +138,8 @@ export function scorePost(
       case 'instagram':
       case 'pinterest':
         return computeNetworkHeatScore(post);
+      case 'toutiao':
+        return computeToutiaoHeatScore(post);
       default:
         return computeCommunityHeatScore(post); // reddit and others
     }
@@ -461,6 +463,20 @@ function computeNetworkHeatScore(post: RawPost): number {
   if (heat > 100) return 23;
   if (heat > 25) return 12;
   return 4;
+}
+
+// Toutiao cards report likes, comments and forwards. Comments carry the most
+// weight because the opportunity is to join a conversation.
+function computeToutiaoHeatScore(post: RawPost): number {
+  const heat = (post.metricLikes ?? 0) +
+    (post.metricComments ?? 0) * 3 +
+    (post.metricShares ?? 0) * 2;
+  if (heat >= 15) return 45;
+  if (heat >= 10) return 38;
+  if (heat >= 6) return 28;
+  if (heat >= 3) return 18;
+  if (heat >= 1) return 8;
+  return 0;
 }
 
 // Reddit, Quora and the other community platforms — upvote score + comments,

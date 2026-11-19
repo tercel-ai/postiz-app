@@ -106,7 +106,7 @@ export const DEFAULT_OPPORTUNITY_TTL_DAYS_BY_PLATFORM: OpportunityTtlDays = {
   devto: 30,
   medium: 30,
   quora: 30,
-  toutiao: 3,
+  toutiao: 14,
 };
 
 /**

@@ -47,6 +47,22 @@ describe('opportunity TTL resolution (per platform)', () => {
     expect(await svc.getOpportunityTtlDays('hackernews')).toBe(2);
   });
 
+  it('defaults Toutiao to 14 days and preserves a saved Toutiao override', async () => {
+    const defaults = new EngageScanConfigService(settingsMock());
+    expect(await defaults.resolveOpportunityTtlDays('toutiao')).toEqual({
+      value: 14,
+      source: 'default',
+    });
+
+    const configured = new EngageScanConfigService(
+      settingsMock({ [ENGAGE_OPPORTUNITY_TTL_DAYS_BY_PLATFORM_KEY]: { toutiao: 10 } })
+    );
+    expect(await configured.resolveOpportunityTtlDays('toutiao')).toEqual({
+      value: 10,
+      source: 'db',
+    });
+  });
+
   it('prefers the stored per-platform map; an unset sibling falls through', async () => {
     const svc = new EngageScanConfigService(
       settingsMock({ [ENGAGE_OPPORTUNITY_TTL_DAYS_BY_PLATFORM_KEY]: { devto: 14 } })
@@ -205,6 +221,16 @@ describe('EngageScanIngestService TTL gate', () => {
     ]);
     expect(dropped).toBe(1);
     expect(kept.map((p: any) => p.platform)).toEqual(['devto']);
+  });
+
+  it('keeps a 7-day-old Toutiao post and drops one older than 14 days', async () => {
+    const { svc } = buildIngest(DEFAULT_OPPORTUNITY_TTL_DAYS_BY_PLATFORM);
+    const fresh = post({ platform: 'toutiao', postPublishedAt: new Date(Date.now() - 7 * DAY) });
+    const expired = post({ platform: 'toutiao', postPublishedAt: new Date(Date.now() - 15 * DAY) });
+    expect(await svc.filterExpiredByPublishTime([fresh, expired])).toEqual({
+      kept: [fresh],
+      dropped: 1,
+    });
   });
 
   it('keeps a post whose platform has no configured TTL', async () => {

@@ -86,6 +86,18 @@ nextTasks empty           → nothing due; extension idles
   list validates selectors and defines scanner capability. Toutiao is available
   for keyword units when enabled for scanning. `want` caps returned claims at
   five, even when more selectors are supplied.
+- Toutiao heat uses the existing ingest counters: likes + 3 × comments +
+  2 × shares. Values 0, 1–2, 3–5, 6–9, 10–14 and 15+ earn 0, 8, 18, 28,
+  38 and 45 heat points. The shared recency rule applies: posts less than 24
+  hours old earn 5 points, and older posts earn 0. Keyword matching and the
+  existing minimum score still apply. The extension can already send all three
+  counters. Missing counters contribute zero.
+- Toutiao's default opportunity TTL is 14 days. Ingest and housekeeping use
+  the same configured TTL; the latter also applies it to eligible stale legacy
+  queued replies. Already expired opportunities retain their status. Existing
+  deployments with a stored value must set `toutiao: 14` in the existing
+  `engage_opportunity_ttl_days_by_platform` admin setting to adopt the trial
+  window. Preserve the other platform entries when updating the settings object.
 - **Global scan units** keyed `(platform, scanType, scanKey)` on `EngageScanCursor`
   (org-independent). keyword → normalised keyword; channel → subreddit; tracked → username.
   One fetch fans out to **every subscribing org** (cross-org dedup).

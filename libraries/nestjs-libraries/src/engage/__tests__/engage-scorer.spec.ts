@@ -376,6 +376,21 @@ describe('engage-scorer', () => {
       expect(heatOf(metricPost('instagram', { metricSaves: 300 }))).toBe(45);
     });
 
+    it.each([[0, 0], [1, 8], [2, 8], [3, 18], [5, 18], [6, 28],
+      [9, 28], [10, 38], [14, 38], [15, 45], [100, 45]])(
+      'Toutiao: %i likes yield %i heat points',
+      (metricLikes, expected) => {
+        expect(heatOf(metricPost('toutiao', { metricLikes }))).toBe(expected);
+      }
+    );
+
+    it('Toutiao weights comments and forwards and ignores community vote score', () => {
+      const post = metricPost('toutiao', {
+        metricLikes: 2, metricComments: 1, metricShares: 1, metricScore: 1000,
+      });
+      expect(heatOf(post)).toBe(28); // 2 + 3 + 2 = 7
+    });
+
     it('community branch (reddit): score*upvoteRatio+comments*2 → 500 in the >400 bucket (33)', () => {
       expect(
         heatOf(metricPost('reddit', { metricScore: 500, metricUpvoteRatio: 1 }))
@@ -426,13 +441,13 @@ describe('engage-scorer', () => {
     const recOf = (post: RawPost) =>
       scorePost(post, [makeKeyword('AI')])!.scoreRecency;
 
-    it('within 24h → 5', () => {
-      expect(recOf(makePost({ postPublishedAt: new Date() }))).toBe(5);
+    it.each(['x', 'toutiao'])('%s: within 24h → 5', (platform) => {
+      expect(recOf(makePost({ platform, postPublishedAt: new Date() }))).toBe(5);
     });
 
-    it('older than 24h → 0', () => {
+    it.each(['x', 'toutiao'])('%s: older than 24h → 0', (platform) => {
       const old = new Date(Date.now() - 25 * 3_600_000);
-      expect(recOf(makePost({ postPublishedAt: old }))).toBe(0);
+      expect(recOf(makePost({ platform, postPublishedAt: old }))).toBe(0);
     });
   });
 
