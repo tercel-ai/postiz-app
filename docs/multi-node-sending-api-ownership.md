@@ -827,3 +827,18 @@ ledger entry. The extension can resubmit a confirmed receipt through
 **Check status** after a callback failure. Manual links still use the existing
 published-reply metadata endpoint. A concurrent receipt replay preserves a link
 saved by another request.
+
+## Browser publication receipts
+
+An authenticated original browser can settle a single-segment Publish or
+Reply with a verified HTTPS permalink when the platform exposed no native
+ID. The outcome still requires either the opaque platform ID or that link.
+Native IDs and URLs are independent strings, each up to 2,048 characters.
+API attempts and multi-segment threads continue to require a native ID.
+The result URL becomes `releaseURL`; `releaseId` stays null for a URL-only
+receipt. An authenticated follow-up receipt for the same publication can
+add the missing field to both the saved Post and the segment without
+rewriting its original event or settling quota again. Outcome event
+deduplication, original ownership, and retry eligibility apply as before. Legacy URL-as-ID events remain readable and accepted. Deploy this
+backend before the extension that emits URL-only receipts. No migration is
+required.

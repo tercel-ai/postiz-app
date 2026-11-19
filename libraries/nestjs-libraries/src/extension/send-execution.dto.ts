@@ -24,7 +24,7 @@ export class SendOutcomeDto {
     | 'confirmed'
     | 'unknown'
     | 'definitely_not_submitted';
-  @IsOptional() @IsString() @MaxLength(256) platformId?: string;
+  @IsOptional() @IsString() @MaxLength(2048) platformId?: string;
   @IsOptional() @IsString() @MaxLength(2048) url?: string;
   @IsOptional() @IsBoolean() stopped?: boolean;
   @IsOptional() @IsString() @MaxLength(4096) evidence?: string;

@@ -21,6 +21,51 @@ async function uncertainPost(segmentCount = 1) {
 const retry = (f: Awaited<ReturnType<typeof uncertainPost>>, body=request()) =>
  f.service.retryUnconfirmedPost('org','user',f.execution.id,'root',body);
 
+describe('single browser publication receipts', () => {
+  it.each(['POST', 'REPLY'])('settles a %s with its verified link and no invented ID', async action => {
+    const f = await uncertainPost();
+    const execution = f.db.rows('sendExecution')[0];
+    execution.action = action;
+    const url = `https://www.quora.com/${'long-question-'.repeat(22)}answer/Alice`;
+    const event = { eventId: 'link-only', status: 'confirmed' as const, url };
+    const submit = (body: typeof event) => f.db.$transaction((tx: any) => f.service.outcomeIn(tx, execution, 0, body, new Date()));
+    const result = await submit(event);
+    await expect(submit(event)).resolves.toEqual(result);
+    expect(f.db.rows('sendSegment')[0]).toMatchObject({ status: 'CONFIRMED', result: event });
+    expect(f.db.rows('post')[0]).toMatchObject({ state: 'PUBLISHED', releaseId: null, releaseURL: url });
+    expect(f.db.rows('sendIntent')[0].status).toBe('SUCCEEDED');
+    expect(f.db.rows('sendQuotaBucket')[0].confirmedUnits).toBe(1);
+    await expect(submit({ ...event, eventId: 'other-link', url: url + '-different' })).resolves.toMatchObject({ conflict: true });
+  });
+
+  it.each([false, true])('enriches the same receipt without settling quota again (ID first: %s)', async idFirst => {
+    const f = await uncertainPost();
+    const execution = f.db.rows('sendExecution')[0];
+    const url = 'https://www.quora.com/Some-Post';
+    const platformId = 'native-123';
+    const first = { eventId: 'original-id', status: 'confirmed' as const, ...(idFirst ? { platformId } : { url }) };
+    const submit = (body: typeof first) =>
+      f.db.$transaction((tx: any) => f.service.outcomeIn(tx, execution, 0, body, new Date()));
+    await submit(first);
+    const originalDate = f.db.rows('post')[0].publishDate;
+    await submit({ eventId: 'enrichment', status: 'confirmed', platformId, url });
+    await submit(first);
+    expect(f.db.rows('post')[0]).toMatchObject({ state: 'PUBLISHED', releaseId: platformId, releaseURL: url, publishDate: originalDate });
+    expect(f.db.rows('sendSegment')[0].result).toMatchObject({ eventId: first.eventId, platformId, url });
+    expect(f.db.rows('sendQuotaBucket')[0].confirmedUnits).toBe(1);
+    expect(f.db.rows('sendOutcomeEvent').find(event => event.eventId === first.eventId)?.evidence).toEqual(first);
+  });
+
+  it('still requires a native ID for a thread segment', async () => {
+    const f = await uncertainPost(2);
+    const execution = f.db.rows('sendExecution')[0];
+    await expect(f.db.$transaction((tx: any) => f.service.outcomeIn(tx, execution, 0,
+      { eventId: 'thread-without-id', status: 'confirmed', url: 'https://x.com/alice/status/1' }, new Date())))
+      .rejects.toThrow('PLATFORM_RESULT_REQUIRED');
+    expect(f.db.rows('sendSegment')[0].status).toBe('UNKNOWN');
+  });
+});
+
 describe('owner-requested retry of an uncertain original post',()=>{
  it('requeues the original intent while preserving unknown evidence and all held quota',async()=>{
   const f=await uncertainPost(); const evidence=structuredClone(f.db.rows('sendSegment')[0].result);

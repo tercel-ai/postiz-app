@@ -2225,16 +2225,29 @@ export class SendCoordinatorService {
       if (prior.requestHash !== hash) reject('SEND_OUTCOME_EVENT_CONFLICT');
       return prior.result as { status: string; conflict?: boolean };
     }
-    if (outcome.status === 'confirmed' && !outcome.platformId?.trim())
-      throw new BadRequestException('PLATFORM_RESULT_REQUIRED');
-    const previousResult = segment.result as { platformId?: string } | null;
+    const previousResult = segment.result as { platformId?: string; url?: string } | null;
+    if (outcome.status === 'confirmed' && !outcome.platformId?.trim()) {
+      // A verified permalink identifies a single browser publication. Threads
+      // and API publishers still need the native ID to address later segments.
+      let url: URL | undefined;
+      try { url = new URL(outcome.url ?? ''); } catch { /* No usable platform result. */ }
+      if (outcome.platformId || execution.kind !== 'EXTENSION' || !Array.isArray(execution.payload) ||
+          execution.payload.length !== 1 || !url || url.protocol !== 'https:' ||
+          url.username || url.password)
+        throw new BadRequestException('PLATFORM_RESULT_REQUIRED');
+    }
+    const sameUrl = !!outcome.url && previousResult?.url === outcome.url;
+    const sameResource = (!!outcome.platformId && outcome.platformId === previousResult?.platformId) ||
+      (sameUrl && (!outcome.platformId || !previousResult?.platformId ||
+        outcome.platformId === outcome.url || previousResult.platformId === previousResult.url));
     if (outcome.removal !== undefined) {
       if (!['removed', 'gone'].includes(outcome.removal) || outcome.status !== 'confirmed' ||
-          segment.status !== 'CONFIRMED' || previousResult?.platformId !== outcome.platformId ||
-          !outcome.evidence?.trim())
+          segment.status !== 'CONFIRMED' || !sameResource || !outcome.evidence?.trim())
         reject('CONFIRMED_REMOVAL_EVIDENCE_REQUIRED');
       const published = await tx.post.findFirst({ where: {
-        organizationId: org, id: segment.postId, sendIntentId: intent.id, releaseId: outcome.platformId,
+        organizationId: org, id: segment.postId, sendIntentId: intent.id,
+        releaseId: previousResult?.platformId ?? null,
+        ...(previousResult?.platformId ? {} : { releaseURL: previousResult?.url }),
       } });
       if (!published) reject('CONFIRMED_REMOVAL_EVIDENCE_REQUIRED');
       // A removal appends a fact to a confirmed submission. It never settles quota again.
@@ -2264,7 +2277,7 @@ export class SendCoordinatorService {
     let conflict = superseded ||
       segment.status === 'CONFIRMED' &&
       outcome.status === 'confirmed' &&
-      previousResult?.platformId !== outcome.platformId;
+      !sameResource;
     if (unpermittedUnknown && (intent.activeExecutionId !== execution.id || intent.fencingVersion !== execution.fencingVersion ||
         (account.activeExecutionId && account.activeExecutionId !== execution.id) || !['RESERVED', 'SENDING', 'RECONCILING'].includes(execution.status))) conflict = true;
     if (segment.status === 'NOT_SUBMITTED' && outcome.status === 'confirmed' && !verifiedReply)
@@ -2331,10 +2344,10 @@ export class SendCoordinatorService {
           },
         });
         await tx.post.updateMany({
-          where: { id: segment.postId, organizationId: org, releaseId: null },
+          where: { id: segment.postId, organizationId: org, releaseId: null, releaseURL: null },
           data: {
             state: 'PUBLISHED',
-            releaseId: outcome.platformId,
+            releaseId: outcome.platformId ?? null,
             releaseURL: outcome.url ?? null,
             publishDate: now,
             error: null,
@@ -2397,7 +2410,7 @@ export class SendCoordinatorService {
           data: { activeExecutionId: null },
         });
         await tx.post.updateMany({
-          where: { organizationId: org, id: segment.postId, releaseId: null },
+          where: { organizationId: org, id: segment.postId, releaseId: null, releaseURL: null },
           data: { state: 'ERROR', error: 'SEND_DEFINITELY_NOT_SUBMITTED' },
         });
       } else if (outcome.status === 'unknown') {
@@ -2427,10 +2440,10 @@ export class SendCoordinatorService {
           },
         });
         await tx.post.updateMany({
-          where: { organizationId: org, id: segment.postId, releaseId: null },
+          where: { organizationId: org, id: segment.postId, releaseId: null, releaseURL: null },
           data: {
             state: 'PUBLISHED',
-            releaseId: outcome.platformId,
+            releaseId: outcome.platformId ?? null,
             releaseURL: outcome.url ?? null,
             publishDate: now,
             error: null,
@@ -2496,16 +2509,25 @@ export class SendCoordinatorService {
         });
       }
     }
-    if (
-      !conflict &&
-      segment.status === 'CONFIRMED' &&
-      outcome.status === 'confirmed' &&
-      outcome.url
-    ) {
-      await tx.post.updateMany({
-        where: { organizationId: org, id: segment.postId, releaseId: outcome.platformId, releaseURL: null },
-        data: { releaseURL: outcome.url },
-      });
+    if (!conflict && segment.status === 'CONFIRMED' && outcome.status === 'confirmed' && previousResult) {
+      // Enrich the same publication in both projections, preserving the
+      // original event and leaving quota, ownership and publication time alone.
+      const addedId = previousResult.platformId ? undefined : outcome.platformId;
+      const addedUrl = previousResult.url ? undefined : outcome.url;
+      if (addedId || addedUrl) {
+        const updated = await tx.post.updateMany({
+          where: { organizationId: org, id: segment.postId, sendIntentId: intent.id, state: 'PUBLISHED',
+            releaseId: previousResult.platformId ?? null, releaseURL: previousResult.url ?? null },
+          data: { ...(addedId ? { releaseId: addedId } : {}), ...(addedUrl ? { releaseURL: addedUrl } : {}) },
+        });
+        if (updated.count === 1) {
+          await tx.sendSegment.update({
+            where: { id: segment.id },
+            data: { result: sendJson({ ...previousResult,
+              ...(addedId ? { platformId: addedId } : {}), ...(addedUrl ? { url: addedUrl } : {}) }) },
+          });
+        }
+      }
     }
     const result = {
       status: conflict
@@ -2639,7 +2661,7 @@ export class SendCoordinatorService {
             url.search || url.hash || !match || match[1] !== target.id ||
             storyId(settings.replyUrl) === match[2].toLowerCase())
           throw new BadRequestException('INVALID_MEDIUM_REPLY_RECEIPT');
-        platformId = body.url;
+        platformId = match[2].toLowerCase();
       } else if (!body.reviewedNotSent || !body.stopped) {
         reject('REPLY_ABSENCE_REVIEW_REQUIRED');
       }
@@ -2655,7 +2677,9 @@ export class SendCoordinatorService {
         executionId, segmentIndex: 0, eventId: event.eventId,
       } } });
       if (prior) {
-        if (prior.requestHash !== sendHash(event)) reject('SEND_OUTCOME_EVENT_CONFLICT');
+        const legacyHash = platformId ? sendHash({ ...event, platformId: body.url }) : undefined;
+        if (prior.requestHash !== sendHash(event) && prior.requestHash !== legacyHash)
+          reject('SEND_OUTCOME_EVENT_CONFLICT');
         if (body.status === 'definitely_not_submitted' &&
             (intent.status !== 'FAILED_FINAL' || intent.activeExecutionId || intent.hasConfirmedSegments))
           reject('SEND_RETRY_UNSAFE');
