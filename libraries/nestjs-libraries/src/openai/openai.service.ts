@@ -723,7 +723,7 @@ export class OpenaiService {
   async shrinkToLimit(
     content: string,
     maxChars: number,
-    opts?: { model?: string; timeoutMs?: number; maxRetries?: number }
+    opts?: { model?: string; timeoutMs?: number; maxRetries?: number; language?: string }
   ): Promise<{ post: string; usage: AiUsageInfo }> {
     const { client, model: defaultModel, servicer, provider } = this.getTextClient();
     const model = opts?.model || defaultModel;
@@ -736,7 +736,8 @@ export class OpenaiService {
             content:
               `You shorten a single social media post to AT MOST ${maxChars} characters. ` +
               `Preserve the meaning, key facts and any call-to-action; keep it natural and ` +
-              `publish-ready. Return ONLY the shortened post text — no quotes, no commentary.`,
+              `publish-ready. Return ONLY the shortened post text — no quotes, no commentary.` +
+              (opts?.language ? ` Write the post in ${opts.language}.` : ''),
           },
           { role: 'user', content },
         ],

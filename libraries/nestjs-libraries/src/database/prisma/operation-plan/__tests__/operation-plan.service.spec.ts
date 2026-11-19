@@ -1387,6 +1387,11 @@ describe('OperationPlanService.create', () => {
         240, // soft target for x
         expect.objectContaining({ model: 'anthropic/claude-haiku-4.5' })
       );
+      expect(openaiService.shrinkToLimit).not.toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Number),
+        expect.objectContaining({ language: expect.any(String) })
+      );
       expect(result.contentItems[0].platforms[0].content).toBe(rewrite);
     } finally {
       vi.unstubAllEnvs();
@@ -2421,7 +2426,10 @@ describe('OperationPlanService.create', () => {
 
     // Two calls: the main generation, then the targeted backfill for reddit.
     expect(openaiService.generateStructuredText).toHaveBeenCalledTimes(2);
-    const [, backfillUserPrompt] = openaiService.generateStructuredText.mock.calls[1];
+    const [mainPrompt] = openaiService.generateStructuredText.mock.calls[0];
+    const [backfillPrompt, backfillUserPrompt] = openaiService.generateStructuredText.mock.calls[1];
+    expect(mainPrompt).not.toContain('Simplified Chinese');
+    expect(backfillPrompt).not.toContain('Simplified Chinese');
     expect(JSON.parse(backfillUserPrompt).platforms).toEqual(['reddit']);
 
     // Coverage completed — the plan bills and materializes normally, with
@@ -2441,6 +2449,70 @@ describe('OperationPlanService.create', () => {
       }),
       expect.any(Number)
     );
+  });
+
+  it('asks for Simplified Chinese only for Toutiao bodies in generation, backfill, and shortening', async () => {
+    vi.stubEnv('OPERATION_SHRINK_MODEL', 'test-shrink-model');
+    try {
+      const xContent = 'An English post about the project.';
+      const toutiaoContent = '用简体中文介绍项目。'.repeat(201);
+      const shortened = '用简体中文简要介绍项目。';
+      const item = {
+        contentId: 'x-item',
+        utcDate: '2030-01-01T10:00:00.000Z',
+        themeKey: 'w1:foundations',
+        themeTitle: 'Introducing the project',
+        platforms: [
+          { id: '11111111-1111-4111-8111-111111111111', platform: 'x', content: xContent },
+        ],
+      };
+      const { service, openaiService } = createGenerationDependencies({
+        contentItems: [item],
+        engagePolicies: [],
+        warnings: [],
+      });
+      openaiService.generateStructuredText
+        .mockImplementationOnce(openaiService.generateStructuredText.getMockImplementation()!)
+        .mockResolvedValueOnce({
+          data: {
+            contentItems: [{
+              ...item,
+              contentId: 'toutiao-item',
+              platforms: [
+                { id: '22222222-2222-4222-8222-222222222222', platform: 'toutiao', content: toutiaoContent },
+              ],
+            }],
+          },
+          usage: { usage: { total_tokens: 40 } },
+        });
+      openaiService.shrinkToLimit.mockResolvedValue({
+        post: shortened,
+        usage: { usage: { total_tokens: 8 } },
+      });
+
+      const result = await service.create('org-1', 'proj-1', {
+        taskId: 'task-1',
+        startAt: '2030-01-01T00:00:00.000Z',
+        endAt: '2030-01-02T00:00:00.000Z',
+        platforms: ['x', 'toutiao'],
+      }, { dryRun: true });
+
+      expect(openaiService.generateStructuredText).toHaveBeenCalledTimes(2);
+      for (const [prompt] of openaiService.generateStructuredText.mock.calls) {
+        expect(prompt).toContain('with `platform: "toutiao"` only, write `content` in natural Simplified Chinese');
+      }
+      expect(openaiService.shrinkToLimit).toHaveBeenCalledTimes(1);
+      expect(openaiService.shrinkToLimit).toHaveBeenCalledWith(
+        toutiaoContent,
+        2000,
+        expect.objectContaining({ language: 'Simplified Chinese (简体中文)' })
+      );
+      expect(result.contentItems[0].themeTitle).toBe(item.themeTitle);
+      expect(result.contentItems[0].platforms[0].content).toBe(xContent);
+      expect(result.contentItems[1].platforms[0].content).toBe(shortened);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('still fails the plan when the coverage backfill call itself errors', async () => {

@@ -468,6 +468,8 @@ Seeded on backend boot (`OperationPlanService.onApplicationBootstrap`, insert-if
 
 ### Platform generation rules
 
+For `toutiao`, the generator is instructed to write the micro-post body (`contentItems[].platforms[].content`) in Simplified Chinese, including during platform backfill and model-based shortening. Brand names and technical terms can keep their conventional spelling. The instruction applies only to Toutiao bodies in newly generated plans.
+
 `operation_plan.platform_cadence` controls the publishing guidance supplied to the LLM as `platformPlaybook`. It is **editorial guidance, not a fixed weekly quota**. The generator is instructed to derive counts from the actual UTC dates, treat weeks as ISO calendar weeks (Monday–Sunday, including partial first/last weeks), and favor weekdays over weekends. The backend does **not** calculate a deterministic weekly count, prorate partial weeks with a fixed formula, or reject an otherwise valid plan for missing the suggested frequency.
 
 The built-in defaults in `OperationPlanService` are:

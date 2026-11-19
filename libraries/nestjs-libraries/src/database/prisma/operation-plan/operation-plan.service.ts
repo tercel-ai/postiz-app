@@ -54,6 +54,10 @@ export { OPERATION_PLAN_PLATFORM_CADENCE_KEY } from './platform-cadence';
 
 dayjs.extend(utc);
 
+const TOUTIAO_CONTENT_LANGUAGE = 'Simplified Chinese (简体中文)';
+const TOUTIAO_CONTENT_LANGUAGE_RULE =
+  `- For platform entries with \`platform: "toutiao"\` only, write \`content\` in natural ${TOUTIAO_CONTENT_LANGUAGE}, even if the source material is in another language. Keep brand names and technical terms in their conventional form when appropriate. Apply this rule only to the Toutiao body, leaving shared theme titles and other platforms' language choices independent.`;
+
 // planPayload.engagePolicies[].keywordTargets shape (project-scoped-post-
 // engage-design.md §3.4: "Record<keywordId, number>", per-platform daily
 // target; an empty object means no per-keyword breakdown to report here).
@@ -890,6 +894,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         '',
         'CONTENT RULES',
         '- Each content item: a stable machine themeKey plus a human-readable themeTitle. Each platform entry: a UUID id (used as the materialized Post.id), the platform, and concise publish-ready content. themeTitle materializes VERBATIM into Post.title (so keep it clean and publish-ready — no week/phase prefix); themeKey is kept as Post.settings.themeKey.',
+        ...(platforms.includes('toutiao') ? [TOUTIAO_CONTENT_LANGUAGE_RULE] : []),
         '',
         '- CROSS-PLATFORM SHARING: a single `contentItem` SHOULD carry multiple platforms when the theme applies to all of them. For example, a data-story theme can have `platforms: [{platform:"x", ...}, {platform:"linkedin", ...}, {platform:"medium", ...}]` — one item, three platforms, each with content adapted to that platform\'s audience and format. This is MORE efficient than creating separate items per platform (fewer contentItems = lower token cost, better coherence). Prefer consolidating related platforms under one contentItem rather than splitting them. Every contentItem MUST still have at least one platform entry; a theme that only fits one platform stays single-platform. The platformPlaybook cadence drives how many contentItems each platform appears in — match those frequencies, not just the total post count.',
         '- TITLE vs BODY: on reddit, hackernews, medium and devto the themeTitle is submitted SEPARATELY as the post/story title, so `content` is the BODY ONLY. NEVER open `content` with the title (or a heading/bold restatement of it) — the platform would display the title twice. Start directly with the body text.',
@@ -1603,6 +1608,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
           model: shrinkModel,
           timeoutMs: OPERATION_PLAN_GEN_TIMEOUT_MS,
           maxRetries: OPERATION_PLAN_GEN_MAX_RETRIES,
+          ...(platform === 'toutiao' ? { language: TOUTIAO_CONTENT_LANGUAGE } : {}),
         });
         content = shrunk.post;
         // Bill the shrink tokens even if the result still needs a mechanical
@@ -1694,6 +1700,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
           '',
           '- Generate EXACTLY ONE contentItem per listed missing platform (distinct themeKey/themeTitle per item, dated anywhere inside the given range).',
           '- Each contentItem carries exactly ONE `platforms` entry, for the missing platform it corresponds to. Set `thread` to null on every entry — no multi-part threads here.',
+          ...(missingPlatforms.includes('toutiao') ? [TOUTIAO_CONTENT_LANGUAGE_RULE] : []),
           `- ${CROSS_PLATFORM_ADAPT_INSTRUCTION}`,
           `- ${buildPlatformNativeFormatLine()}`,
           '- TITLE vs BODY: on reddit, hackernews, medium and devto the themeTitle is submitted SEPARATELY as the post/story title, so `content` is the BODY ONLY — never open it with the title.',
