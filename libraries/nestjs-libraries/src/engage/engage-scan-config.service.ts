@@ -562,15 +562,29 @@ export class EngageScanConfigService implements OnModuleInit {
     const stored = await this._settings.get<Partial<ScanFreshnessHours>>(
       ENGAGE_SCAN_FRESHNESS_KEY
     );
-    // Per-platform window override env var. New platforms get their own name so
-    // they never silently inherit Reddit's override; an unset var just falls
-    // through to DEFAULT_SCAN_FRESHNESS_HOURS[platform] below.
+    return this.resolveFreshnessHours(platform, stored) * 3_600_000;
+  }
+
+  /** Effective hours for all supported platforms from one settings read. */
+  async getFreshnessHoursMap(): Promise<Record<string, number>> {
+    const stored = await this._settings.get<Partial<ScanFreshnessHours>>(
+      ENGAGE_SCAN_FRESHNESS_KEY
+    );
+    return Object.fromEntries(
+      SCANNABLE_PLATFORMS.map((platform) => [
+        platform,
+        this.resolveFreshnessHours(platform, stored),
+      ])
+    );
+  }
+
+  private resolveFreshnessHours(
+    platform: ScanPlatform,
+    stored: Partial<ScanFreshnessHours> | null
+  ): number {
     const envName = `ENGAGE_${platform.toUpperCase()}_SCAN_WINDOW_HOURS`;
-    const envH = Number(process.env[envName]);
-    const fallback =
-      Number.isFinite(envH) && envH > 0 ? envH : DEFAULT_SCAN_FRESHNESS_HOURS[platform];
-    const hours = num(stored?.[platform], fallback);
-    return hours * 3_600_000;
+    const fallback = num(process.env[envName], DEFAULT_SCAN_FRESHNESS_HOURS[platform]);
+    return num(stored?.[platform], fallback);
   }
 
   /**
@@ -658,6 +672,21 @@ export class EngageScanConfigService implements OnModuleInit {
   ): Promise<{ value: number; source: SettingSource }> {
     const [storedMap, legacy] = await this._readTtlSettings();
     return resolveOpportunityTtlFor(platform, storedMap, legacy);
+  }
+
+  /** Preserve per-platform values inherited from the legacy setting on the first save. */
+  async preserveLegacyOpportunityTtlOnCreate(value: unknown): Promise<unknown> {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+
+    const [storedMap, legacy] = await this._readTtlSettings();
+    if (storedMap != null || !(Number(legacy) > 0)) return value;
+
+    const inherited: Partial<OpportunityTtlDays> = {};
+    for (const platform of SCANNABLE_PLATFORMS) {
+      const resolved = resolveOpportunityTtlFor(platform, storedMap, legacy);
+      if (resolved.source === 'db') inherited[platform] = resolved.value;
+    }
+    return { ...inherited, ...value };
   }
 
   /** Effective TTL (days) for one platform. */

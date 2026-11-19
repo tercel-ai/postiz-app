@@ -10,6 +10,18 @@ import {
   PlatformCadence,
 } from '@gitroom/nestjs-libraries/database/prisma/operation-plan/platform-cadence';
 
+import {
+  ENGAGE_SCAN_FRESHNESS_KEY,
+  ENGAGE_OPPORTUNITY_TTL_DAYS_BY_PLATFORM_KEY,
+  ENGAGE_OPPORTUNITY_TTL_DAYS_KEY,
+  EngageScanConfigService,
+  SCANNABLE_PLATFORMS,
+} from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import {
+  ENGAGE_REPLY_DAILY_CEILING_KEY,
+  PLATFORM_REPLY_RISK_CEILING,
+} from '@gitroom/nestjs-libraries/engage/engage-reply-schedule';
+
 const CADENCE_KEY = 'operation_plan.platform_cadence';
 
 async function getCadence(controller: AdminSettingsController) {
@@ -32,6 +44,70 @@ function makeController(value: unknown) {
   );
   return { controller, settingsService, integrationManager };
 }
+
+describe('Engage admin platform settings', () => {
+  it('keeps inherited TTLs on the first platform save and leaves existing maps replaceable', async () => {
+    const key = ENGAGE_OPPORTUNITY_TTL_DAYS_BY_PLATFORM_KEY;
+    const values = new Map<string, unknown>([[ENGAGE_OPPORTUNITY_TTL_DAYS_KEY, 45]]);
+    const settingsService = {
+      get: vi.fn(async (name: string) => values.get(name) ?? null),
+      set: vi.fn(async (name: string, value: unknown) => { values.set(name, value); }),
+    };
+    const service = new SettingsService({ ...settingsService, getValue: settingsService.get } as any);
+    const config = new EngageScanConfigService(service);
+    const controller = new AdminSettingsController(
+      service, {} as any, config, {} as any, new IntegrationManager()
+    );
+
+    vi.stubEnv('ENGAGE_X_OPPORTUNITY_TTL_DAYS', undefined);
+    vi.stubEnv('ENGAGE_REDDIT_OPPORTUNITY_TTL_DAYS', '9');
+    try {
+      await controller.upsertSetting(key, { value: { toutiao: 14 } });
+      expect(await config.getOpportunityTtlDays('toutiao')).toBe(14);
+      expect(await config.getOpportunityTtlDays('x')).toBe(45);
+      expect(await config.getOpportunityTtlDays('reddit')).toBe(9);
+      expect(values.get(key)).not.toHaveProperty('reddit');
+
+      await controller.upsertSetting(key, { value: { toutiao: 15 } });
+      expect(values.get(key)).toEqual({ toutiao: 15 });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('returns effective values for supported platforms outside the active scan allowlist', async () => {
+    const settings = new Map<string, unknown>([
+      ['operation_plan.allowed_platforms', ['x']],
+      [ENGAGE_SCAN_FRESHNESS_KEY, { toutiao: 48 }],
+      [ENGAGE_OPPORTUNITY_TTL_DAYS_BY_PLATFORM_KEY, { toutiao: 16 }],
+      [ENGAGE_REPLY_DAILY_CEILING_KEY, { toutiao: 8, unknown: 3 }],
+    ]);
+    const settingsService = {
+      get: vi.fn(async (key: string) => settings.get(key) ?? null),
+      listByPrefix: vi.fn(async () => []),
+    } as unknown as SettingsService;
+    const controller = new AdminSettingsController(
+      settingsService,
+      {} as any,
+      new EngageScanConfigService(settingsService),
+      {} as any,
+      new IntegrationManager()
+    );
+
+    const response = await controller.getEngageInitialScanBudget();
+    expect(Object.keys(response.platforms)).toEqual(['x']);
+    expect(Object.keys(response.platformSettings.scanFreshnessHours)).toEqual(SCANNABLE_PLATFORMS);
+    expect(Object.keys(response.platformSettings.opportunityTtlDays)).toEqual(SCANNABLE_PLATFORMS);
+    expect(Object.keys(response.platformSettings.replyDailyCeilings))
+      .toEqual(Object.keys(PLATFORM_REPLY_RISK_CEILING));
+    expect(response.platformSettings).toMatchObject({
+      scanFreshnessHours: { toutiao: 48 },
+      opportunityTtlDays: { toutiao: 16 },
+      replyDailyCeilings: { toutiao: 8 },
+    });
+    expect(response.pacing.extension.toutiao.initial.pageSize).toBe(10);
+  });
+});
 
 describe('User provider allowlist', () => {
   it('reads legacy only until a global override is saved, including an empty override', async () => {

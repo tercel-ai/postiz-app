@@ -98,6 +98,17 @@ nextTasks empty           → nothing due; extension idles
   deployments with a stored value must set `toutiao: 14` in the existing
   `engage_opportunity_ttl_days_by_platform` admin setting to adopt the trial
   window. Preserve the other platform entries when updating the settings object.
+- The admin Engage configuration page reads effective per-platform freshness,
+  opportunity TTL, and reply ceilings from `platformSettings` on
+  `GET /admin/settings/engage-initial-scan-budget`. These maps cover the
+  platforms that support each setting, including platforms outside the active
+  scan allowlist. Existing pacing and budget fields retain their meanings.
+  Saving still uses the existing per-key settings endpoint with stored overrides.
+  The first per-platform TTL save carries forward any values inherited from the
+  legacy global TTL. Existing platform maps retain the normal replace behavior.
+  The Toutiao scanner applies the task's `pageSize` as a per-page limit on the
+  ranked search results it opens for detail. The platform controls how many
+  cards the search page itself renders.
 - **Global scan units** keyed `(platform, scanType, scanKey)` on `EngageScanCursor`
   (org-independent). keyword → normalised keyword; channel → subreddit; tracked → username.
   One fetch fans out to **every subscribing org** (cross-org dedup).

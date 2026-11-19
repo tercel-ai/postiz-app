@@ -13,7 +13,15 @@ import {
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
-import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import {
+  ENGAGE_OPPORTUNITY_TTL_DAYS_BY_PLATFORM_KEY,
+  EngageScanConfigService,
+} from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import {
+  ENGAGE_REPLY_DAILY_CEILING_KEY,
+  PLATFORM_REPLY_RISK_CEILING,
+  resolveReplyDailyCeilings,
+} from '@gitroom/nestjs-libraries/engage/engage-reply-schedule';
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import { AiPricingService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/ai-pricing.service';
 import { UpdateAiPricingDto } from '@gitroom/nestjs-libraries/dtos/admin/ai-pricing.dto';
@@ -170,8 +178,26 @@ export class AdminSettingsController {
       };
     }
 
+    const [scanFreshnessHours, opportunityTtlDays, storedReplyDailyCeilings] =
+      await Promise.all([
+        this._engageScanConfigService.getFreshnessHoursMap(),
+        this._engageScanConfigService.getOpportunityTtlDaysMap(),
+        this._settingsService.get(ENGAGE_REPLY_DAILY_CEILING_KEY),
+      ]);
+    const ceilings = resolveReplyDailyCeilings(storedReplyDailyCeilings);
+
     return {
       platforms: result,
+      platformSettings: {
+        scanFreshnessHours,
+        opportunityTtlDays,
+        replyDailyCeilings: Object.fromEntries(
+          Object.keys(PLATFORM_REPLY_RISK_CEILING).map((platform) => [
+            platform,
+            ceilings[platform],
+          ])
+        ),
+      },
       shared: {
         lookbackHours: resolveShared(`${PREFIX}lookback_hours`, 'ENGAGE_KEYWORD_INITIAL_SCAN_LOOKBACK_HOURS', 24),
         maxAttempts:   resolveShared(`${PREFIX}max_attempts`,   'ENGAGE_KEYWORD_INITIAL_SCAN_MAX_ATTEMPTS',   3),
@@ -299,7 +325,10 @@ export class AdminSettingsController {
       await this._settingsService.set(key, [...new Set<string>(ids)], { type: 'json', description: body.description });
       return { key, upserted: true };
     }
-    await this._settingsService.set(key, body.value, {
+    const value = key === ENGAGE_OPPORTUNITY_TTL_DAYS_BY_PLATFORM_KEY
+      ? await this._engageScanConfigService.preserveLegacyOpportunityTtlOnCreate(body.value)
+      : body.value;
+    await this._settingsService.set(key, value, {
       type: body.type,
       description: body.description,
     });
