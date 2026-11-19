@@ -18,6 +18,7 @@ import {
   opportunityMediaUrls,
   opportunityContentType,
 } from '../engage.repository';
+import { SCANNABLE_PLATFORMS } from '../engage-scan-config.service';
 
 dayjs.extend(isoWeek);
 dayjs.extend(utc);
@@ -256,52 +257,47 @@ describe('EngageRepository — two-table reads', () => {
       ]);
     });
 
-    it('computes total/byStatus/byPlatform under the same platform-less where', async () => {
+    it('includes Toutiao in the platform breakdown under the same project and author filters', async () => {
       const { repo, stateCount, stateGroupBy } = buildRepo();
       stateGroupBy.mockResolvedValue([
-        { status: 'NEW', _count: { _all: 2 } },
-        { status: 'REPLIED', _count: { _all: 1 } },
+        { status: 'NEW', _count: { _all: 1 } },
+        { status: 'SCHEDULED', _count: { _all: 1 } },
+        { status: 'AUTO_QUEUED', _count: { _all: 1 } },
       ]);
-      stateCount
-        .mockResolvedValueOnce(10) // total
-        .mockResolvedValue(1); // each per-platform count
-
-      const res = await repo.getOpportunityCountsSummary('org1', {
-        channels: ['c1'],
+      stateCount.mockImplementation(async ({ where }) => {
+        const platform = where.opportunity.platform;
+        return platform === undefined || platform === 'toutiao' ? 3 : 0;
       });
 
-      // total + one count per broken-out platform
-      expect(stateCount).toHaveBeenCalledTimes(8);
-      // The total/byStatus where carries the scoping filters but NO platform —
-      // platform is the breakdown axis, not a filter, on this contract.
+      const result = await repo.getOpportunityCountsSummary('org1', {
+        projectId: 'proj-1',
+        authors: ['creator'],
+      });
+
+      expect(stateCount).toHaveBeenCalledTimes(1 + SCANNABLE_PLATFORMS.length);
       const totalWhere = stateCount.mock.calls[0][0].where;
-      expect(totalWhere.opportunity.AND).toEqual([
-        { OR: [{ channelId: { equals: 'c1', mode: 'insensitive' } }] },
-      ]);
+      expect(totalWhere).toMatchObject({
+        organizationId: 'org1',
+        projectId: 'proj-1',
+        opportunity: {
+          AND: [{ OR: [{ authorUsername: { equals: 'creator', mode: 'insensitive' } }] }],
+        },
+      });
       expect(totalWhere.opportunity).not.toHaveProperty('platform');
       expect(totalWhere).not.toHaveProperty('status');
       expect(stateGroupBy.mock.calls[0][0].where).toEqual(totalWhere);
-      // Each platform count keeps the scoping filters and pins one platform.
-      expect(stateCount.mock.calls[1][0].where.opportunity).toMatchObject({
-        AND: [{ OR: [{ channelId: { equals: 'c1', mode: 'insensitive' } }] }],
-        platform: 'x',
-      });
+      for (const [index, platform] of SCANNABLE_PLATFORMS.entries()) {
+        expect(stateCount.mock.calls[index + 1][0].where).toEqual({
+          ...totalWhere,
+          opportunity: { ...totalWhere.opportunity, platform },
+        });
+      }
 
-      expect(res.total).toBe(10);
-      expect(res.byStatus.NEW).toBe(2);
-      expect(res.byStatus.REPLIED).toBe(1);
-      expect(res.byStatus.DISMISSED).toBe(0); // zero-filled
-      expect(Object.keys(res.byPlatform).sort()).toEqual(
-        [
-          'x',
-          'reddit',
-          'linkedin',
-          'medium',
-          'devto',
-          'hackernews',
-          'quora',
-        ].sort()
-      );
+      expect(result.total).toBe(3);
+      expect(result.byStatus).toMatchObject({ NEW: 1, SCHEDULED: 1, AUTO_QUEUED: 1, REPLIED: 0, EXPIRED: 0 });
+      expect(Object.keys(result.byPlatform)).toEqual(SCANNABLE_PLATFORMS);
+      expect(result.byPlatform.toutiao).toBe(3);
+      expect(result.byPlatform.x).toBe(0);
     });
   });
 
@@ -1673,20 +1669,15 @@ describe('EngageRepository — two-table reads', () => {
   describe('getDashboardSummary (panel ①)', () => {
     it('computes response rate, X-only impressions/traffic, all-time platform split, and best reply', async () => {
       const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
-      // Promise.all order: total, replied, sentReplies, then one count per
-      // OPPORTUNITY_COUNT_PLATFORMS entry (x, reddit, linkedin, medium, devto,
-      // hackernews, quora).
+      // The first three counts are totals, followed by the platform breakdown.
       sentCount
         .mockResolvedValueOnce(10)
         .mockResolvedValueOnce(4)
         .mockResolvedValueOnce(6)
-        .mockResolvedValueOnce(4) // x
-        .mockResolvedValueOnce(2) // reddit
-        .mockResolvedValueOnce(0) // linkedin
-        .mockResolvedValueOnce(0) // medium
-        .mockResolvedValueOnce(0) // devto
-        .mockResolvedValueOnce(0) // hackernews
-        .mockResolvedValueOnce(0); // quora
+        .mockImplementation(async ({ where }) => {
+          const platform = where.opportunity.platform;
+          return platform === 'x' ? 3 : platform === 'reddit' ? 2 : platform === 'toutiao' ? 1 : 0;
+        });
       postAggregate.mockResolvedValue({
         _sum: { impressions: 1200, trafficScore: 87.6 },
       });
@@ -1732,13 +1723,14 @@ describe('EngageRepository — two-table reads', () => {
       expect(stats.totalTrafficScore).toBe(88);
       expect(stats.totalLikes).toBe(17);
       expect(stats.platformSplit).toEqual({
-        x: 4,
+        x: 3,
         reddit: 2,
         linkedin: 0,
         medium: 0,
         devto: 0,
         hackernews: 0,
         quora: 0,
+        toutiao: 1,
       });
       // repliesCount / platformSplit are ALL-TIME, PUBLISHED-only (no week window).
       expect(sentCount.mock.calls[2][0].where.post.is).toEqual({
@@ -1768,11 +1760,7 @@ describe('EngageRepository — two-table reads', () => {
         .mockResolvedValueOnce(2)
         .mockResolvedValueOnce(6) // x
         .mockResolvedValueOnce(2) // reddit
-        .mockResolvedValueOnce(0) // linkedin
-        .mockResolvedValueOnce(0) // medium
-        .mockResolvedValueOnce(0) // devto
-        .mockResolvedValueOnce(0) // hackernews
-        .mockResolvedValueOnce(0); // quora
+        .mockResolvedValue(0); // remaining platforms
       postAggregate
         .mockResolvedValueOnce({
           _sum: { impressions: 900, trafficScore: 234.2 },
@@ -1783,11 +1771,7 @@ describe('EngageRepository — two-table reads', () => {
         .mockResolvedValueOnce({
           _sum: { impressions: 700, trafficScore: 50 },
         }) // reddit
-        .mockResolvedValueOnce({ _sum: { impressions: 0, trafficScore: 0 } }) // linkedin
-        .mockResolvedValueOnce({ _sum: { impressions: 0, trafficScore: 0 } }) // medium
-        .mockResolvedValueOnce({ _sum: { impressions: 0, trafficScore: 0 } }) // devto
-        .mockResolvedValueOnce({ _sum: { impressions: 0, trafficScore: 0 } }) // hackernews
-        .mockResolvedValueOnce({ _sum: { impressions: 0, trafficScore: 0 } }); // quora
+        .mockResolvedValue({ _sum: { impressions: 0, trafficScore: 0 } });
       sentFindMany
         .mockResolvedValueOnce([
           {
@@ -2451,15 +2435,12 @@ describe('EngageRepository — two-table reads', () => {
   describe('countSentReplies / getSentCountsSummary', () => {
     it('returns total + byPlatform + rollups + awaitingBreakdown in one round trip', async () => {
       const { repo, sentCount } = buildRepo();
+      const platformCounts: Record<string, number> = { x: 209, reddit: 130, toutiao: 1 };
+      sentCount.mockResolvedValueOnce(340); // total
+      for (const platform of SCANNABLE_PLATFORMS) {
+        sentCount.mockResolvedValueOnce(platformCounts[platform] ?? 0);
+      }
       sentCount
-        .mockResolvedValueOnce(340) // total
-        .mockResolvedValueOnce(210) // x
-        .mockResolvedValueOnce(130) // reddit
-        .mockResolvedValueOnce(0) // linkedin
-        .mockResolvedValueOnce(0) // medium
-        .mockResolvedValueOnce(0) // devto
-        .mockResolvedValueOnce(0) // hackernews
-        .mockResolvedValueOnce(0) // quora
         .mockResolvedValueOnce(280) // settled
         .mockResolvedValueOnce(60) // awaiting
         .mockResolvedValueOnce(25) // awaiting-draft
@@ -2471,22 +2452,24 @@ describe('EngageRepository — two-table reads', () => {
       expect(res).toEqual({
         total: 340,
         byPlatform: {
-          x: 210,
+          x: 209,
           reddit: 130,
           linkedin: 0,
           medium: 0,
           devto: 0,
           hackernews: 0,
           quora: 0,
+          toutiao: 1,
         },
         rollups: { settled: 280, awaiting: 60 },
         awaitingBreakdown: { drafts: 25, link: 30, expired: 5 },
       });
-      expect(sentCount).toHaveBeenCalledTimes(13);
+      expect(sentCount).toHaveBeenCalledTimes(6 + SCANNABLE_PLATFORMS.length);
 
       // The three sub-counts key off the same status filters as getSentStats'
       // awaiting-draft/-link/-expired branches.
-      const draftWhere = sentCount.mock.calls[10][0].where;
+      const [draftWhere, linkWhere, expiredWhere] = sentCount.mock.calls
+        .slice(-3).map(([query]) => query.where);
       expect(draftWhere.post).toMatchObject({
         source: 'engage',
         state: 'DRAFT',
@@ -2501,14 +2484,12 @@ describe('EngageRepository — two-table reads', () => {
         },
       });
 
-      const linkWhere = sentCount.mock.calls[11][0].where;
       expect(linkWhere.post).toMatchObject({
         source: 'engage',
         state: 'PUBLISHED',
         releaseURL: null,
       });
 
-      const expiredWhere = sentCount.mock.calls[12][0].where;
       expect(expiredWhere.post).toMatchObject({
         source: 'engage',
         state: 'DRAFT',
@@ -2538,7 +2519,7 @@ describe('EngageRepository — two-table reads', () => {
       expect(redditWhere.opportunity).toMatchObject({ platform: 'reddit' });
       expect(redditWhere.post.OR).toBeDefined();
       // rollups drop status (settled pins its own) but keep platform=x.
-      const settledWhere = sentCount.mock.calls[8][0].where;
+      const settledWhere = sentCount.mock.calls[1 + SCANNABLE_PLATFORMS.length][0].where;
       expect(settledWhere.opportunity).toMatchObject({ platform: 'x' });
       expect(settledWhere.post.OR).toEqual([
         { state: 'PUBLISHED', releaseURL: { not: null } },
@@ -2570,7 +2551,7 @@ describe('EngageRepository — two-table reads', () => {
         projectId: 'proj-1',
       });
 
-      expect(sentCount).toHaveBeenCalledTimes(13);
+      expect(sentCount).toHaveBeenCalledTimes(6 + SCANNABLE_PLATFORMS.length);
       // total where: no status → not-DRAFT branch is skipped (includeDrafts) and
       // no platform filter on the linked opportunity.
       const totalWhere = sentCount.mock.calls[0][0].where;

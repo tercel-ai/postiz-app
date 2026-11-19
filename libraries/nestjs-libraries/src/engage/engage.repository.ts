@@ -129,20 +129,6 @@ const LIST_DEFAULT_MIN_SCORE = Number(
   process.env.ENGAGE_LIST_DEFAULT_MIN_SCORE ?? 60
 );
 
-// Platforms broken out by the opportunity-count endpoints' `byPlatform`
-// rollup. `platform` lives on the joined EngageOpportunity, which Prisma's
-// groupBy can't traverse — one scoped count per platform stands in for a
-// group-by (same pattern as getSentStats/getSentCounts).
-const OPPORTUNITY_COUNT_PLATFORMS = [
-  'x',
-  'reddit',
-  'linkedin',
-  'medium',
-  'devto',
-  'hackernews',
-  'quora',
-] as const;
-
 // Only NEW/AUTO_QUEUED opportunities can be replied to. Every other status is a
 // terminal/non-actionable state — map each to a precise, human-readable reason
 // (code + message) so the reply gate can tell the user *why* generation is
@@ -3127,7 +3113,7 @@ export class EngageRepository {
         _count: { _all: true },
       }),
       Promise.all(
-        OPPORTUNITY_COUNT_PLATFORMS.map((platform) => {
+        SCANNABLE_PLATFORMS.map((platform) => {
           const { where, oppFilter } = build();
           return this._oppState.model.engageOpportunityState.count({
             where: { ...where, opportunity: { ...oppFilter, platform } },
@@ -3140,8 +3126,8 @@ export class EngageRepository {
       total,
       byStatus: this._zeroFilledByStatus(statusGroups),
       byPlatform: Object.fromEntries(
-        OPPORTUNITY_COUNT_PLATFORMS.map((p, i) => [p, platformCounts[i]])
-      ) as Record<(typeof OPPORTUNITY_COUNT_PLATFORMS)[number], number>,
+        SCANNABLE_PLATFORMS.map((p, i) => [p, platformCounts[i]])
+      ) as Record<(typeof SCANNABLE_PLATFORMS)[number], number>,
     };
   }
 
@@ -5946,7 +5932,7 @@ export class EngageRepository {
       await Promise.all([
         count(where(dto.status, dto.platform)),
         Promise.all(
-          OPPORTUNITY_COUNT_PLATFORMS.map((platform) =>
+          SCANNABLE_PLATFORMS.map((platform) =>
             count(where(dto.status, platform))
           )
         ),
@@ -5960,8 +5946,8 @@ export class EngageRepository {
     return {
       total,
       byPlatform: Object.fromEntries(
-        OPPORTUNITY_COUNT_PLATFORMS.map((p, i) => [p, platformCounts[i]])
-      ) as Record<(typeof OPPORTUNITY_COUNT_PLATFORMS)[number], number>,
+        SCANNABLE_PLATFORMS.map((p, i) => [p, platformCounts[i]])
+      ) as Record<(typeof SCANNABLE_PLATFORMS)[number], number>,
       rollups: { settled, awaiting },
       awaitingBreakdown: { drafts, link, expired },
     };
@@ -5993,7 +5979,7 @@ export class EngageRepository {
   // Dashboard panel ① "Engage Performance": reply count, response rate,
   // impressions, traffic index, total likes/upvotes, per-platform split, and the
   // single best reply — all scoped to the optional platform + date window
-  // (default all-time). Pass any OPPORTUNITY_COUNT_PLATFORMS value for the UI
+  // (default all-time). Pass any SCANNABLE_PLATFORMS value for the UI
   // tab/chip scope; `platformSplit`/`impressionsByPlatform`/`trafficByPlatform`
   // always break down across every engage platform, not just x/reddit.
   async getDashboardSummary(
@@ -6073,7 +6059,7 @@ export class EngageRepository {
         // x/reddit) — powers `platformSplit`. One scoped count per platform stands
         // in for a group-by, same pattern as countSentReplies/getOpportunityCountsSummary.
         Promise.all(
-          OPPORTUNITY_COUNT_PLATFORMS.map((p) =>
+          SCANNABLE_PLATFORMS.map((p) =>
             this._sentReply.model.engageSentReply.count({
               where: {
                 organizationId,
@@ -6102,7 +6088,7 @@ export class EngageRepository {
         // silently fold all of their impressions/traffic into whichever platform
         // got queried last.
         Promise.all(
-          OPPORTUNITY_COUNT_PLATFORMS.map((p) =>
+          SCANNABLE_PLATFORMS.map((p) =>
             this._post.model.post.aggregate({
               where: {
                 organizationId,
@@ -6145,8 +6131,8 @@ export class EngageRepository {
         }),
       ]);
 
-    const platformIndex = (p: (typeof OPPORTUNITY_COUNT_PLATFORMS)[number]) =>
-      OPPORTUNITY_COUNT_PLATFORMS.indexOf(p);
+    const platformIndex = (p: (typeof SCANNABLE_PLATFORMS)[number]) =>
+      SCANNABLE_PLATFORMS.indexOf(p);
     const xPostAgg = aggByPlatform[platformIndex('x')];
     const redditPostAgg = aggByPlatform[platformIndex('reddit')];
 
@@ -6206,17 +6192,17 @@ export class EngageRepository {
         0
       ),
       // Full breakdown across every engage platform (not just x/reddit).
-      impressionsByPlatform: OPPORTUNITY_COUNT_PLATFORMS.map((p, i) => ({
+      impressionsByPlatform: SCANNABLE_PLATFORMS.map((p, i) => ({
         platform: p,
         value: aggByPlatform[i]._sum.impressions ?? 0,
       })),
-      trafficByPlatform: OPPORTUNITY_COUNT_PLATFORMS.map((p, i) => ({
+      trafficByPlatform: SCANNABLE_PLATFORMS.map((p, i) => ({
         platform: p,
         value: Math.round(aggByPlatform[i]._sum.trafficScore ?? 0),
       })),
       platformSplit: Object.fromEntries(
-        OPPORTUNITY_COUNT_PLATFORMS.map((p, i) => [p, sentByPlatform[i]])
-      ) as Record<(typeof OPPORTUNITY_COUNT_PLATFORMS)[number], number>,
+        SCANNABLE_PLATFORMS.map((p, i) => [p, sentByPlatform[i]])
+      ) as Record<(typeof SCANNABLE_PLATFORMS)[number], number>,
       bestReply,
     };
   }

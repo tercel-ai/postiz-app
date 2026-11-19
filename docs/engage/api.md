@@ -1374,7 +1374,7 @@ Total + byStatus + byPlatform counts for `/opportunities` in one round trip, **a
 }
 ```
 
-> `byStatus` always has all six `EngageOpportunityStatus` keys present (0 when empty), so the UI can render fixed tab badges without existence checks. `byPlatform` always has all broken-out platform keys (`x`/`reddit`/`linkedin`/`medium`/`devto`/`hackernews`/`quora`), 0 when empty.
+> `byStatus` always has all six `EngageOpportunityStatus` keys present (0 when empty), so the UI can render fixed tab badges without existence checks. `byPlatform` contains every platform in the Engage scanner capability list, including `toutiao`, with 0 when empty. Platform counters remain available for matching historical records even when the current scan allowlist excludes that platform.
 
 ---
 
@@ -2463,7 +2463,7 @@ Total + byPlatform + settled/awaiting rollups + awaitingBreakdown for `/sent` in
 Filtered counts under **exactly** the same filters as `GET /sent`, sharing the list's filter builder server-side so the two can never drift:
 
 - `total` honors every filter — `status`, `platform`, and the date window (`date` or `startDate`/`endDate`) included — and is the same number the list returns for that query string.
-- `byPlatform` honors every filter **except `platform` itself** (each count pins one platform), so platform badges stay complete while `status` and the date window narrow them.
+- `byPlatform` honors every filter **except `platform` itself** (each count pins one platform), so platform badges stay complete while `status` and the date window narrow them. The breakdown follows the same Engage platform capability list as opportunity counts, including `toutiao`.
 - `rollups` (`settled`/`awaiting`) honor every filter **except `status` itself** (the status axis), so the tab badges stay complete while `platform` and the date window narrow them.
 - `awaitingBreakdown` (`drafts`/`link`/`expired`) — the awaiting rollup's sub-axis, same status-less scoping as `rollups`.
 
