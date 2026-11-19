@@ -76,12 +76,16 @@ backend scores + persists.
 
 ### Single endpoint — chained scan loop
 ```
-POST /engage/scan-tasks/ingest  { completed?, want? } → { accepted, nextTasks }
+POST /engage/scan-tasks/ingest  { completed?, want?, force?, selectedUnits? } → { accepted, nextTasks }
 
 bootstrap (no completed) → claim next batch
 continuation (completed) → token-validate + persist + advance cursor, then claim next batch
 nextTasks empty           → nothing due; extension idles
 ```
+- Debug claims can request specific `selectedUnits`. The same scan platform
+  list validates selectors and defines scanner capability. Toutiao is available
+  for keyword units when enabled for scanning. `want` caps returned claims at
+  five, even when more selectors are supplied.
 - **Global scan units** keyed `(platform, scanType, scanKey)` on `EngageScanCursor`
   (org-independent). keyword → normalised keyword; channel → subreddit; tracked → username.
   One fetch fans out to **every subscribing org** (cross-org dedup).

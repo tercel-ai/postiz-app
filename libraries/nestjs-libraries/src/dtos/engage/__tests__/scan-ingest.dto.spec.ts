@@ -4,6 +4,7 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import {
   EngageScanIngestDto,
+  EngageScanSyncDto,
   INGEST_MAX_MEDIA_URLS,
   ScanUnitSelectorDto,
   scanIngestPostToRawPost,
@@ -245,11 +246,21 @@ describe('ScanUnitSelectorDto', () => {
   };
 
   it('accepts every platform the scan system serves', async () => {
-    for (const platform of ['x', 'reddit', 'linkedin', 'devto', 'hackernews', 'medium', 'quora']) {
+    for (const platform of ['x', 'reddit', 'linkedin', 'devto', 'hackernews', 'medium', 'quora', 'toutiao']) {
       expect(
         await selectorErrorsFor({ platform, scanType: 'keyword', scanKey: 'ai search' })
       ).toEqual([]);
     }
+  });
+
+  it('accepts a batch of selected Toutiao keywords for a claim of up to five tasks', async () => {
+    const dto = plainToInstance(EngageScanSyncDto, {
+      want: 5,
+      force: true,
+      selectedUnits: ['ai agents', 'mcp', 'open source ai', 'a2a', 'ai governance', 'ai security']
+        .map(scanKey => ({ platform: 'toutiao', scanType: 'keyword', scanKey })),
+    });
+    expect(await validate(dto)).toEqual([]);
   });
 
   it('rejects an unknown platform', async () => {
