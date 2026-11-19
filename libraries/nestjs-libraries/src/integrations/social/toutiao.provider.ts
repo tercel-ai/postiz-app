@@ -4,7 +4,7 @@ import { PostDetails, SocialProvider } from './social.integrations.interface';
 /** Browser-extension micro-posts; the server API route remains unavailable. */
 export class ToutiaoProvider extends SocialAbstract implements SocialProvider {
   identifier = 'toutiao';
-  name = '头条';
+  name = 'Toutiao';
   isBetweenSteps = false;
   scopes: string[] = [];
   editor = 'normal' as const;
