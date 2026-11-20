@@ -894,3 +894,19 @@ The existing transaction checks known publication, live permits, ownership
 and newer writers before accepting. The change is backward compatible for
 existing clients. Deploy this backend contract before the updated website.
 The matching-browser wake uses the existing message. No database migration is needed.
+
+
+### Current-account Post Now on an original Post
+
+`POST /posts` with `type: "now"` can apply the editor payload and send the same
+original using the current project's selected account. `POST /posts/schedule`
+with `type: "now"` and `integrationId` applies the same account decision to the
+saved content. Both commit the new binding and priority on the original Post
+and SendIntent, using the submitting member's current send policy. An explicit
+Post Now permits a new account for a terminal failed original without requiring
+the old preparation to qualify for ordinary account editing. An unconfirmed
+original uses the existing stopped-attempt checks for the old execution,
+including authorization expiry and confirmed history. Live or confirmed work
+cannot enter that recovery. Existing execution and outcome evidence stays in
+place. Account selection, current permissions, pacing, quotas, and activation
+remain in force. No new Post, API route or database migration is needed.

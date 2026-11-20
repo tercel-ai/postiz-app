@@ -380,9 +380,9 @@ Choose the API by what the user wants **Post Now** to do.
 
 | User action | API |
 | --- | --- |
-| Publish a new post or save changes to an editable original and publish it | [`POST /posts/`](#post-posts) with `type: "now"` and the editor payload |
-| Move a scheduled original to Post Now with its saved content | [`POST /posts/schedule`](#post-postsschedule) with the original ID and per-post `type: "now"` |
-| Retry a failed original with its saved content | [`POST /posts/:id/retry`](#post-postsidretry) after checking the latest retry eligibility |
+| Publish a new post or send an original with its edited content | [`POST /posts/`](#post-posts) with `type: "now"` and the editor payload |
+| Send a scheduled original or a failed original with a selected account and saved content from the website | [`POST /posts/schedule`](#post-postsschedule) with the original ID and per-post `type: "now"` |
+| Retry a failed original on its existing route, including from the extension | [`POST /posts/:id/retry`](#post-postsidretry) after checking the latest retry eligibility |
 
 ### POST /posts/
 
@@ -391,11 +391,19 @@ publish**. A single request can target multiple integrations. Guarded by
 `@CheckPolicies([Create, POSTS_PER_MONTH])` (subscription quota).
 
 To edit a permitted original, send its root ID in `posts[0].value[0].id`.
-For a coordinated original, use its current `sending.allowedActions.edit`,
-the original `projectId`, a `requestId`, and the post item's
-`expectedRouteRevision` and `expectedContentRevision` from the latest detail.
+For a coordinated original, send the original `projectId`, a `requestId`,
+and the post item's `expectedRouteRevision` and `expectedContentRevision`
+from the latest detail. Ordinary edits require `sending.allowedActions.edit`.
+Explicit Post Now recovery has the eligibility rules below.
 A permitted edit with `type: "now"` saves the submitted content and requests
-immediate sending on the same original.
+immediate sending on the same original. For an explicit Post Now on a
+`FAILED_FINAL` original, the current project member can select the sending
+account using the editor payload once no live attempt or confirmed result
+exists. The same original-account update is available through
+`POST /posts/schedule` with `type: "now"`, `integrationId`, `requestId` and the
+route/content revisions when the saved content is used. Both entry points can
+reuse the expired-attempt recovery for an unconfirmed original and keep the
+same Post and SendIntent. Draft and scheduling edits use their existing rules.
 
 **Body** — `CreatePostDto` (summary; full per-provider detail in
 [post-publish-api.md](./post-publish-api.md)):

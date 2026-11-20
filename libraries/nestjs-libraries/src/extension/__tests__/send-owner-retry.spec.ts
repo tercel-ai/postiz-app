@@ -66,6 +66,78 @@ describe('single browser publication receipts', () => {
   });
 });
 
+describe('manual Post Now selects the current sending account', () => {
+  async function selectCurrentAccount(block?: 'claimed' | 'published') {
+    const f = await uncertainPost();
+    const currentAccount = { id: '456', idNamespace: 'x.rest_id', handle: 'current' };
+    f.db.seed('userOrganization', { organizationId: 'org', userId: 'current-user', disabled: false });
+    f.bindings.resolveForEnqueueInTransaction.mockResolvedValueOnce({
+      integrationId: 'current-account', providerIdentifier: 'x', bindingSource: 'EXPLICIT',
+      bindingRevision: null, canonicalAccountKey: 'current-account-key', targetAccount: currentAccount,
+    });
+    f.policies.snapshotInTransaction.mockImplementation(async (_tx, user) => ({
+      policyRevision: 0, preferenceRevision: 0, requirePreselectedAccount: true, policyOwnerUserId: user,
+    }));
+    if (block === 'claimed') f.db.rows('sendExecution')[0].leaseExpiresAt = new Date(Date.now() + 60_000);
+    if (block === 'published') f.db.rows('sendSegment')[0].status = 'CONFIRMED';
+    const submit = () => f.service.rescheduleQueuedPost('org', 'root', 'current-user', new Date(), 0, 1, true,
+      { integrationId: 'current-account', requestId: 'switch-original' });
+    return { ...f, currentAccount, submit };
+  }
+
+  it('updates the original Post and intent in place after the previous claim expires', async () => {
+    const f = await selectCurrentAccount();
+    const accepted = await f.submit();
+    expect(accepted).toMatchObject({
+      id: 'root', sendIntentId: f.execution.sendIntentId, integrationId: 'current-account',
+      routeRevision: 1, contentRevision: 1, state: 'QUEUE',
+      sendTarget: { ...f.currentAccount, dispatch: { mode: 'now', requestedAt: new Date().toISOString() } },
+    });
+    expect(f.db.rows('post')).toHaveLength(1);
+    expect(f.db.rows('sendIntent')).toHaveLength(1);
+    expect(f.db.rows('sendIntent')[0]).toMatchObject({
+      status: 'QUEUED', activeExecutionId: null, integrationId: 'current-account', policySnapshot: { policyOwnerUserId: 'current-user' },
+    });
+    expect(f.db.rows('sendExecution')[0]).toMatchObject({ status: 'RETRY_REQUESTED', integrationId: 'account' });
+    expect(f.db.rows('sendSegment')[0].status).toBe('UNKNOWN');
+    expect(f.db.rows('sendQuotaReservation')[0].state).toBe('HELD');
+    await expect(f.submit()).resolves.toMatchObject({ id: 'root', routeRevision: 1 });
+  });
+
+  it('accepts the original editor payload through POST /posts using the same recovery rules', async () => {
+    const f = await selectCurrentAccount();
+    const { PostsRepository } = await import('../../database/prisma/posts/posts.repository');
+    const { PostsService } = await import('../../database/prisma/posts/posts.service');
+    const { SendModeService } = await import('../send-mode.service');
+    const repo = new PostsRepository({model:f.db} as any,{} as any,{} as any,{model:f.db} as any,{model:f.db} as any,{} as any,{model:f.db} as any,new SendModeService(f.db));
+    const service = new PostsService(repo,{} as any,{} as any,{} as any,{} as any,{} as any,{} as any,{} as any,{} as any,{} as any);
+    Object.assign(service, { _sendCoordinator: f.service });
+    Object.assign(f.policies, { lockSystemInTransaction: f.policies.getSystem });
+    vi.spyOn(service, 'isControlled').mockResolvedValue(true);
+    const payload = { requestId: 'edit-original', projectId: 'project', type: 'now', date: new Date().toISOString(), shortLink: false, tags: [],
+      posts: [{ integration: { id: 'current-account' }, providerIdentifier: 'x', publishMethod: 'extension',
+        expectedRouteRevision: 0, expectedContentRevision: 1, settings: { __type: 'x' },
+        value: [{ id: 'root', content: 'updated current content', image: [] }] }] } as const;
+    const submit = () => service.createPost('org', structuredClone(payload) as any, 'current-user');
+    await expect(submit()).resolves.toMatchObject([{
+      postId: 'root', integration: 'current-account', state: 'QUEUE',
+      sending: { sendIntentId: f.execution.sendIntentId, routeRevision: 1, contentRevision: 2 },
+    }]);
+    await expect(submit()).resolves.toMatchObject([{ postId: 'root', sending: { routeRevision: 1, contentRevision: 2 } }]);
+    expect(f.db.rows('post')).toHaveLength(1);
+    expect(f.db.rows('post')[0]).toMatchObject({ id: 'root', content: 'updated current content' });
+    expect(f.db.rows('sendIntent')).toHaveLength(1);
+    expect(f.db.rows('sendExecution')[0].payload[0].content).toBe('hello');
+  });
+
+  it.each(['claimed', 'published'] as const)('does not change a %s original', async block => {
+    const f = await selectCurrentAccount(block);
+    await expect(f.submit()).rejects.toThrow();
+    expect(f.db.rows('post')[0]).toMatchObject({ id: 'root', integrationId: 'account', routeRevision: 0 });
+    expect(f.db.rows('sendMutationReceipt')).toHaveLength(0);
+  });
+});
+
 describe('owner-requested retry of an uncertain original post',()=>{
  it('requeues the original intent while preserving unknown evidence and all held quota',async()=>{
   const f=await uncertainPost(); const evidence=structuredClone(f.db.rows('sendSegment')[0].result);

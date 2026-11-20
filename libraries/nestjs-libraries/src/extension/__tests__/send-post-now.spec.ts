@@ -117,7 +117,8 @@ describe('explicit account-only Post Now on an unclaimed queue', () => {
  });
  it.each(['RESERVED','SENDING','RECONCILING','FAILED_FINAL','SUCCEEDED'])('rejects account changes for %s intents', async status => {
   const {service,db}=await accountChoice();db.rows('sendIntent')[0].status=status;
-  await expect(service.rescheduleQueuedPost('org','root','user',sendNow,0,1,true,choice)).rejects.toThrow('SEND_RESCHEDULE_UNSAFE');
+  const expected = status === 'RECONCILING' ? 'SEND_POST_REVIEW_NOT_SETTLED' : 'SEND_RESCHEDULE_UNSAFE';
+  await expect(service.rescheduleQueuedPost('org','root','user',sendNow,0,1,true,choice)).rejects.toThrow(expected);
   expect(db.rows('post')[0].integrationId).toBe('account');
  });
  it('keeps old NOT_SUBMITTED execution evidence immutable even when date-only reschedule is safe', async () => {

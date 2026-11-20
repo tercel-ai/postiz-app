@@ -142,7 +142,7 @@ it.each(['unknown','confirmed'] as const)('a late %s receipt keeps a newer execu
  expect(f.db.rows('sendIntent')[0].activeExecutionId).toBe(next.id);
 });
 
-it.each([true,false])('account changes after a proven no-permit stop require native claim opt-in: %s',async native=>{
+it.each([true,false])('Post Now changes account after a proven stop for both claim versions: %s',async native=>{
  const f=await fixture(native);
  await f.executions.stop(auth,f.item.executionId,0,f.item.leaseToken,{eventId:'stopped-before-auth',permitHash:'',journalDigest:'a'.repeat(64),noPendingSubmit:true,lastPhase:'PREPARED',executorStoppedAt:sendNow.toISOString()});
  const evidence=structuredClone(f.db.rows('sendSegment')[0].result);
@@ -153,15 +153,19 @@ it.each([true,false])('account changes after a proven no-permit stop require nat
   expect(f.db.rows('post')[0]).toMatchObject({state:'QUEUE',integrationId:'new-account',error:null});
   expect(f.db.rows('sendSegment')[0].result).toEqual(evidence);
   expect(f.db.rows('sendExecution')[0]).toMatchObject({status:'CANCELLED',integrationId:'account'});
- }else await expect(f.rebind()).rejects.toThrow();
+ } else {
+  await expect(f.rebind()).resolves.toMatchObject({ state: 'QUEUE', integrationId: 'new-account' });
+  expect(f.db.rows('sendExecution')[0].status).toBe('FAILED_FINAL');
+ }
 });
-it('a failed attempt that was authorized never gains account-edit permission from a later stop',async()=>{
+it('an authorized attempt that stopped can change account through explicit Post Now',async()=>{
  const f=await fixture();await f.proof();
  await f.executions.start(auth,f.item.executionId,0,f.item.leaseToken,{authorizationMode:'NATIVE_FLOW_V1'});
  const segment=f.db.rows('sendSegment')[0];vi.setSystemTime(new Date(+segment.submitBefore+1000));
  await f.executions.stop(auth,f.item.executionId,0,f.item.leaseToken,{eventId:'stopped-after-auth',permitHash:segment.permitHash,journalDigest:'a'.repeat(64),noPendingSubmit:true,lastPhase:'CANCELLED_BEFORE_SUBMIT',executorStoppedAt:new Date().toISOString()});
  expect(f.summary().allowedActions.selectAccount.allowed).toBe(false);
- await expect(f.rebind()).rejects.toThrow();
+ await expect(f.rebind()).resolves.toMatchObject({ state: 'QUEUE', integrationId: 'new-account' });
+ expect(f.db.rows('sendExecution')[0].status).toBe('FAILED_FINAL');
 });
 
 it('claims the new account only after live verification of that account, preserving the original content',async()=>{
@@ -174,7 +178,7 @@ it('claims the new account only after live verification of that account, preserv
  expect(next.executionId).not.toBe(f.item.executionId);
  expect(f.db.rows('sendIntent')).toHaveLength(1);expect(f.db.rows('post')).toHaveLength(1);
 });
-it.each(['invalid-proof','missing-native','authorized-history','unknown-history'])('does not revive failed preparation with %s',async kind=>{
+it.each(['invalid-proof','missing-native','authorized-history','unknown-history'])('Post Now relies on the final outcome, rather than the earlier preparation details: %s',async kind=>{
  const f=await fixture();
  await f.executions.stop(auth,f.item.executionId,0,f.item.leaseToken,{eventId:'safe-stop',permitHash:'',journalDigest:'a'.repeat(64),noPendingSubmit:true,lastPhase:'PREPARED',executorStoppedAt:sendNow.toISOString()});
  const segment=f.db.rows('sendSegment')[0],execution=f.db.rows('sendExecution')[0];
@@ -182,7 +186,9 @@ it.each(['invalid-proof','missing-native','authorized-history','unknown-history'
  if(kind==='missing-native')execution.context={};
  if(kind==='authorized-history')segment.authorizedAt=sendNow;
  if(kind==='unknown-history')segment.status='UNKNOWN';
- expect(f.summary().allowedActions.selectAccount.allowed).toBe(false);await expect(f.rebind()).rejects.toThrow();
+ expect(f.summary().allowedActions.selectAccount.allowed).toBe(false);
+ if (kind === 'unknown-history') await expect(f.rebind()).rejects.toThrow();
+ else await expect(f.rebind()).resolves.toMatchObject({ state: 'QUEUE', integrationId: 'new-account' });
 });
 
 it.each([false,true])('preserves proven no-permit account-change eligibility after explicit retry (new preparation: %s)',async prepare=>{
