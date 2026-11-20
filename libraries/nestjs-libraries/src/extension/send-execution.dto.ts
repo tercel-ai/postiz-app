@@ -74,11 +74,15 @@ export class ReviewPostNotSentDto {
 }
 
 /** An owner asks for another attempt without asserting the original was unsent. */
-export class RetryUnconfirmedPostDto {
+class RetryUnconfirmedSendDto {
   @IsString() @Matches(/\S/) @MaxLength(128) requestId: string;
   @IsInt() @Min(0) expectedResolutionRevision: number;
 }
 
-export class RetryUnconfirmedReplyDto extends RetryUnconfirmedPostDto {
+export class RetryUnconfirmedPostDto extends RetryUnconfirmedSendDto {
+  @IsOptional() @IsIn(['now']) type?: 'now';
+}
+
+export class RetryUnconfirmedReplyDto extends RetryUnconfirmedSendDto {
   @IsOptional() @IsBoolean() confirmDuplicateRisk?: boolean;
 }

@@ -80,6 +80,28 @@ describe('owner-requested retry of an uncertain original post',()=>{
   const summary=sendBusinessSummary(f.db.rows('post')[0],f.db.rows('sendIntent')[0],f.db.rows('sendExecution'),f.db.rows('sendSegment'),null,true);
   expect(summary.status).toBe('QUEUED'); expect(summary.execution).toBe(null);
  });
+ it('adds existing Post Now priority to the same original atomically only for an explicit Post Now', async () => {
+  const f = await uncertainPost(2);
+  const intent = f.db.rows('sendIntent')[0];
+  intent.sendOrigin = 'AUTOMATION';
+  intent.context = { source: 'original' };
+  const [root, child] = f.db.rows('post');
+  const target = { id: '123', idNamespace: 'x.rest_id' };
+  root.sendTarget = target;
+  child.sendTarget = target;
+  const body = { ...request(), type: 'now' as const };
+  const result = await retry(f, body);
+  const requestedAt = new Date().toISOString();
+
+  expect(result).toEqual({ sendIntentId: f.execution.sendIntentId, status: 'QUEUED' });
+  expect(f.db.rows('post')[0]).toMatchObject({ id: 'root', state: 'QUEUE', sendTarget: { ...target, dispatch: { mode: 'now', requestedAt } } });
+  expect(f.db.rows('post')[1].sendTarget).toEqual(target);
+  expect(f.db.rows('sendIntent')[0]).toMatchObject({ sendOrigin: 'AUTOMATION', context: { source: 'original', manualPostNow: true } });
+  expect(f.db.rows('sendSegment')[0].status).toBe('UNKNOWN');
+  await expect(retry(f, body)).resolves.toEqual(result);
+  await expect(retry(f, request())).rejects.toThrow('SEND_RETRY_REQUEST_CONFLICT');
+ });
+
  it('replays a stable request after a newer claim without requeueing or revoking the newer owner',async()=>{
   const f=await uncertainPost(); const result=await retry(f);
   const newer=await f.service.reserveApi('org','root','newer',new Date());

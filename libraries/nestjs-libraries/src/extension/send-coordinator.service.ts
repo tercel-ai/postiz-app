@@ -2802,7 +2802,7 @@ export class SendCoordinatorService {
           row.contentRevision !== execution.contentRevision || row.releaseId || row.releaseURL || row.state === 'PUBLISHED') ||
         await tx.sendSegment.count({ where: { organizationId: org, status: 'CONFIRMED', execution: { sendIntentId: intent.id } } }))
       reject('SEND_POST_REVIEW_NOT_SETTLED');
-    return { execution, intent, segments, segment: segments[0] };
+    return { execution, intent, posts, segments, segment: segments[0] };
   }
 
   private async assertPostReviewStopped(tx: Prisma.TransactionClient, execution: SendExecution, intent: SendIntent,
@@ -2847,8 +2847,8 @@ export class SendCoordinatorService {
 
   /** An explicit owner request supersedes uncertainty without claiming non-submission. */
   async retryUnconfirmedPost(org: string, user: string, executionId: string, rootPostId: string,
-    body: { requestId: string; expectedResolutionRevision: number }) {
-    return this.requeueUnconfirmedSend(org, user, executionId, { rootPostId }, body);
+    body: { requestId: string; expectedResolutionRevision: number; type?: 'now' }) {
+    return this.requeueUnconfirmedSend(org, user, executionId, { rootPostId }, body, body.type === 'now');
   }
 
   async retryUnconfirmedReply(org: string, user: string, executionId: string, sentReplyId: string,
@@ -2859,7 +2859,7 @@ export class SendCoordinatorService {
 
   private async requeueUnconfirmedSend(org: string, user: string, executionId: string,
     scope: { rootPostId: string; sentReplyId?: never } | { sentReplyId: string; rootPostId?: never },
-    body: { requestId: string; expectedResolutionRevision: number; confirmDuplicateRisk?: boolean }) {
+    body: { requestId: string; expectedResolutionRevision: number; confirmDuplicateRisk?: boolean }, publishNow = false) {
     if (!body.requestId?.trim() || body.requestId.length > 128 || !Number.isSafeInteger(body.expectedResolutionRevision) || body.expectedResolutionRevision < 0)
       throw new BadRequestException('INVALID_SEND_RETRY_REQUEST');
     await this.enabled(org);
@@ -2887,6 +2887,7 @@ export class SendCoordinatorService {
       }
       const key = { organizationId: org, userId: user, operation: `owner-send-retry:${executionId}`, requestId: body.requestId };
       const requestHash = sendHash({ rootPostId, expectedResolutionRevision: body.expectedResolutionRevision,
+        ...(publishNow ? { type: 'now' } : {}),
         ...(reply ? { sentReplyId: reply.id, confirmDuplicateRisk: body.confirmDuplicateRisk === true } : {}) });
       const prior = await tx.sendMutationReceipt.findUnique({ where: { organizationId_userId_operation_requestId: key } });
       if (prior) {
@@ -2906,7 +2907,7 @@ export class SendCoordinatorService {
       if (account.activeExecutionId === executionId && (recoveringReply || original.status === 'RECONCILING'))
         account = await releaseExpiredAccountWriterIn(tx, account, new Date());
       if (recoveringReply && account.activeExecutionId === executionId) return { status: 'waiting' as const };
-      const { execution, intent, segments, segment } = await this.sendReviewScope(tx, org, user, executionId, rootPostId, reply ? 'REPLY' : 'POST');
+      const { execution, intent, posts, segments, segment } = await this.sendReviewScope(tx, org, user, executionId, rootPostId, reply ? 'REPLY' : 'POST');
       if (execution.resolutionRevision !== body.expectedResolutionRevision) reject('SEND_RESOLUTION_REVISION_CONFLICT');
       const now = new Date();
       if (reply && (segment.submitBefore && segment.submitBefore > now ||
@@ -2925,10 +2926,20 @@ export class SendCoordinatorService {
       } });
       await tx.sendIntent.update({ where: { id: intent.id }, data: {
         status: 'QUEUED', activeExecutionId: null, fencingVersion: { increment: 1 }, revision: { increment: 1 },
-        context: this.manualReplyRetryContext(intent),
+        context: publishNow
+          ? sendJson({ ...(intent.context as Record<string, unknown> | null), manualPostNow: true })
+          : this.manualReplyRetryContext(intent),
       } });
       await tx.accountWriteState.updateMany({ where: { id: account.id, activeExecutionId: executionId }, data: { activeExecutionId: null } });
-      await tx.post.updateMany({ where: { organizationId: org, sendIntentId: intent.id }, data: { state: 'QUEUE', error: null, publishDate: now } });
+      const queued = { state: 'QUEUE' as const, error: null, publishDate: now };
+      if (publishNow) {
+        for (const post of posts) await tx.post.updateMany({
+          where: { organizationId: org, id: post.id, sendIntentId: intent.id },
+          data: { ...queued, sendTarget: withPublishNowRequestedAt(post.sendTarget, post.parentPostId ? null : now) },
+        });
+      } else {
+        await tx.post.updateMany({ where: { organizationId: org, sendIntentId: intent.id }, data: queued });
+      }
       const result = { sendIntentId: intent.id, status: 'QUEUED' as const };
       await tx.sendMutationReceipt.create({ data: { ...key, requestHash, result } });
       return result;

@@ -110,9 +110,8 @@ requires controlled sending, an active project, a ready account, the original
 owner scope, settled execution and submit deadlines, and no confirmed or newer
 writer. It does not assert that the first attempt was unsent.
 
-This is an automatic eligibility decision, not a human approval or confirmation
-stage in the backend. The user initiates Retry in the extension. Medium is not
-excluded: the extension checks its live account and any matching publication,
+The initiating action is the user's Retry in the extension or Post Now on the
+website. The extension checks the live Medium account and any matching publication,
 then uses this same endpoint if no confirmed publication was found. A positive
 local Medium receipt blocks requeue even if its report never reaches the backend;
 the extension requests result synchronization instead of trusting stale eligibility.
@@ -126,8 +125,12 @@ exposed segment must remain. Reply retry and legacy absence review remain
 single-segment operations. The old absence-review response reports
 `canReviewNotSent:false` for threads, without blocking `canRetryUnconfirmed`.
 
-`POST /sending/executions/:id/posts/:rootPostId/retry` accepts only a stable
-`requestId` and `expectedResolutionRevision`. It returns
+`POST /sending/executions/:id/posts/:rootPostId/retry` accepts a stable
+`requestId` and `expectedResolutionRevision`, with optional `type: "now"` for
+website Post Now. The optional type writes the existing root dispatch priority
+and manual Post Now admission context in the same transaction. The idempotency
+fingerprint includes this option when supplied. Older extension and Reply
+callers retain their prior request handling. The Post endpoint returns
 `{sendIntentId,status:"QUEUED"}`. The serializable transaction retains the original
 segment evidence and any HELD quota, archives its executor as `RETRY_REQUESTED`,
 advances fencing and resolution revisions, releases only its account ownership,
@@ -884,8 +887,10 @@ eligible Post uses `POST /posts/schedule`.
 
 ### Website Post Now after an unconfirmed controlled attempt
 
-The website uses `GET /posts/:id?projectId=…&readOnly=true` and the business summary
-to report that the original attempt is unconfirmed. It directs the user to
-Publish Activity for existing reconciliation and recovery. Ordinary authorized
-retries and reviewed legacy recoveries use their existing server contracts.
-This flow requires no additional extension message or database migration.
+The website loads `GET /posts/:id?projectId=…&readOnly=true` on an explicit
+Post Now click. For an unconfirmed original it posts the exact execution's
+resolution revision to the owner retry route above with `type: "now"`.
+The existing transaction checks known publication, live permits, ownership
+and newer writers before accepting. The change is backward compatible for
+existing clients. Deploy this backend contract before the updated website.
+The matching-browser wake uses the existing message. No database migration is needed.
