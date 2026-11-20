@@ -66,7 +66,13 @@ Design scope: this addresses a user who verified that an older filled composer w
 
 `POST /posts/schedule` accepts an explicit per-post `date` together with `expectedRouteRevision` and `expectedContentRevision` when an original controlled EXTENSION POST is already QUEUED. This updates the original root/thread schedule under the existing serializable send transaction. It does not edit content, replace the intent, claim work, allocate quota, or bypass pacing. Only an idle QUEUED intent with no active writer, uncertain or confirmed history, or legacy occupancy can be rescheduled. Reserved, sending, reconciling, or published work is rejected. The business summary exposes `allowedActions.reschedule` only for that idle queue; plain enqueue replays continue to retain their original date.
 
-After a successful explicit Post now or retry, the aisee-app page wakes the standalone extension with the existing `aisee:post-publish` event and optional accepted `postIds`. These identifiers allow the extension to display the backend queue before an execution receipt exists. They provide no content or sending authority; claims still use the backend's original frozen task, target, schedule, and normal authorization.
+After an eligible Post Now enters the queue, aisee-app can wake the local
+extension using the existing `aisee:post-publish` event with accepted `postIds`.
+For CONTROLLED, it checks the Automation Post default, the accepted root route
+and the cached local actor. AUTONOMOUS keeps its eligible current-session path.
+Other eligible nodes discover the task normally. The event can display the
+original while it waits. The existing claim provides the frozen task, target,
+schedule and sending authorization.
 
 
 ## Durable X draft exposure
@@ -878,17 +884,8 @@ eligible Post uses `POST /posts/schedule`.
 
 ### Website Post Now after an unconfirmed controlled attempt
 
-The website sends the original root, intent and execution IDs and the current
-project and principal to the installed extension. The worker checks the
-frontend origin and authenticated identity, validates the saved root and
-current execution using the existing project-scoped read-only detail, and
-reconciles that execution through the existing node and lease. It does not
-attest non-submission or request an uncertain retry on behalf of the page.
-After the check, the website re-reads `GET /posts/:id?projectId=…&readOnly=true`.
-It requests `POST /posts/:id/retry` with `type: "now"` only for the same
-definitely-unsent execution and revisions, with ordinary retry eligibility in
-both the extension and server. Confirmed publication refreshes the website.
-Remaining uncertainty requires the existing recovery path. The check adds no
-backend route or database migration. The updated website and standalone
-extension use the existing backend detail, ownership, settlement and retry
-contracts.
+The website uses `GET /posts/:id?projectId=…&readOnly=true` and the business summary
+to report that the original attempt is unconfirmed. It directs the user to
+Publish Activity for existing reconciliation and recovery. Ordinary authorized
+retries and reviewed legacy recoveries use their existing server contracts.
+This flow requires no additional extension message or database migration.
