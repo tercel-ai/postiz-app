@@ -7,7 +7,7 @@ import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extensio
 import { v5 as sendUuid } from 'uuid';
 import { sendHash } from '../../../extension/send-coordination.utils';
 import { SendCoordinatorService, EnqueueSend } from '../../../extension/send-coordinator.service';
-import { isLegacyExecution } from '../../../extension/legacy-execution';
+import { isLegacyExecution, legacyPostLeaseCutoff } from '../../../extension/legacy-execution';
 import { canonicalControlledPlatform, CONTROLLED_SEND_PLATFORMS } from '../../../extension/controlled-platforms';
 import {
   BadRequestException,
@@ -1610,7 +1610,8 @@ export class PostsService {
     orgId: string,
     id: string,
     convertToJPEG = false,
-    projectId?: string
+    projectId?: string,
+    persistMedia = true
   ) {
     const posts = await this.getPostsRecursively(
       id,
@@ -1627,7 +1628,8 @@ export class PostsService {
           await this.updateMedia(
             post.id,
             JSON.parse(post.image || '[]'),
-            convertToJPEG
+            convertToJPEG,
+            persistMedia
           ),
           (dropped) =>
             this.logger.warn(
@@ -2295,7 +2297,14 @@ export class PostsService {
     return { postId: post.id, sendIntentId: post.sendIntentId, state: post.state, publishMethod: post.publishMethod };
   }
 
-  async retryPost(orgId: string, postId: string, userId?: string, type?: 'now' | 'schedule') {
+  async retryPost(orgId: string, postId: string, userId?: string, type?: 'now' | 'schedule',
+    legacyReview?: import('@gitroom/nestjs-libraries/dtos/posts/schedule-posts.dto').LegacyPostRetryReviewDto) {
+    if (legacyReview) {
+      if (!this._sendCoordinator || !userId || type !== 'now') throw new BadRequestException('INVALID_LEGACY_POST_RETRY');
+      const post = await this._sendCoordinator.enqueue(orgId, postId, { userId, origin: 'MANUAL', publishNow: true, legacyRetry: legacyReview });
+      this._postOverageService.deductIfOverage(orgId, userId, post.id, post.source).catch(err => this.logger.error('Controlled post overage settlement failed', err));
+      return { postId: post.id, state: post.state, sendIntentId: post.sendIntentId, accepted: true as const };
+    }
     const post = await this._postRepository.getPostById(postId, orgId);
     if (!post) {
       throw new BadRequestException('Post not found');
@@ -2675,11 +2684,7 @@ export class PostsService {
    * report work as claimable that the very next poll refuses to hand out.
    */
   private static extensionLeaseCutoff(now: dayjs.Dayjs): Date {
-    const leaseMinutes = Math.max(
-      1,
-      Number(process.env.EXTENSION_PUBLISH_LEASE_MINUTES) || 10
-    );
-    return now.subtract(leaseMinutes, 'minute').toDate();
+    return legacyPostLeaseCutoff(now.toDate());
   }
 
   /**

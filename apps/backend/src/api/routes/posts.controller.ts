@@ -347,9 +347,12 @@ export class PostsController {
     @GetOrgFromRequest() org: Organization,
     @Param('id') id: string,
     @Query('projectId') projectId?: string,
-    @GetUserFromRequest() user?: User
+    @GetUserFromRequest() user?: User,
+    @Query('readOnly') readOnly?: string
   ) {
-    const result = await this._postsService.getPost(org.id, id, false, projectId);
+    const result = readOnly === 'true'
+      ? await this._postsService.getPost(org.id, id, false, projectId, false)
+      : await this._postsService.getPost(org.id, id, false, projectId);
     return user && result.posts[0] && (needsSendSummary(result.posts[0]) || await this._postsService.isControlled(org.id)) ? { ...result, sending: await this._postsService.getSendingSummary(org.id, user.id, result.posts[0].id) } : result;
   }
 
@@ -436,6 +439,9 @@ export class PostsController {
     @GetUserFromRequest() user?: User,
     @Body() body?: RetryPostScheduleDto
   ) {
+    if (body?.legacyReview) {
+      return this._postsService.retryPost(org.id, id, user?.id, body.type, body.legacyReview);
+    }
     return this._postsService.retryPost(org.id, id, user?.id, ...(body?.type ? [body.type] as ['now' | 'schedule'] : []));
   }
 

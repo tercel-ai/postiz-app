@@ -36,3 +36,9 @@ describe('PostsController.getPost', () => {
     expect(postsService.getPost).toHaveBeenCalledWith('org-1', 'post-1', false, undefined);
   });
 });
+
+it('passes the Post Now read-only option without changing ordinary detail reads', async () => {
+  const { controller, postsService } = createController();
+  await controller.getPost(fakeOrg, 'post-1', 'proj-1', undefined, 'true');
+  expect(postsService.getPost).toHaveBeenCalledWith('org-1', 'post-1', false, 'proj-1', false);
+});

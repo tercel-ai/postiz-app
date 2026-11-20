@@ -982,3 +982,13 @@ Toutiao keyword scans use the extension and fetch full micro-post details;
 tracked-author and channel scans are not supported. A confirmed reply stores its
 real comment ID; no independent comment permalink was established. If the native
 receipt cannot be matched to the post, actor and text, the result is unconfirmed.
+
+### Attended recovery of older failed calendar posts
+
+An operator can review an eligible unbound legacy extension failure before
+queuing it from the original Post in CONTROLLED mode. The reviewed attempt
+cannot be part of an active legacy drain or have unresolved or confirmed
+publication evidence. Recovery preserves the original Post ID and failure audit
+and enters ordinary controlled discovery with the explicitly selected account.
+AUTONOMOUS continues to use the current browser session and its existing retry
+and handover rules. Switching modes alone never retries a failed Post.

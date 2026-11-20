@@ -3,6 +3,8 @@ import {
   ArrayNotEmpty,
   IsArray,
   IsDateString,
+  Equals,
+  Matches,
   IsIn,
   IsInt,
   Min,
@@ -72,9 +74,20 @@ export class SchedulePostsDto {
   posts!: SchedulePostItemDto[];
 }
 
+export class LegacyPostRetryReviewDto {
+  @IsString() @MinLength(1) @MaxLength(128) requestId!: string;
+  @IsString() @MinLength(1) @MaxLength(128) integrationId!: string;
+  @IsString() @Matches(/^[a-f0-9]{64}$/) expectedRecoveryRevision!: string;
+  @Equals(true) reviewedNotSent!: true;
+  @Equals(true) draftsClosed!: true;
+}
+
 /** Optional scheduling intent for the existing failed-post retry endpoint. */
 export class RetryPostScheduleDto {
   @IsOptional()
   @IsIn(['now', 'schedule'])
   type?: 'now' | 'schedule';
+
+  @IsOptional() @ValidateNested() @Type(() => LegacyPostRetryReviewDto)
+  legacyReview?: LegacyPostRetryReviewDto;
 }

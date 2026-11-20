@@ -171,7 +171,7 @@ not per post or per keystroke.
 | GET | [`/posts/old`](#get-postsold) | Posts older than a date |
 | GET | [`/posts/group/:group`](#get-postsgroupgroup) | All posts in a group |
 | GET | [`/posts/:id`](#get-postsid) | Single post |
-| POST | [`/posts/`](#post-posts) | Create / schedule / publish post(s) |
+| POST | [`/posts/`](#post-posts) | Create or edit post content, with optional scheduling or immediate publication |
 | POST | [`/posts/generator/draft`](#post-postsgeneratordraft) | Generate draft posts (AI) |
 | POST | [`/posts/generator`](#post-postsgenerator) | Streaming AI post generation |
 | DELETE | [`/posts/:group`](#delete-postsgroup) | Delete a post group |
@@ -376,11 +376,26 @@ List the org's post tags.
 
 ## Write
 
+Choose the API by what the user wants **Post Now** to do.
+
+| User action | API |
+| --- | --- |
+| Publish a new post or save changes to an editable original and publish it | [`POST /posts/`](#post-posts) with `type: "now"` and the editor payload |
+| Move a scheduled original to Post Now with its saved content | [`POST /posts/schedule`](#post-postsschedule) with the original ID and per-post `type: "now"` |
+| Retry a failed original with its saved content | [`POST /posts/:id/retry`](#post-postsidretry) after checking the latest retry eligibility |
+
 ### POST /posts/
 
 Create one or more posts as a **draft**, a **scheduled** post, or an **immediate
 publish**. A single request can target multiple integrations. Guarded by
 `@CheckPolicies([Create, POSTS_PER_MONTH])` (subscription quota).
+
+To edit a permitted original, send its root ID in `posts[0].value[0].id`.
+For a coordinated original, use its current `sending.allowedActions.edit`,
+the original `projectId`, a `requestId`, and the post item's
+`expectedRouteRevision` and `expectedContentRevision` from the latest detail.
+A permitted edit with `type: "now"` saves the submitted content and requests
+immediate sending on the same original.
 
 **Body** — `CreatePostDto` (summary; full per-provider detail in
 [post-publish-api.md](./post-publish-api.md)):
@@ -461,9 +476,18 @@ Edit a tag.
 
 ### POST /posts/:id/retry
 
-Retry a failed (`ERROR`) post.
+The website and browser extension both use this endpoint to requeue an eligible
+failed original. It uses the saved content. An editor submitting changed
+content uses [`POST /posts/`](#post-posts).
 
-- **Path**: `id` — post id.
+- **Path** — `id`, the original root Post ID.
+- **Body** — Optional `type: "now" | "schedule"`. Use `"now"` to request
+  Post Now priority for an eligible Post.
+- For a coordinated Post, read its latest detail and check
+  `sending.allowedActions.retry.allowed`. The server rechecks eligibility
+  before requeueing. For an uncertain result, use **Check status** in the
+  extension's Publish Activity. See the [recovery contract](./multi-node-sending-api-ownership.md)
+  for uncertain executions and the optional reviewed legacy failure request.
 
 ### PUT /posts/:id/date
 

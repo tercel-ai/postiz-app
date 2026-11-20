@@ -905,3 +905,96 @@ it('reschedules and edits a version-zero controlled original without weakening s
     .rejects.toThrow('SEND_EDIT_UNSAFE');
   expect(f.db.rows('post')).toEqual(before);
 });
+
+describe('explicit recovery of an unbound legacy failed Post', () => {
+  const recovery = {
+    requestId: 'legacy-retry-1', integrationId: 'account',
+    reviewedNotSent: true as const, draftsClosed: true as const,
+  };
+
+  async function failedLegacyPost() {
+    const f = setupSend();
+    await f.create('root', 'EXTENSION');
+    f.db.rows('sendIntent').length = 0;
+    Object.assign(f.db.rows('post')[0], {
+      state: 'ERROR', source: 'calendar', error: 'The platform rejected the story.',
+      executionProtocol: null, sendIntentId: null, contentUnitId: null,
+      integrationId: null, accountSelectionMode: null, routeRevision: 0, contentRevision: 0,
+      releaseId: null, releaseURL: null, parentPostId: null, deletedAt: null,
+    });
+    return f;
+  }
+
+  it('keeps a recently claimed failure protected even after its release id was cleared', async () => {
+    vi.stubEnv('EXTENSION_PUBLISH_LEASE_MINUTES', '30');
+    const { service, db } = await failedLegacyPost();
+    const post = db.rows('post')[0];
+    post.claimedAt = new Date(Date.now() - 1_000);
+    const active = await service.businessSummary('org', 'user', 'root');
+    expect(active.legacyRetryRevision).toBeUndefined();
+    const body = { ...recovery, expectedRecoveryRevision: 'a'.repeat(64) };
+    await expect(service.enqueue('org', 'root', {
+      userId: 'user', origin: 'MANUAL', publishNow: true, legacyRetry: body,
+    })).rejects.toThrow('SEND_RETRY_UNSAFE');
+    expect(db.rows('sendIntent')).toHaveLength(0);
+
+    db.rows('post')[0].claimedAt = new Date(Date.now() - 31 * 60_000);
+    const expired = await service.businessSummary('org', 'user', 'root');
+    expect(expired.allowedActions.retry).toEqual({ allowed: false, reason: 'LEGACY_POST_RETRY_REVIEW_REQUIRED' });
+    expect(expired.legacyRetryRevision).toMatch(/^[a-f0-9]{64}$/);
+    expect(db.rows('sendIntent')).toHaveLength(0);
+  });
+
+  it('advertises review, then reuses the root and stores one audit receipt on replay', async () => {
+    const { service, db } = await failedLegacyPost();
+    const summary = await service.businessSummary('org', 'user', 'root');
+    expect(summary.allowedActions.retry).toEqual({ allowed: false, reason: 'LEGACY_POST_RETRY_REVIEW_REQUIRED' });
+    const legacyRetry = { ...recovery, expectedRecoveryRevision: summary.legacyRetryRevision! };
+    const requests = [0, 1].map(() => service.enqueue('org', 'root', {
+      userId: 'user', origin: 'MANUAL', publishNow: true, legacyRetry,
+    }));
+    const accepted = await Promise.all(requests);
+    expect(accepted.every(post => post.id === 'root' && post.state === 'QUEUE' && post.integrationId === 'account')).toBe(true);
+    expect(db.rows('post')).toHaveLength(1);
+    expect(db.rows('sendIntent')).toHaveLength(1);
+    expect(db.rows('sendExecution')).toHaveLength(0);
+    expect(db.rows('sendMutationReceipt')).toHaveLength(1);
+    expect(db.rows('sendMutationReceipt')[0].result).toMatchObject({ previousError: 'The platform rejected the story.' });
+  });
+
+  it('acknowledges an accepted retry after its Post is published without creating another intent', async () => {
+    const { service, db } = await failedLegacyPost();
+    const summary = await service.businessSummary('org', 'user', 'root');
+    const legacyReview = { ...recovery, expectedRecoveryRevision: summary.legacyRetryRevision! };
+    const gateway = {
+      _sendCoordinator: service,
+      _postOverageService: { deductIfOverage: vi.fn().mockResolvedValue(undefined) },
+      logger: { error: vi.fn() },
+    };
+    const retry = () => Reflect.apply(PostsService.prototype.retryPost, gateway, ['org', 'root', 'user', 'now', legacyReview]);
+    const accepted = await retry();
+    expect(accepted).toMatchObject({ postId: 'root', state: 'QUEUE', accepted: true });
+    Object.assign(db.rows('post')[0], { state: 'PUBLISHED', releaseURL: 'https://example.com/posted' });
+    expect(await retry()).toEqual({ ...accepted, state: 'PUBLISHED' });
+    expect(db.rows('sendIntent')).toHaveLength(1);
+    expect(db.rows('sendMutationReceipt')).toHaveLength(1);
+  });
+
+  it.each([
+    { releaseURL: 'https://example.com/posted' }, { releaseId: 'ext_active' },
+    { error: 'A different attempt was reported' }, { contentRevision: 1 }, { source: 'engage' },
+  ])(
+    'preserves a failed original when the recovery is unsafe %j',
+    async fields => {
+      const { service, db } = await failedLegacyPost();
+      const summary = await service.businessSummary('org', 'user', 'root');
+      const legacyRetry = { ...recovery, expectedRecoveryRevision: summary.legacyRetryRevision! };
+      Object.assign(db.rows('post')[0], fields);
+      await expect(service.enqueue('org', 'root', {
+        userId: 'user', origin: 'MANUAL', publishNow: true, legacyRetry,
+      })).rejects.toThrow();
+      expect(db.rows('post')[0].state).toBe('ERROR');
+      expect(db.rows('sendIntent')).toHaveLength(0);
+    }
+  );
+});

@@ -6,3 +6,8 @@ export const legacyExecutionWhere = (): Prisma.PostWhereInput => ({
 });
 export const isLegacyExecution = (protocol: string | null | undefined) =>
   protocol == null || protocol === 'LEGACY';
+
+export function legacyPostLeaseCutoff(now: Date): Date {
+  const minutes = Math.max(1, Number(process.env.EXTENSION_PUBLISH_LEASE_MINUTES) || 10);
+  return new Date(now.getTime() - minutes * 60_000);
+}

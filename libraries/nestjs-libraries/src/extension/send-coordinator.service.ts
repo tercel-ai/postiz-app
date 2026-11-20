@@ -6,7 +6,7 @@ import { CONTROLLED_SEND_PLATFORMS, CONTROLLED_REPLY_PLATFORMS, canonicalControl
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { hashSecret } from './extension-node.protocol';
 import { sendBusinessSummary, type SendActionDecision } from './send-business-summary';
-import { isLegacyExecution } from './legacy-execution';
+import { isLegacyExecution, legacyPostLeaseCutoff } from './legacy-execution';
 import {
   BadRequestException,
   ConflictException,
@@ -17,7 +17,7 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { AccountWriteState, Prisma, SendExecution, SendIntent, SendSegment } from '@prisma/client';
+import { AccountWriteState, Post, Prisma, SendExecution, SendIntent, SendSegment } from '@prisma/client';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { PrismaService } from '../database/prisma/prisma.service';
 import { ProjectValidationService } from '../projects/project-validation.service';
@@ -30,6 +30,7 @@ import { capitalize } from 'lodash';
 import { SendBindingService } from './send-binding.service';
 import { SendPolicyService } from './send-policy.service';
 import { SendQuotaService } from './send-quota.service';
+import type { LegacyPostRetryReviewDto } from '../dtos/posts/schedule-posts.dto';
 import {
   accountWriteNotBefore,
   canonicalSendAccount,
@@ -70,6 +71,7 @@ export interface EnqueueSend {
   publishDate?: Date;
   publishNow?: boolean;
   sentReplyId?: string;
+  legacyRetry?: LegacyPostRetryReviewDto;
   // Internal handover adds provenance checks; it never relaxes enqueue policy.
   modeHandover?: true;
   selection?: {
@@ -123,6 +125,26 @@ export class SendCoordinatorService {
       where: { userId_organizationId: { userId: user, organizationId: org } },
     });
     if (!member || member.disabled) throw new ForbiddenException('ORGANIZATION_MEMBERSHIP_REQUIRED');
+  }
+
+  private async legacyPostRetryRevision(tx: Prisma.TransactionClient, post: Post): Promise<string | null> {
+    if (post.state !== 'ERROR' || !post.error || post.source !== 'calendar' ||
+        post.publishMethod !== 'EXTENSION' || !post.providerIdentifier ||
+        !(CONTROLLED_SEND_PLATFORMS as readonly string[]).includes(canonicalControlledPlatform(post.providerIdentifier)) ||
+        !isLegacyExecution(post.executionProtocol) || !post.projectId || post.parentPostId ||
+        post.intervalInDays || post.deletedAt || post.removedAt || post.sendIntentId || post.integrationId ||
+        post.releaseId || post.releaseURL || (post.claimedAt && post.claimedAt >= legacyPostLeaseCutoff(new Date()))) return null;
+    const [relatedPosts, priorIntents] = await Promise.all([
+      tx.post.count({ where: { organizationId: post.organizationId, OR: [
+        { parentPostId: post.id },
+        { group: post.group, intervalInDays: { gt: 0 } },
+      ] } }),
+      tx.sendIntent.count({ where: { organizationId: post.organizationId, rootPostId: post.id } }),
+    ]);
+    if (relatedPosts || priorIntents) return null;
+    return sendHash({ rootPostId: post.id, projectId: post.projectId, contentHash: postSendHash(post),
+      routeRevision: post.routeRevision, contentRevision: post.contentRevision,
+      error: post.error, claimedAt: post.claimedAt, publishDate: post.publishDate });
   }
 
   async businessSummary(org: string, user: string, postId: string) {
@@ -194,6 +216,9 @@ export class SendCoordinatorService {
         queuedReplyEnqueue = { allowed: reason === null, reason };
       }
       const summary = sendBusinessSummary(root, intent, executions, segments, blockCode, modeState.mode === 'CONTROLLED', continuing, queuedReplyEnqueue);
+      const legacyRetryRevision = !blockCode && modeState.mode === 'CONTROLLED'
+        ? await this.legacyPostRetryRevision(tx, root) : null;
+      if (legacyRetryRevision) summary.allowedActions.retry.reason = 'LEGACY_POST_RETRY_REVIEW_REQUIRED';
       const serverNow = new Date();
       let nextSendNotBefore: Date | null = null;
       let blockingExecutionId: string | null = null;
@@ -230,7 +255,7 @@ export class SendCoordinatorService {
         }
       }
       // This is a known lower bound, never a send permit or an exact execution estimate.
-      return { ...summary, timing: { serverNow, nextSendNotBefore, reason,
+      return { ...summary, ...(legacyRetryRevision ? { legacyRetryRevision } : {}), timing: { serverNow, nextSendNotBefore, reason,
         ...(blockingExecutionId ? { blockingExecutionId } : {}),
       } };
     });
@@ -1044,6 +1069,14 @@ export class SendCoordinatorService {
     await this.enabled(org);
     const now = options.now ?? new Date();
     const requestedAt = options.publishNow ? new Date() : null;
+    const legacyRetry = options.legacyRetry;
+    if (legacyRetry && (options.origin !== 'MANUAL' || !requestedAt || options.selection ||
+        options.sentReplyId || options.modeHandover || (options.action && options.action !== 'POST') ||
+        typeof legacyRetry.requestId !== 'string' || !legacyRetry.requestId.trim() || legacyRetry.requestId.length > 128 ||
+        typeof legacyRetry.integrationId !== 'string' || !legacyRetry.integrationId.trim() || legacyRetry.integrationId.length > 128 ||
+        typeof legacyRetry.expectedRecoveryRevision !== 'string' || !/^[a-f0-9]{64}$/.test(legacyRetry.expectedRecoveryRevision) ||
+        legacyRetry.reviewedNotSent !== true || legacyRetry.draftsClosed !== true))
+      reject('INVALID_LEGACY_POST_RETRY');
     const root = await this.db.post.findFirst({
       where: { id: rootId, organizationId: org, deletedAt: null },
     });
@@ -1054,9 +1087,25 @@ export class SendCoordinatorService {
       await this.assertControlledIn(tx, org);
       const posts = await this.chain(tx, org, rootId);
       const first = posts[0];
+      const legacyKey = legacyRetry ? {
+        organizationId: org, userId: options.userId, operation: `legacy-post-retry:${rootId}`, requestId: legacyRetry.requestId,
+      } : null;
+      const legacyFingerprint = legacyRetry ? sendHash(legacyRetry) : null;
+      if (legacyKey) {
+        await this.assertMember(tx, org, options.userId);
+        const prior = await tx.sendMutationReceipt.findUnique({ where: { organizationId_userId_operation_requestId: legacyKey } });
+        if (prior) {
+          if (prior.requestHash !== legacyFingerprint) reject('REQUEST_ID_CONFLICT');
+          if (first.sendIntentId !== (prior.result as { sendIntentId?: string })?.sendIntentId) reject('SEND_CONTENT_CHANGED');
+          return first;
+        }
+      }
       if (posts.some(post => post.executionProtocol === 'LEGACY_QUARANTINED')) reject('LEGACY_CONTENT_QUARANTINED');
       const activeLegacy = new Set(await this.modes.activeLegacyPostIdsIn(tx, org));
       if (posts.some(post => activeLegacy.has(post.id))) reject('LEGACY_CONTENT_DRAIN_REQUIRED');
+      if (legacyRetry && (posts.length !== 1 || first.projectId !== root.projectId ||
+          await this.legacyPostRetryRevision(tx, first) !== legacyRetry.expectedRecoveryRevision))
+        reject('SEND_RETRY_UNSAFE');
       if (options.modeHandover) {
         if (!first.sendIntentId) {
           if (first.state !== 'QUEUE') reject('CONTENT_NOT_ENQUEUEABLE');
@@ -1150,7 +1199,7 @@ export class SendCoordinatorService {
       if (
         posts.some(
           (p) =>
-            !['DRAFT', 'QUEUE'].includes(p.state) ||
+            (!['DRAFT', 'QUEUE'].includes(p.state) && !(legacyRetry && p.state === 'ERROR')) ||
             p.sendIntentId ||
             p.releaseId
         )
@@ -1242,15 +1291,17 @@ export class SendCoordinatorService {
         first.projectId!,
         canonicalControlledPlatform(first.providerIdentifier!),
         action,
-        options.explicitIntegrationId ??
+        legacyRetry?.integrationId ?? options.explicitIntegrationId ??
           (first.accountSelectionMode === 'EXPLICIT'
             ? first.integrationId ?? undefined
             : undefined),
-        policy.requirePreselectedAccount === false &&
+        !legacyRetry && policy.requirePreselectedAccount === false &&
           first.accountSelectionMode !== 'EXPLICIT'
       );
       if (first.providerIdentifier === 'linkedin-page' && route?.providerIdentifier !== 'linkedin-page')
         throw new BadRequestException('LINKEDIN_COMPANY_ACCOUNT_REQUIRED');
+      if (legacyRetry && route?.integrationId !== legacyRetry.integrationId) reject('SEND_BINDING_REQUIRED');
+      const routeRevision = first.routeRevision + (legacyRetry ? 1 : 0);
       // Enroll controlled sending without changing an existing account switch.
       if (route) await this.enrollAccountIn(tx, org, route.integrationId, route.canonicalAccountKey);
       const intentData = {
@@ -1265,7 +1316,7 @@ export class SendCoordinatorService {
           integrationId: route?.integrationId ?? null,
           canonicalAccountKey: route?.canonicalAccountKey ?? null,
           target: route ? sendJson(route.targetAccount) : Prisma.DbNull,
-          routeRevision: first.routeRevision,
+          routeRevision,
           contentRevision: first.contentRevision,
           policySnapshot: sendJson(policy),
           ...(options.context || reply || ((options.publishNow || readPublishNowRequestedAt(first.sendTarget)) && action === 'POST')
@@ -1290,6 +1341,7 @@ export class SendCoordinatorService {
             id: post.id,
             sendIntentId: null,
             releaseId: null,
+            ...(legacyRetry ? { state: 'ERROR', releaseURL: null, claimedAt: post.claimedAt, routeRevision: post.routeRevision, contentRevision: post.contentRevision } : {}),
           },
           data: {
             contentUnitId: unit,
@@ -1302,8 +1354,9 @@ export class SendCoordinatorService {
             accountResolution: route ? 'RESOLVED' : 'AWAITING_CURRENT_ACTOR',
             bindingSource: route?.bindingSource ?? 'CURRENT_SESSION',
             bindingSourceRevision: route?.bindingRevision ?? null,
-            routeRevision: first.routeRevision,
+            routeRevision,
             state: 'QUEUE',
+            ...(legacyRetry ? { error: null, claimedAt: null } : {}),
             ...(options.publishNow && action === 'POST'
               ? { publishDate: requestedAt! }
               : options.publishDate ? { publishDate: options.publishDate } : {}),
@@ -1312,7 +1365,7 @@ export class SendCoordinatorService {
             publishMethod: 'EXTENSION',
             accountSelectionMode: !route
               ? 'CURRENT_SESSION'
-              : options.explicitIntegrationId ||
+              : legacyRetry || options.explicitIntegrationId ||
                 first.accountSelectionMode === 'EXPLICIT'
               ? 'EXPLICIT'
               : 'INHERIT',
@@ -1322,6 +1375,12 @@ export class SendCoordinatorService {
       }
       if (receiptRequestId) await tx.sendMutationReceipt.create({
         data: { ...receiptKey, requestHash: fingerprint, result: { rootPostId: rootId, sendIntentId: intent.id } },
+      });
+      if (legacyKey && legacyFingerprint && legacyRetry) await tx.sendMutationReceipt.create({
+        data: { ...legacyKey, requestHash: legacyFingerprint, result: sendJson({
+          rootPostId: rootId, sendIntentId: intent.id, previousError: first.error, previousClaimedAt: first.claimedAt?.toISOString() ?? null,
+          previousPublishDate: first.publishDate.toISOString(), ...legacyRetry,
+        }) },
       });
       return tx.post.findUniqueOrThrow({ where: { id: rootId } });
     });

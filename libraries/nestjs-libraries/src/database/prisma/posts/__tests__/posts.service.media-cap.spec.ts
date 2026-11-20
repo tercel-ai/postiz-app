@@ -69,3 +69,12 @@ describe('PostsService read paths cap media to one video', () => {
     ]);
   });
 });
+
+it('can normalize media for a Post Now read without allowing persistence', async () => {
+  const postRepository = { getPost: vi.fn().mockResolvedValue(baseRow()) };
+  const service = createService(postRepository);
+  const normalization = vi.spyOn(service, 'updateMedia');
+  const result = await service.getPost('org-1', 'post-1', false, 'proj-1', false);
+  expect(result.posts[0].image).toHaveLength(1);
+  expect(normalization).toHaveBeenCalledWith('post-1', expect.any(Array), false, false);
+});

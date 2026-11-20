@@ -842,3 +842,53 @@ rewriting its original event or settling quota again. Outcome event
 deduplication, original ownership, and retry eligibility apply as before. Legacy URL-as-ID events remain readable and accepted. Deploy this
 backend before the extension that emits URL-only receipts. No migration is
 required.
+
+### Attended recovery of an unbound legacy failed Post
+
+`GET /posts/:id` and group detail expose `legacyRetryRevision` and
+`allowedActions.retry.reason = LEGACY_POST_RETRY_REVIEW_REQUIRED` for eligible
+unbound legacy calendar extension failures while controlled sending is active.
+The revision binds the reviewed original content, error, and claim snapshot.
+Post Now uses the existing `projectId` query scope and opt-in `readOnly=true`
+to load that detail without persisting media normalization. Ordinary detail
+requests retain their existing normalization behavior.
+`POST /posts/:id/retry` accepts `type: "now"` and an optional `legacyReview` with
+`requestId`, `expectedRecoveryRevision`, `integrationId`, `reviewedNotSent: true`,
+and `draftsClosed: true`. The user reviews the original platform attempt and
+confirms the account for the new send. Stored error text or a cleared claim
+alone cannot establish non-submission.
+
+Recovery is scoped to an active project and organization member, one legacy
+calendar root with no thread, recurrence, integration, intent or publication
+evidence, and no protected legacy writer or unresolved autonomous receipt.
+A recent browser claim remains protected through the existing lease window even
+if an old failure callback already cleared its release ID.
+The coordinator rechecks eligibility, resolves the account and queues the same
+Post via ordinary controlled admission. One existing SendMutationReceipt
+retains the failure, historical claim, review, account and request identity.
+Accepted recovery returns `accepted: true` with the same Post and SendIntent
+IDs and its current state. A replay can therefore acknowledge a retry that has
+already moved beyond QUEUE.
+Normal claims, platform pacing, quotas, author verification and callback fencing
+apply. The ordinary retry request is compatible with existing clients. There is
+no schema change, backfill or automatic historical replay. The website reads the
+original Post detail for send decisions. Calendar and table list contracts are
+unchanged. Full content edits still use `POST /posts`; scheduling an existing
+eligible Post uses `POST /posts/schedule`.
+
+### Website Post Now after an unconfirmed controlled attempt
+
+The website sends the original root, intent and execution IDs and the current
+project and principal to the installed extension. The worker checks the
+frontend origin and authenticated identity, validates the saved root and
+current execution using the existing project-scoped read-only detail, and
+reconciles that execution through the existing node and lease. It does not
+attest non-submission or request an uncertain retry on behalf of the page.
+After the check, the website re-reads `GET /posts/:id?projectId=…&readOnly=true`.
+It requests `POST /posts/:id/retry` with `type: "now"` only for the same
+definitely-unsent execution and revisions, with ordinary retry eligibility in
+both the extension and server. Confirmed publication refreshes the website.
+Remaining uncertainty requires the existing recovery path. The check adds no
+backend route or database migration. The updated website and standalone
+extension use the existing backend detail, ownership, settlement and retry
+contracts.
