@@ -27,6 +27,7 @@ import {
   StopSendDto,
   StartSendDto,
   ReconcileSendDto,
+  ResumeXThreadDto,
   VerifySavedReplyDto,
   ReviewPostNotSentDto,
   RetryUnconfirmedPostDto,
@@ -73,6 +74,16 @@ export class SendExecutionsController {
     @Body() body: ClaimSendDto
   ) {
     return this.sends.claim(this.auth(org, user, headers), body);
+  }
+  @Get('/:id/resume-thread')
+  threadResumeEligibility(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User,
+    @Headers() headers: Record<string, string>, @Param('id') id: string) {
+    return this.sends.threadResume(this.auth(org, user, headers), id, headers['x-send-lease-token']);
+  }
+  @Post('/:id/resume-thread')
+  resumeThread(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User,
+    @Headers() headers: Record<string, string>, @Param('id') id: string, @Body() body: ResumeXThreadDto) {
+    return this.sends.threadResume(this.auth(org, user, headers), id, headers['x-send-lease-token'], body.expectedResolutionRevision);
   }
   @Post('/:id/renew')
   renew(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User, @Headers() headers: Record<string, string>, @Param('id') id: string) {

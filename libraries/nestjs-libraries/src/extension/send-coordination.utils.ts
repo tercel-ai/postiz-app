@@ -151,25 +151,37 @@ export function isNativeXThread(execution: SendExecution): boolean {
     Array.isArray(execution.payload) && execution.payload.length > 1;
 }
 
-/** Only an untouched suffix may wait beyond the original preparation deadline. */
-export async function pacedXThreadContinuation(
-  tx: Prisma.TransactionClient, execution: SendExecution,
-  segments: Pick<SendSegment, 'segmentIndex' | 'status' | 'authorizedAt' | 'submitBefore' | 'permitHash' | 'result'>[],
-  account: AccountWriteState | null, now: Date
-) {
-  if (!isNativeXThread(execution) || execution.status !== 'SENDING' ||
-      account?.activeExecutionId !== execution.id || !account.rolloutReady || !account.nextWriteNotBefore ||
-      !Array.isArray(execution.payload) || segments.length !== execution.payload.length) return;
+type ThreadSegment = Pick<SendSegment, 'segmentIndex' | 'status' | 'authorizedAt' | 'submitBefore' | 'permitHash' | 'result'>;
+
+/** An untouched suffix follows a contiguous prefix of native X confirmations. */
+export function untouchedXThreadSuffix(execution: SendExecution, segments: ThreadSegment[]): number | undefined {
+  if (!isNativeXThread(execution) || !Array.isArray(execution.payload) ||
+      segments.length !== execution.payload.length) return;
   const index = segments.filter(segment => segment.status === 'CONFIRMED').length;
   if (index === 0 || index === segments.length || !segments.every(segment => segment.segmentIndex < index
     ? segment.status === 'CONFIRMED' && /^[1-9][0-9]*$/.test((segment.result as { platformId?: string } | null)?.platformId ?? '')
     : segment.status === 'PENDING' && !segment.authorizedAt && !segment.submitBefore && !segment.permitHash && segment.result == null)) return;
+  return index;
+}
+
+/** Only an untouched suffix may wait beyond the original preparation deadline. */
+export async function pacedXThreadContinuation(
+  tx: Prisma.TransactionClient, execution: SendExecution,
+  segments: ThreadSegment[],
+  account: AccountWriteState | null, now: Date
+) {
+  if (execution.status !== 'SENDING' || account?.activeExecutionId !== execution.id ||
+      !account.rolloutReady || !account.nextWriteNotBefore) return;
+  const index = untouchedXThreadSuffix(execution, segments);
+  if (index === undefined) return;
 
   const settings = await tx.settings.findUnique({ where: { key: 'platform_pacing' }, select: { value: true } });
   const pacing = sanitizePlatformPacing(settings?.value);
   // Later segments use the platform write floor. The confirmed Post's gap is already in the stored clock.
   const gapMs = Math.ceil(resolvePacingRangeMs(pacing, execution.platform, 'write')[0]);
-  const floor = accountWriteNotBefore(account, gapMs) ?? account.nextWriteNotBefore;
+  const accountFloor = accountWriteNotBefore(account, gapMs) ?? account.nextWriteNotBefore;
+  // Reopening records a fresh preparation start without rewriting the account cooldown.
+  const floor = new Date(Math.max(accountFloor.getTime(), execution.lastProgressAt?.getTime() ?? 0));
   const window = resolvePacingWindow(pacing, execution.platform);
   const timing = window ? writeWindowPreparation(window, floor, SEND_PREPARATION_LIMIT_MS, now, X_THREAD_MIN_PERMIT_MS)
     : { notBefore: floor, deadline: floor.getTime() + SEND_PREPARATION_LIMIT_MS, windowEnd: undefined };

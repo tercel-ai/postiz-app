@@ -287,6 +287,28 @@ export class SendCoordinatorService {
     return this.policies.getSystem(tx);
   }
 
+  // Recovery acquires the same account slot as a normal write. Validate its route first.
+  async assertXThreadResumeAccountIn(tx: Prisma.TransactionClient, execution: SendExecution, intent: SendIntent) {
+    const org = execution.organizationId;
+    await this.verifyPolicyIn(tx);
+    if (await this.modes.legacyAccountBlockedIn(tx, org, execution.integrationId))
+      reject('LEGACY_ACCOUNT_DRAIN_REQUIRED');
+    const owner = (intent.policySnapshot as { policyOwnerUserId?: string }).policyOwnerUserId;
+    if (!owner) throw new ForbiddenException('SEND_POLICY_OWNER_UNAVAILABLE');
+    await this.assertMember(tx, org, owner);
+    const [integration, relation] = await Promise.all([
+      tx.integration.findFirst({ where: { id: execution.integrationId, organizationId: org, disabled: false, deletedAt: null } }),
+      tx.integrationProject.findFirst({ where: {
+        organizationId: org, projectId: execution.projectId, integrationId: execution.integrationId, disabled: false,
+      } }),
+    ]);
+    if (!integration || integration.inBetweenSteps || !relation ||
+        !matchesSendActor(execution.target as unknown as SendActor, {
+          id: integration.internalId, idNamespace: integration.identityNamespace!,
+        }))
+      throw new ForbiddenException('SEND_ACCOUNT_UNAVAILABLE');
+  }
+
   async claimProjectActive(org: string, project: string) {
     try {
       await this.projects.assertProjectActive(org, project);

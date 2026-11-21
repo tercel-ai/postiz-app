@@ -1004,3 +1004,11 @@ issuing the next permit. An expired preparation window releases occupancy and
 leaves the incomplete original in reconciliation. Already uncertain writes,
 legacy draft exposure, standalone Reply and historical reconciliation retain
 their original recovery and pacing rules.
+
+### Attended X thread continuation
+
+Reopening an expired partial X Post requires current CONTROLLED mode, an
+organization superadministrator in the original authenticated browser and an
+idle rollout-ready account. Controlled drain and AUTONOMOUS cannot reopen the
+execution. The existing pacing and quota checks apply when each remaining part
+is authorized. Uncertain submissions stay in reconciliation.

@@ -939,7 +939,29 @@ segment start grants no permit and leaves the segment pending. After a local
 journal failure, the original authenticated state can retire only a matching
 unpermitted preparation before a fresh one-shot start. Retry remains
 blocked once any segment is confirmed. Historical reconciliations keep their
-original evidence and status. The existing administrator endpoint resolves
-supported evidence and cannot reopen a thread with an untouched suffix.
+original evidence and require an explicit administrator review to reopen an
+eligible untouched suffix.
 Deploy the backend first. Older clients retain their original restart
 behavior. No schema migration or API field is required.
+
+### Administrator resume of an untouched X thread
+
+In the original browser, an authenticated organization superadministrator can
+preview and resume a reconciled native X Post at
+`GET /extension/send-attempts/:id/resume-thread` and
+`POST /extension/send-attempts/:id/resume-thread`. Preview exposes the confirmed
+platform IDs and the current resolution revision. Resume requires that revision
+as `expectedResolutionRevision` and `reviewedRemainingAbsent: true` after review
+on X. Existing browser node and lease authentication both apply.
+
+The transaction rechecks active intent and revisions, the original account
+route and verified browser session, an idle rollout-ready account with no legacy
+writer, a confirmed prefix, and an untouched suffix with no permit, exposed
+draft, quota reservation or outcome. It records the administrator request and
+reuses the original execution and confirmed receipts. The first pending segment
+uses a fresh preparation start and must pass ordinary preflight, pacing and quota
+checks before the server can authorize it. Status for a resumed execution adds
+`resumedXThread: true` so the extension can defer while the original X login is
+unavailable. Concurrent or stale requests cannot
+reopen a different revision. Deploy the backend before the extension. No
+database migration is required.

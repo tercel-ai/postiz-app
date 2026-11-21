@@ -808,3 +808,11 @@ clock. A clean incomplete thread that misses its preparation window releases
 the account and enters reconciliation. An expired permit still enters the
 original UNKNOWN recovery path. AUTONOMOUS current-session sending, Engage
 Reply, and older clients without native opt-in keep their existing paths.
+
+### Attended continuation of an older X thread
+
+The original browser can offer **Resume remaining parts** after an administrator
+checks status and verifies the live thread on X. The backend reopens only an
+old reconciled native X Post with confirmed receipts and an untouched suffix,
+then reacquires the original account slot. The same manifest and segment loop
+continue from the first pending part when its permit becomes eligible.

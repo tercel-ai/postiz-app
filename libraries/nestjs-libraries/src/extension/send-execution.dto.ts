@@ -43,6 +43,11 @@ export class StopSendDto {
   @IsString() @MaxLength(40) executorStoppedAt: string;
 }
 
+export class ResumeXThreadDto {
+  @IsInt() @Min(0) expectedResolutionRevision: number;
+  @IsIn([true]) reviewedRemainingAbsent: true;
+}
+
 export class ReconcileSendDto extends SendOutcomeDto {
   @IsInt() @Min(0) expectedResolutionRevision: number;
   // Required for an administrator to confirm an X write that had no submit permit.

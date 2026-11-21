@@ -4,6 +4,7 @@ import { StartSendDto, StopSendDto } from './send-execution.dto';
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -18,9 +19,14 @@ import {
   sendHash,
   sendLease,
   sendPreflightChallenge,
+  sendJson,
   sendTransaction,
   SEND_PREPARATION_LIMIT_MS,
   pacedXThreadContinuation,
+  untouchedXThreadSuffix,
+  isNativeXThread,
+  postSendHash,
+  matchesSendActor,
 } from './send-coordination.utils';
 
 export interface NodeAuthentication {
@@ -90,6 +96,109 @@ export class SendExecutionService {
     )
       throw new ConflictException('SEND_LEASE_AUTHENTICATION_FAILED');
     return { execution, node };
+  }
+
+  async threadResume(auth: NodeAuthentication, id: string, lease: string, expectedRevision?: number) {
+    await this.sends.assertProjectSendActive(auth.org, id);
+    return sendTransaction(this.db, async tx => {
+      // Reopening creates new authority. It cannot run in an autonomous drain.
+      if (expectedRevision !== undefined) await this.sends.assertControlledIn(tx, auth.org);
+      else if (!await this.sends.isControlled(auth.org, tx))
+        throw new ConflictException('SEND_MODE_CONTROLLED_REQUIRED');
+      const { execution, node } = await this.authenticate(tx, auth, id, lease);
+      const admin = await tx.user.findUnique({ where: { id: auth.user }, select: { isSuperAdmin: true } });
+      if (!admin?.isSuperAdmin) throw new ForbiddenException('SEND_RECONCILIATION_PERMISSION_REQUIRED');
+      const now = new Date();
+      if (execution.status !== 'RECONCILING' || execution.lastProgressAt > now ||
+          execution.leaseExpiresAt > execution.lastProgressAt ||
+          execution.createdAt.getTime() + SEND_PREPARATION_LIMIT_MS > execution.lastProgressAt.getTime())
+        throw new ConflictException('SEND_X_THREAD_RESUME_UNAVAILABLE');
+      if (expectedRevision !== undefined && expectedRevision !== execution.resolutionRevision)
+        throw new ConflictException('SEND_RESOLUTION_REVISION_CONFLICT');
+
+      const [intent, account, segments] = await Promise.all([
+        tx.sendIntent.findUniqueOrThrow({ where: { id: execution.sendIntentId } }),
+        tx.accountWriteState.findUnique({ where: { organizationId_canonicalAccountKey: {
+          organizationId: auth.org, canonicalAccountKey: execution.canonicalAccountKey,
+        } } }),
+        tx.sendSegment.findMany({ where: { executionId: id, organizationId: auth.org }, orderBy: { segmentIndex: 'asc' } }),
+      ]);
+      const index = untouchedXThreadSuffix(execution, segments);
+      if (index === undefined || intent.organizationId !== auth.org || intent.projectId !== execution.projectId ||
+          intent.platform !== 'x' || intent.action !== 'POST' || intent.status !== 'RECONCILING' ||
+          intent.activeExecutionId !== id || !intent.hasConfirmedSegments ||
+          intent.fencingVersion !== execution.fencingVersion || intent.routeRevision !== execution.routeRevision ||
+          intent.contentRevision !== execution.contentRevision || intent.integrationId !== execution.integrationId ||
+          intent.canonicalAccountKey !== execution.canonicalAccountKey ||
+          !account?.rolloutReady || !account.nextWriteNotBefore || account.activeExecutionId ||
+          segments.some((segment, i) => segment.segmentIndex !== i ||
+            (i < index ? !segment.confirmedAt : !!segment.confirmedAt)))
+        throw new ConflictException('SEND_X_THREAD_RESUME_UNAVAILABLE');
+
+      await this.sends.assertXThreadResumeAccountIn(tx, execution, intent);
+      const caps = (node.capabilities as { x?: { strictAccountVerification?: boolean; post?: boolean } } | null)?.x;
+      const target = execution.target as { id: string; idNamespace: string };
+      const session = await tx.extensionNodeSession.findUnique({ where: { extensionNodeId_platform: {
+        extensionNodeId: node.id, platform: 'x', actorKey: sessionActorKey(),
+      } } });
+      const identity = session?.accountIdentity as { id: string; namespace: string } | null;
+      if (!caps?.strictAccountVerification || caps.post !== true || !session ||
+          session.verificationStatus !== 'VERIFIED' || session.integrationId !== execution.integrationId ||
+          !identity || !matchesSendActor(target, { id: identity.id, idNamespace: identity.namespace }))
+        throw new ConflictException('FRESH_SEND_PREFLIGHT_REQUIRED');
+
+      const historicalEvidence = await tx.sendOutcomeEvent.findFirst({ where: {
+        organizationId: auth.org,
+        OR: [
+          { executionId: id, segmentIndex: { gte: index } },
+          { execution: { canonicalAccountKey: execution.canonicalAccountKey },
+            createdAt: { gte: segments[0].confirmedAt! }, result: { path: ['conflict'], equals: true } },
+        ],
+      }, select: { id: true } });
+      const historicalQuota = await tx.sendQuotaReservation.findFirst({ where: {
+        organizationId: auth.org, executionId: id, segmentIndex: { gte: index },
+      }, select: { id: true } });
+      if (historicalEvidence || historicalQuota)
+        throw new ConflictException('SEND_X_THREAD_RESUME_UNAVAILABLE');
+
+      const confirmedPlatformIds = segments.slice(0, index).map(segment => (segment.result as { platformId: string }).platformId);
+      const posts = await tx.post.findMany({ where: {
+        id: { in: segments.map(segment => segment.postId) }, organizationId: auth.org,
+        projectId: execution.projectId, sendIntentId: intent.id, deletedAt: null, removedAt: null,
+      } });
+      if (intent.rootPostId !== segments[0].postId || posts.length !== segments.length ||
+          segments.some((segment, i) => {
+            const post = posts.find(candidate => candidate.id === segment.postId);
+            return !post || (i < index
+              ? post.state !== 'PUBLISHED' || post.releaseId !== confirmedPlatformIds[i]
+              : post.state === 'PUBLISHED' || !!post.releaseId || !!post.releaseURL || postSendHash(post) !== segment.contentHash);
+          }))
+        throw new ConflictException('SEND_X_THREAD_RESUME_UNAVAILABLE');
+      if (expectedRevision === undefined) return { confirmedPlatformIds, resolutionRevision: execution.resolutionRevision };
+
+      // Clear stale challenges for the untouched suffix; the next start still requires live account proof.
+      await tx.sendSegment.updateMany({ where: { executionId: id, organizationId: auth.org, segmentIndex: { gte: index }, status: 'PENDING' },
+        data: { challengeHash: null, challengeIssuedAt: null, challengeExpiresAt: null,
+          evidenceSessionRevision: null, evidenceObservedAt: null, probeId: null } });
+      const acquired = await tx.accountWriteState.updateMany({
+        where: { id: account.id, revision: account.revision, activeExecutionId: null, rolloutReady: true },
+        data: { activeExecutionId: id, revision: { increment: 1 } },
+      });
+      if (acquired.count !== 1) throw new ConflictException('ACCOUNT_WRITE_BUSY');
+      await tx.sendIntent.update({
+        where: { id: intent.id }, data: { status: 'SENDING', revision: { increment: 1 } },
+      });
+      await tx.sendExecution.update({ where: { id }, data: {
+        status: 'SENDING', leaseExpiresAt: new Date(now.getTime() + 120_000), lastProgressAt: now,
+        resolutionRevision: { increment: 1 },
+      } });
+      await tx.sendMutationReceipt.create({ data: {
+        organizationId: auth.org, userId: auth.user, operation: 'resume-x-thread',
+        requestId: `${id}:${expectedRevision}`, requestHash: sendHash([id, expectedRevision]),
+        result: sendJson({ executionId: id, nextSegmentIndex: index, status: 'SENDING', reviewedRemainingAbsent: true }),
+      } });
+      return { status: 'SENDING' as const };
+    }, { backoffOnConflict: true });
   }
 
   async renew(auth: NodeAuthentication, id: string, lease: string) {
@@ -426,7 +535,12 @@ export class SendExecutionService {
       }
       const serverNow = new Date();
       const continuation = await pacedXThreadContinuation(tx, execution, segments, account, serverNow);
+      const resumedXThread = execution.status === 'SENDING' && execution.resolutionRevision > 0 &&
+        isNativeXThread(execution) && await tx.sendMutationReceipt.findFirst({ where: {
+          organizationId: auth.org, userId: auth.user, operation: 'resume-x-thread', requestId: { startsWith: `${id}:` },
+        }, select: { id: true } });
       return {
+        ...(resumedXThread ? { resumedXThread: true as const } : {}),
         executionId: id,
         status: execution.status,
         segments: segments.map(({ permitHash, ...segment }) => segment),

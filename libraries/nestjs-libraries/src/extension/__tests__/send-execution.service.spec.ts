@@ -428,6 +428,115 @@ it('quarantines a later writer when an old no-permit draft reports uncertainty',
 });
 
 
+describe('administrator resume of an untouched X thread suffix', () => {
+  async function stoppedThread() {
+    const f = fixture();
+    await f.create('root', 'EXTENSION');
+    for (let index = 1; index < 4; index++) {
+      f.db.seed('post', { ...f.db.rows('post')[0], id: `child-${index}`,
+        parentPostId: index === 1 ? 'root' : `child-${index - 1}`, content: `part ${index + 1}` });
+    }
+    const [item] = (await f.executions.claim(auth, {
+      requestId: 'thread', action: 'POST', authorizationMode: 'NATIVE_FLOW_V1',
+    })).items;
+    await f.proof(item);
+    const permit = await f.executions.start(auth, item.executionId, 0, item.leaseToken, { authorizationMode: 'NATIVE_FLOW_V1' });
+    expect(permit).toMatchObject({ granted: true });
+    await f.executions.outcome(auth, item.executionId, 0, item.leaseToken, {
+      eventId: 'first', status: 'confirmed', platformId: '321', url: 'https://x.com/alice/status/321',
+    });
+    vi.setSystemTime(new Date(now.getTime() + 8 * 60 * 60_000));
+    Object.assign(f.db.rows('sendExecution')[0], { status: 'RECONCILING', lastProgressAt: new Date() });
+    f.db.rows('sendIntent')[0].status = 'RECONCILING';
+    f.db.rows('accountWriteState')[0].activeExecutionId = null;
+    f.db.seed('user', { id: 'user', isSuperAdmin: true });
+    return { ...f, item };
+  }
+
+  it('reopens the same execution, preserving the prefix and issuing authority only for a pending part', async () => {
+    const { db, executions, item, quotas } = await stoppedThread();
+    const first = structuredClone(db.rows('sendSegment')[0]);
+    const cooldown = db.rows('accountWriteState')[0].nextWriteNotBefore;
+    const revision = db.rows('sendExecution')[0].resolutionRevision;
+    await expect(executions.threadResume(auth, item.executionId, item.leaseToken))
+      .resolves.toEqual({ confirmedPlatformIds: ['321'], resolutionRevision: revision });
+    await expect(executions.threadResume(auth, item.executionId, item.leaseToken, revision))
+      .resolves.toMatchObject({ status: 'SENDING' });
+    await expect(executions.threadResume(auth, item.executionId, item.leaseToken, revision))
+      .rejects.toThrow('SEND_X_THREAD_RESUME_UNAVAILABLE');
+    expect(db.rows('sendExecution')).toHaveLength(1);
+    expect(db.rows('sendIntent')[0]).toMatchObject({ status: 'SENDING', hasConfirmedSegments: true, activeExecutionId: item.executionId });
+    expect(db.rows('accountWriteState')[0]).toMatchObject({ activeExecutionId: item.executionId, nextWriteNotBefore: cooldown });
+    expect(db.rows('sendSegment')[0]).toEqual(first);
+    expect(db.rows('sendSegment').map(segment => segment.status)).toEqual(['CONFIRMED', 'PENDING', 'PENDING', 'PENDING']);
+    await expect(executions.start(auth, item.executionId, 0, item.leaseToken, { authorizationMode: 'NATIVE_FLOW_V1' }))
+      .resolves.toEqual({ granted: false, status: 'CONFIRMED' });
+    await executions.preflight(auth, item.executionId, 1, item.leaseToken);
+    const next = db.rows('sendSegment')[1];
+    db.rows('extensionNodeSession')[0].probeId = 'next';
+    Object.assign(next, { probeId: 'next', evidenceSessionRevision: 1, evidenceObservedAt: new Date() });
+    await expect(executions.start(auth, item.executionId, 1, item.leaseToken, { authorizationMode: 'NATIVE_FLOW_V1' }))
+      .rejects.toThrow('SEND_QUOTA_EXHAUSTED');
+    const laterPlan = await quotas.resolve(db as any, db.rows('sendIntent')[0], db.rows('accountWriteState')[0], 1, new Date());
+    quotas.resolve.mockResolvedValueOnce({ ...laterPlan, budgets: [] });
+    await expect(executions.start(auth, item.executionId, 1, item.leaseToken, { authorizationMode: 'NATIVE_FLOW_V1' }))
+      .resolves.toMatchObject({ granted: true });
+    expect(db.rows('sendSegment').map(segment => segment.status)).toEqual(['CONFIRMED', 'AUTHORIZED', 'PENDING', 'PENDING']);
+  });
+
+  it.each(['disabled integration', 'disabled project relation', 'legacy writer', 'unverified browser account'])(
+    'rejects a resume with a %s before acquiring the account', async reason => {
+      const { db, executions, item } = await stoppedThread();
+      if (reason === 'disabled integration') db.rows('integration')[0].disabled = true;
+      if (reason === 'disabled project relation') db.rows('integrationProject')[0].disabled = true;
+      if (reason === 'unverified browser account') db.rows('extensionNodeSession')[0].verificationStatus = 'UNKNOWN';
+      if (reason === 'legacy writer') db.seed('post', { id: 'live-legacy-writer', organizationId: 'org', state: 'QUEUE',
+        publishMethod: 'EXTENSION', providerIdentifier: 'x', integrationId: 'account',
+        releaseId: 'legacy-lease', claimedAt: new Date(), publishDate: new Date() });
+      await expect(executions.threadResume(auth, item.executionId, item.leaseToken, 0)).rejects.toThrow();
+      expect(db.rows('accountWriteState')[0].activeExecutionId).toBeNull();
+      expect(db.rows('sendExecution')[0].status).toBe('RECONCILING');
+      expect(db.rows('sendSegment').map(segment => segment.status)).toEqual(['CONFIRMED', 'PENDING', 'PENDING', 'PENDING']);
+    }
+  );
+
+  it('keeps the suffix pending while a resumed thread is outside the X write window', async () => {
+    const { db, executions, item } = await stoppedThread();
+    db.seed('settings', { key: 'platform_pacing', value: {
+      default: { window: { windowStart: '22:00', windowEnd: '23:00', timezone: 'UTC' } },
+    } });
+    await executions.threadResume(auth, item.executionId, item.leaseToken, 0);
+    const state = await executions.status(auth, item.executionId, item.leaseToken);
+    expect(new Date(state.nextWriteNotBefore!).getTime()).toBeGreaterThan(Date.now());
+    await executions.preflight(auth, item.executionId, 1, item.leaseToken);
+    db.rows('extensionNodeSession')[0].probeId = 'next';
+    Object.assign(db.rows('sendSegment')[1], { probeId: 'next', evidenceSessionRevision: 1, evidenceObservedAt: new Date() });
+    await expect(executions.start(auth, item.executionId, 1, item.leaseToken, { authorizationMode: 'NATIVE_FLOW_V1' }))
+      .rejects.toThrow('PLATFORM_WRITE_WINDOW_CLOSED');
+    expect(db.rows('sendSegment').map(segment => segment.status)).toEqual(['CONFIRMED', 'PENDING', 'PENDING', 'PENDING']);
+  });
+
+  it.each(['uncertain', 'exposed', 'issued permit', 'busy account', 'wrong lease', 'non-admin', 'changed receipt', 'autonomous mode'])(
+    'keeps reconciliation when there is a %s', async reason => {
+      const { db, executions, item } = await stoppedThread();
+      const next = db.rows('sendSegment')[1];
+      if (reason === 'uncertain') next.status = 'UNKNOWN';
+      if (reason === 'exposed') next.result = { status: 'draft_exposed' };
+      if (reason === 'issued permit') next.permitHash = 'historical-permit';
+      if (reason === 'busy account') db.rows('accountWriteState')[0].activeExecutionId = 'other';
+      if (reason === 'non-admin') db.rows('user')[0].isSuperAdmin = false;
+      if (reason === 'changed receipt') db.rows('post')[0].releaseId = '999';
+      if (reason === 'autonomous mode') {
+        const setting = db.rows('settings').find(row => row.key === 'sending.organization_mode:org')!;
+        setting.value = { mode: 'AUTONOMOUS', revision: 2 };
+      }
+      await expect(executions.threadResume(auth, item.executionId, reason === 'wrong lease' ? 'wrong' : item.leaseToken, 0)).rejects.toThrow();
+      expect(db.rows('sendExecution')[0].status).toBe('RECONCILING');
+      expect(db.rows('sendIntent')[0].status).toBe('RECONCILING');
+    }
+  );
+});
+
 describe('retained X thread preparation lease', () => {
  it('renews an expired retained writer between confirmed segments before exposing the next draft', async () => {
   const { claim, executions, db }=fixture(); const item=await claim();
