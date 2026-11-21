@@ -55,7 +55,7 @@ Requirements differ by API. Enqueuing a saved Reply needs only `sentReplyId` and
 
 The standalone extension can offer **Review result** for an original uncertain single-post attempt. `GET /sending/executions/:id/posts/:rootPostId/review` returns only eligibility, the current resolution revision, and the target account. `POST /sending/executions/:id/posts/:rootPostId/review-not-sent` accepts an `eventId`, that revision, and explicit `reviewedNotSent: true` and `draftsClosed: true` acknowledgments. The reviewer must inspect the target account and close all original platform drafts before confirming non-submission. A filled composer or an expired lease alone is not proof of non-submission.
 
-This is a narrow attended exception to general execution reconciliation. Only an active organization member who originally owned the intent policy or registered its executor node may use it, with project ownership checked. Both endpoints require the original EXTENSION POST, exactly one matching root payload and segment, matching intent/execution/content/route/fencing scope, no confirmed segment in the intent history, an expired execution lease and either expired submit permission or a persisted pre-permit exposed/unknown draft with no permit fields, and no newer account writer. Unsupported threads and partial publications retain administrator review. The general execution inspection and reconciliation endpoints retain their superadministrator requirement.
+This is a narrow attended exception to general execution reconciliation. Only an active organization member who originally owned the intent policy or registered its executor node may use it, with project ownership checked. Both endpoints require the original EXTENSION POST, exactly one matching root payload and segment, matching intent/execution/content/route/fencing scope, no confirmed segment in the intent history, an expired execution lease and either expired submit permission or a persisted pre-permit exposed/unknown draft with no permit fields, and no newer account writer. Other partial publications retain administrator review. The original sender may use [X thread resume](#original-sender-resume-of-an-untouched-x-thread) for eligible untouched parts. The general execution inspection and reconciliation endpoints retain their superadministrator requirement.
 
 The write rechecks all conditions in the existing serializable send transaction, records an audited `definitely_not_submitted` outcome in the original ledger, settles held quota, and increments the resolution revision. Stable event receipts make acknowledgment retries idempotent while preventing them from resetting a later retry. No platform write or requeue occurs. Only the existing, separately checked `POST /posts/:rootPostId/retry` queues another attempt.
 
@@ -939,25 +939,26 @@ segment start grants no permit and leaves the segment pending. After a local
 journal failure, the original authenticated state can retire only a matching
 unpermitted preparation before a fresh one-shot start. Retry remains
 blocked once any segment is confirmed. Historical reconciliations keep their
-original evidence and require an explicit administrator review to reopen an
+original evidence and require explicit review by the original sender to reopen an
 eligible untouched suffix.
 Deploy the backend first. Older clients retain their original restart
 behavior. No schema migration or API field is required.
 
-### Administrator resume of an untouched X thread
+### Original sender resume of an untouched X thread
 
-In the original browser, an authenticated organization superadministrator can
-preview and resume a reconciled native X Post at
+An active organization member can preview and resume a reconciled native X Post
+using the Aisee account and browser node that owned the original execution at
 `GET /extension/send-attempts/:id/resume-thread` and
 `POST /extension/send-attempts/:id/resume-thread`. Preview exposes the confirmed
 platform IDs and the current resolution revision. Resume requires that revision
 as `expectedResolutionRevision` and `reviewedRemainingAbsent: true` after review
-on X. Existing browser node and lease authentication both apply.
+on X. Authentication checks the original active node, its registered owner and
+the original execution lease.
 
 The transaction rechecks active intent and revisions, the original account
 route and verified browser session, an idle rollout-ready account with no legacy
 writer, a confirmed prefix, and an untouched suffix with no permit, exposed
-draft, quota reservation or outcome. It records the administrator request and
+draft, quota reservation or outcome. It records the original sender's request and
 reuses the original execution and confirmed receipts. The first pending segment
 uses a fresh preparation start and must pass ordinary preflight, pacing and quota
 checks before the server can authorize it. Status for a resumed execution adds

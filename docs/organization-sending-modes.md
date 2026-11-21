@@ -1007,8 +1007,8 @@ their original recovery and pacing rules.
 
 ### Attended X thread continuation
 
-Reopening an expired partial X Post requires current CONTROLLED mode, an
-organization superadministrator in the original authenticated browser and an
-idle rollout-ready account. Controlled drain and AUTONOMOUS cannot reopen the
+Reopening an expired partial X Post requires current CONTROLLED mode, the
+original sending user in their authenticated browser, active organization
+membership and an idle rollout-ready account. Controlled drain and AUTONOMOUS cannot reopen the
 execution. The existing pacing and quota checks apply when each remaining part
 is authorized. Uncertain submissions stay in reconciliation.

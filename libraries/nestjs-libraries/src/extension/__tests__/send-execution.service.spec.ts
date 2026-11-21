@@ -1,5 +1,6 @@
 import { SendModeService } from '../send-mode.service';
-import { hashSecret, sessionActorKey } from '../extension-node.protocol';
+import { ACCOUNT_BOUND_PROTOCOL, hashSecret, sessionActorKey } from '../extension-node.protocol';
+import { ExtensionNodeService } from '../extension-node.service';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupSend, sendNow as now } from './support/send-fixture';
 import { SendExecutionService } from '../send-execution.service';
@@ -428,7 +429,7 @@ it('quarantines a later writer when an old no-permit draft reports uncertainty',
 });
 
 
-describe('administrator resume of an untouched X thread suffix', () => {
+describe('original sender resume of an untouched X thread suffix', () => {
   async function stoppedThread() {
     const f = fixture();
     await f.create('root', 'EXTENSION');
@@ -449,11 +450,15 @@ describe('administrator resume of an untouched X thread suffix', () => {
     Object.assign(f.db.rows('sendExecution')[0], { status: 'RECONCILING', lastProgressAt: new Date() });
     f.db.rows('sendIntent')[0].status = 'RECONCILING';
     f.db.rows('accountWriteState')[0].activeExecutionId = null;
-    f.db.seed('user', { id: 'user', isSuperAdmin: true });
-    return { ...f, item };
+    f.db.seed('user', { id: auth.user, isSuperAdmin: false });
+    Object.assign(f.db.rows('extensionNode')[0], {
+      registeredByUserId: auth.user, protocolVersion: ACCOUNT_BOUND_PROTOCOL, credentialHash: hashSecret(auth.token),
+    });
+    const executions = new SendExecutionService(f.db as any, new ExtensionNodeService(f.db as any), f.service);
+    return { ...f, executions, item };
   }
 
-  it('reopens the same execution, preserving the prefix and issuing authority only for a pending part', async () => {
+  it('lets the original sender without superadmin reopen the same execution for pending parts only', async () => {
     const { db, executions, item, quotas } = await stoppedThread();
     const first = structuredClone(db.rows('sendSegment')[0]);
     const cooldown = db.rows('accountWriteState')[0].nextWriteNotBefore;
@@ -482,6 +487,32 @@ describe('administrator resume of an untouched X thread suffix', () => {
     await expect(executions.start(auth, item.executionId, 1, item.leaseToken, { authorizationMode: 'NATIVE_FLOW_V1' }))
       .resolves.toMatchObject({ granted: true });
     expect(db.rows('sendSegment').map(segment => segment.status)).toEqual(['CONFIRMED', 'AUTHORIZED', 'PENDING', 'PENDING']);
+  });
+
+  it.each([
+    { caller: 'a different member with the original credentials', error: 'NODE_AUTHENTICATION_REQUIRED' },
+    { caller: 'a different member with their own node', error: 'SEND_LEASE_AUTHENTICATION_FAILED' },
+    { caller: 'the original sender after organization membership is disabled', error: 'ORGANIZATION_MEMBERSHIP_REQUIRED' },
+  ])('rejects recovery for $caller', async ({ caller, error }) => {
+    const { db, executions, item } = await stoppedThread();
+    const otherUser = 'other-user';
+    let requester = { ...auth, user: otherUser };
+    db.seed('user', { id: otherUser, isSuperAdmin: true });
+    db.seed('userOrganization', { organizationId: auth.org, userId: otherUser, disabled: false });
+    if (caller === 'a different member with their own node') {
+      requester = { ...requester, nodeId: 'other-node', token: 'other-token' };
+      db.seed('extensionNode', { ...db.rows('extensionNode')[0], id: requester.nodeId, nodeId: requester.nodeId,
+        registeredByUserId: otherUser, credentialHash: hashSecret(requester.token) });
+    }
+    if (caller === 'the original sender after organization membership is disabled') {
+      requester = auth;
+      db.rows('userOrganization').find(row => row.userId === auth.user)!.disabled = true;
+    }
+    await expect(executions.threadResume(requester, item.executionId, item.leaseToken)).rejects.toThrow(error);
+    await expect(executions.threadResume(requester, item.executionId, item.leaseToken, 0)).rejects.toThrow(error);
+    expect(db.rows('sendExecution')[0].status).toBe('RECONCILING');
+    expect(db.rows('accountWriteState')[0].activeExecutionId).toBeNull();
+    expect(db.rows('sendMutationReceipt').some(row => row.operation === 'resume-x-thread')).toBe(false);
   });
 
   it.each(['disabled integration', 'disabled project relation', 'legacy writer', 'unverified browser account'])(
@@ -516,7 +547,7 @@ describe('administrator resume of an untouched X thread suffix', () => {
     expect(db.rows('sendSegment').map(segment => segment.status)).toEqual(['CONFIRMED', 'PENDING', 'PENDING', 'PENDING']);
   });
 
-  it.each(['uncertain', 'exposed', 'issued permit', 'busy account', 'wrong lease', 'non-admin', 'changed receipt', 'autonomous mode'])(
+  it.each(['uncertain', 'exposed', 'issued permit', 'busy account', 'wrong lease', 'changed receipt', 'autonomous mode'])(
     'keeps reconciliation when there is a %s', async reason => {
       const { db, executions, item } = await stoppedThread();
       const next = db.rows('sendSegment')[1];
@@ -524,7 +555,6 @@ describe('administrator resume of an untouched X thread suffix', () => {
       if (reason === 'exposed') next.result = { status: 'draft_exposed' };
       if (reason === 'issued permit') next.permitHash = 'historical-permit';
       if (reason === 'busy account') db.rows('accountWriteState')[0].activeExecutionId = 'other';
-      if (reason === 'non-admin') db.rows('user')[0].isSuperAdmin = false;
       if (reason === 'changed receipt') db.rows('post')[0].releaseId = '999';
       if (reason === 'autonomous mode') {
         const setting = db.rows('settings').find(row => row.key === 'sending.organization_mode:org')!;

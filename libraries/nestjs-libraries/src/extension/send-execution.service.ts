@@ -4,7 +4,6 @@ import { StartSendDto, StopSendDto } from './send-execution.dto';
 import {
   BadRequestException,
   ConflictException,
-  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -105,9 +104,8 @@ export class SendExecutionService {
       if (expectedRevision !== undefined) await this.sends.assertControlledIn(tx, auth.org);
       else if (!await this.sends.isControlled(auth.org, tx))
         throw new ConflictException('SEND_MODE_CONTROLLED_REQUIRED');
+      // The active original node and its execution lease bind recovery to the original sender.
       const { execution, node } = await this.authenticate(tx, auth, id, lease);
-      const admin = await tx.user.findUnique({ where: { id: auth.user }, select: { isSuperAdmin: true } });
-      if (!admin?.isSuperAdmin) throw new ForbiddenException('SEND_RECONCILIATION_PERMISSION_REQUIRED');
       const now = new Date();
       if (execution.status !== 'RECONCILING' || execution.lastProgressAt > now ||
           execution.leaseExpiresAt > execution.lastProgressAt ||

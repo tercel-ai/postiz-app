@@ -811,8 +811,8 @@ Reply, and older clients without native opt-in keep their existing paths.
 
 ### Attended continuation of an older X thread
 
-The original browser can offer **Resume remaining parts** after an administrator
-checks status and verifies the live thread on X. The backend reopens only an
+The original browser can offer **Resume remaining parts** after the original
+sender checks status and verifies the live thread on X. The backend reopens only an
 old reconciled native X Post with confirmed receipts and an untouched suffix,
 then reacquires the original account slot. The same manifest and segment loop
 continue from the first pending part when its permit becomes eligible.
