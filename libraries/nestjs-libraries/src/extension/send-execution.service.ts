@@ -20,6 +20,7 @@ import {
   sendPreflightChallenge,
   sendTransaction,
   SEND_PREPARATION_LIMIT_MS,
+  pacedXThreadContinuation,
 } from './send-coordination.utils';
 
 export interface NodeAuthentication {
@@ -391,6 +392,7 @@ export class SendExecutionService {
           authorizedAt: true,
           submitBefore: true,
           result: true,
+          permitHash: true,
         },
       });
       const account = await tx.accountWriteState.findUnique({
@@ -422,14 +424,16 @@ export class SendExecutionService {
             targetUrl: opportunity.externalPostUrl, createdAt: saved.createdAt };
         }
       }
+      const serverNow = new Date();
+      const continuation = await pacedXThreadContinuation(tx, execution, segments, account, serverNow);
       return {
         executionId: id,
         status: execution.status,
-        segments,
+        segments: segments.map(({ permitHash, ...segment }) => segment),
         ...(reply ? { reply } : {}),
         leaseExpiresAt: execution.leaseExpiresAt,
-        nextWriteNotBefore: account?.nextWriteNotBefore ?? null,
-        serverNow: new Date().toISOString(),
+        nextWriteNotBefore: continuation?.notBefore ?? account?.nextWriteNotBefore ?? null,
+        serverNow: serverNow.toISOString(),
       };
     });
   }

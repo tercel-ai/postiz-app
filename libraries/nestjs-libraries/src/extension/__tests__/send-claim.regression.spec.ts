@@ -439,6 +439,151 @@ it.each(['POST', 'REPLY'] as const)('keeps the possible write cooldown when dire
   expect(await f.claim('next', 'next')).toMatchObject({ items: [], reason: 'ACCOUNT_COOLDOWN_ACTIVE' });
 });
 
+it('paces every native X thread segment even when the gap exceeds the original preparation window', async () => {
+  const f = fixture(10);
+  await f.create('paced-thread');
+  const root = f.db.rows('post')[0];
+  let parentId = root.id;
+  for (let index = 1; index < 4; index++) {
+    const id = `part-${index + 1}`;
+    f.db.seed('post', { ...root, id, parentPostId: parentId });
+    parentId = id;
+  }
+  const gapMs = 30 * 60_000;
+  const resolvePlan = f.quotas.resolve.getMockImplementation()!;
+  f.quotas.resolve.mockImplementation(async (...args) => ({ ...await resolvePlan(...args), gapMs }));
+  const native = { authorizationMode: 'NATIVE_FLOW_V1' } as const;
+  const item = (await f.executions.claim(auth, { requestId: 'paced', action: 'POST', ...native })).items[0];
+  expect(item.segments).toHaveLength(4);
+
+  for (let index = 0; index < 4; index++) {
+    await f.proof(item, index);
+    const permit = await f.executions.start(auth, item.executionId, index, item.leaseToken, native);
+    expect(permit).toMatchObject({ granted: true, submitBefore: new Date(Date.now() + 600_000).toISOString() });
+    await expect(f.executions.start(auth, item.executionId, index, item.leaseToken, native))
+      .resolves.toEqual({ granted: false, status: 'AUTHORIZED' });
+
+    vi.setSystemTime(Date.now() + 8_000);
+    await f.executions.outcome(auth, item.executionId, index, item.leaseToken, {
+      eventId: `confirmed-${index}`, status: 'confirmed', platformId: String(index + 100),
+    });
+    if (index === 3) break;
+
+    const nextWrite = Date.now() + gapMs;
+    vi.setSystemTime(nextWrite - 1_000);
+    await f.service.recoverExpiredAccountWriters();
+    expect(await f.service.businessSummary('org', 'user', root.id)).toMatchObject({
+      status: 'SENDING', hasConfirmedSegments: true, allowedActions: { retry: { allowed: false } },
+      timing: { reason: 'ACCOUNT_WRITE_INTERVAL', nextSendNotBefore: new Date(nextWrite) },
+    });
+    await f.proof(item, index + 1);
+    await expect(f.executions.start(auth, item.executionId, index + 1, item.leaseToken, native))
+      .rejects.toThrow('ACCOUNT_WRITE_INTERVAL');
+    vi.setSystemTime(nextWrite);
+  }
+
+  expect(f.db.rows('sendExecution')[0].status).toBe('SUCCEEDED');
+  expect(f.db.rows('sendSegment').map(segment => segment.status)).toEqual(Array(4).fill('CONFIRMED'));
+});
+
+it.each([
+  { change: 'the interval increases', gap: [90, 90], start: '11:00', end: '18:00',
+    reason: 'ACCOUNT_WRITE_INTERVAL', resume: '2026-10-15T13:30:08Z' },
+  { change: 'the window closes during the interval', gap: [3, 5], start: '11:55', end: '12:03',
+    reason: 'PLATFORM_WRITE_WINDOW_CLOSED', resume: '2026-10-16T11:55:00Z', closes: '2026-10-16T12:03:00Z' },
+  { change: 'the window closes during preparation', gap: [3, 5], start: '11:00', end: '12:40',
+    reason: 'PLATFORM_WRITE_WINDOW_CLOSED', resume: '2026-10-16T11:00:00Z' },
+])('keeps an untouched native X suffix pending when $change', async ({ gap, start, end, reason, resume, closes }) => {
+  const f = fixture();
+  f.quotas.resolve.mockRestore();
+  await f.create('thread');
+  const root = f.db.rows('post')[0];
+  f.db.seed('post', { ...root, id: 'child', parentPostId: root.id });
+  f.db.seed('settings', { key: 'platform_pacing', value: {
+    default: { write: [3, 5], read: [1, 2], window: { windowStart: start, windowEnd: end, timezone: 'UTC' } },
+  } });
+  f.db.seed('settings', { key: 'extension_publish.min_gap', value: { default: 30 } });
+  const native = { authorizationMode: 'NATIVE_FLOW_V1' } as const;
+  const item = (await f.executions.claim(auth, { requestId: 'thread', action: 'POST', ...native })).items[0];
+  await f.proof(item);
+  await expect(f.executions.start(auth, item.executionId, 0, item.leaseToken, native)).resolves.toMatchObject({ granted: true });
+
+  vi.setSystemTime(new Date(sendNow.getTime() + 8_000));
+  await f.executions.outcome(auth, item.executionId, 0, item.leaseToken, {
+    eventId: 'first-confirmed', status: 'confirmed', platformId: '100',
+  });
+  f.db.rows('settings').find(s => s.key === 'platform_pacing').value.default.write = gap;
+
+  vi.setSystemTime(new Date(sendNow.getTime() + 65 * 60_000));
+  await f.service.recoverExpiredAccountWriters();
+  expect(await f.executions.status(auth, item.executionId, item.leaseToken)).toMatchObject({
+    status: 'SENDING', nextWriteNotBefore: new Date(resume), segments: [{ status: 'CONFIRMED' }, { status: 'PENDING' }],
+  });
+  expect(await f.service.businessSummary('org', 'user', root.id)).toMatchObject({
+    status: 'SENDING', allowedActions: { retry: { allowed: false } },
+    timing: { reason, nextSendNotBefore: new Date(resume) },
+  });
+  await f.proof(item, 1);
+  await expect(f.executions.start(auth, item.executionId, 1, item.leaseToken, native)).rejects.toThrow(reason);
+  const [rootSegment, child] = f.db.rows('sendSegment');
+  expect(rootSegment.status).toBe('CONFIRMED');
+  expect(child).toMatchObject({ status: 'PENDING' });
+  expect(child.permitHash).toBeFalsy();
+
+  let startsAt = Date.parse(resume);
+  let closesAt = closes ? Date.parse(closes) : undefined;
+  if (closesAt !== undefined) {
+    vi.setSystemTime(closesAt - 1_200);
+    await f.proof(item, 1);
+    await expect(f.executions.start(auth, item.executionId, 1, item.leaseToken, native))
+      .rejects.toThrow('PLATFORM_WRITE_WINDOW_CLOSED');
+    const nextDay = 24 * 60 * 60_000;
+    startsAt += nextDay;
+    closesAt += nextDay;
+    expect(await f.executions.status(auth, item.executionId, item.leaseToken)).toMatchObject({
+      status: 'SENDING', nextWriteNotBefore: new Date(startsAt), segments: [{ status: 'CONFIRMED' }, { status: 'PENDING' }],
+    });
+    expect(f.db.rows('sendQuotaReservation').some(reservation => reservation.segmentIndex === 1)).toBe(false);
+    startsAt = closesAt - 30_000;
+  }
+  vi.setSystemTime(startsAt);
+  await f.proof(item, 1);
+  await expect(f.executions.start(auth, item.executionId, 1, item.leaseToken, native)).resolves.toMatchObject({
+    granted: true, ...(closesAt === undefined ? {} : { submitBefore: new Date(closesAt).toISOString() }),
+  });
+  await f.executions.outcome(auth, item.executionId, 1, item.leaseToken, {
+    eventId: 'second-confirmed', status: 'confirmed', platformId: '101',
+  });
+  expect(f.db.rows('sendExecution')[0].status).toBe('SUCCEEDED');
+  expect(f.db.rows('sendOutcomeEvent').map(event => event.eventId)).toEqual(['first-confirmed', 'second-confirmed']);
+});
+
+it('releases the paced native X thread after the next part preparation window expires', async () => {
+  const f = fixture();
+  await f.create('old');
+  f.db.seed('settings', { key: 'platform_pacing', value: { default: { write: [1, 1], read: [1, 2] } } });
+  const root = f.db.rows('post')[0];
+  f.db.seed('post', { ...root, id: 'child', parentPostId: root.id });
+  const native = { authorizationMode: 'NATIVE_FLOW_V1' } as const;
+  const item = (await f.executions.claim(auth, { requestId: 'paced-timeout', action: 'POST', ...native })).items[0];
+  await f.proof(item);
+  await f.executions.start(auth, item.executionId, 0, item.leaseToken, native);
+  await f.executions.outcome(auth, item.executionId, 0, item.leaseToken, {
+    eventId: 'first-confirmed', status: 'confirmed', platformId: '100',
+  });
+  const deadline = f.db.rows('accountWriteState')[0].nextWriteNotBefore.getTime() + SEND_PREPARATION_LIMIT_MS;
+  vi.setSystemTime(deadline - 1);
+  await f.service.recoverExpiredAccountWriters();
+  expect(f.db.rows('sendExecution')[0].status).toBe('SENDING');
+
+  vi.setSystemTime(deadline);
+  await f.service.recoverExpiredAccountWriters();
+  expect(f.db.rows('sendExecution')[0].status).toBe('RECONCILING');
+  expect(f.db.rows('accountWriteState')[0].activeExecutionId).toBeNull();
+  expect(f.db.rows('sendSegment').map(segment => segment.status)).toEqual(['CONFIRMED', 'PENDING']);
+  await expect(f.executions.preflight(auth, item.executionId, 1, item.leaseToken)).rejects.toThrow('STALE_SEND_EXECUTION');
+});
+
 it('releases a partial thread after the preparation cap while preserving its confirmed segment', async () => {
   const f = fixture(2); await f.create('old'); await f.create('next');
   const root = f.db.rows('post').find(post => post.id === 'old');

@@ -93,7 +93,8 @@ it can restore a draft before injection. Deploy this backend endpoint before loa
 a new executor that requires it. No new HTTP field or database migration is needed.
 
 An older client renews the original execution before exposing a later X thread draft. NATIVE_FLOW_V1 instead checks and authorizes each segment before native work, with no renewal during that segment. Retained ownership, prior confirmation, account spacing, and the original
-thirty-minute preparation cap remain enforced. An already exposed draft with an
+applicable preparation cap remain enforced. A still-owned native X thread
+uses the pacing-relative preparation deadline described below. An already exposed draft with an
 expired lease requires attended review instead of renewal. Original-node
 pre-permit UNKNOWN reports retain reconciliation; stale-owner reports preserve
 their evidence and quarantine competing owners. Single original posts can use
@@ -225,8 +226,13 @@ first, then calling backend preflight/start. Implementation and the permitted jo
    company selection; a controlling personal account alone is not sufficient.
 3. The acknowledged grant must echo `authorizationMode: NATIVE_FLOW_V1` and
    `executionDeadline`, equal to `submitBefore`. Its deadline is bounded by ten
-   minutes from authorization, the original thirty-minute preparation cap and the
-   applicable quota-window ends. The execution lease covers that same native
+   minutes from authorization, the applicable thirty-minute preparation cap and
+   quota-window ends. The first segment starts its preparation clock at claim.
+   Later eligible X segments get 30 minutes inside allowed write windows
+   after the effective account pacing floor. The backend merges eligible UTC
+   intervals across clock changes and requires at least 30 seconds before the
+   earliest applicable deadline. Their permit still expires by write-window
+   close. The execution lease covers that same native
    window without renewal. An absent or mismatched echo must stop the new client
    before any native content mutation; it must not silently fall back to the old
    after-fill backend round trip. Old clients and API executors retain their
@@ -910,3 +916,30 @@ including authorization expiry and confirmed history. Live or confirmed work
 cannot enter that recovery. Existing execution and outcome evidence stays in
 place. Account selection, current permissions, pacing, quotas, and activation
 remain in force. No new Post, API route or database migration is needed.
+
+## Controlled X thread continuation after pacing
+
+For a retained `NATIVE_FLOW_V1` X Post execution in `SENDING`, the next
+untouched segment gets 30 minutes of permitted preparation time. The clock
+begins at the later of the persisted account cooldown and the current platform
+floor, and consumes time while the write window is open. The server requires
+the original account occupancy, a
+contiguous confirmed prefix with native X IDs, and a pending suffix with no
+authorization, permit or outcome. Expiry and fresh authorization use the same
+deadline. Preflight, actor and content revisions, current pacing, quota and
+one-shot permit checks apply to each subsequent write. Expiring a live permit
+still preserves possible submission as UNKNOWN.
+
+The existing post summary reports a retained partial send as `SENDING` during
+this wait, with an `ACCOUNT_WRITE_INTERVAL` or `PLATFORM_WRITE_WINDOW_CLOSED`
+reason and `timing.nextSendNotBefore`. The execution status carries the same
+eligibility bound in `nextWriteNotBefore`, including deferral to a later
+opening when the current window is too short. An explicit timing denial from
+segment start grants no permit and leaves the segment pending. After a local
+journal failure, the original authenticated state can retire only a matching
+unpermitted preparation before a fresh one-shot start. Retry remains
+blocked once any segment is confirmed. Historical reconciliations keep their
+original evidence and status. The existing administrator endpoint resolves
+supported evidence and cannot reopen a thread with an untouched suffix.
+Deploy the backend first. Older clients retain their original restart
+behavior. No schema migration or API field is required.

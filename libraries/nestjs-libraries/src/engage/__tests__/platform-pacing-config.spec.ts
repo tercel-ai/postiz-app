@@ -1,3 +1,4 @@
+import { writeWindowPreparation } from '../platform-pacing-policy';
 import { describe, it, expect, vi } from 'vitest';
 import {
   PlatformPacingConfigService,
@@ -118,5 +119,38 @@ describe('PlatformPacingConfigService — pure variants', () => {
       platforms: {},
     };
     expect(svc().isWithinWriteWindowFor(pacing, 'reddit', new Date('2026-08-27T03:00:00Z'))).toBe(false);
+  });
+});
+
+it.each([
+  {
+    clock: 'spring forward', windowStart: '01:45', windowEnd: '02:15',
+    floor: '2026-03-08T06:50:00Z', now: '2026-03-08T06:55:00Z',
+    next: '2026-03-08T06:50:00Z', closes: '2026-03-08T07:00:00Z', expires: '2026-03-09T06:05:00Z',
+  },
+  {
+    clock: 'fall back', windowStart: '00:45', windowEnd: '01:15',
+    floor: '2026-11-01T05:10:00Z', now: '2026-11-01T05:40:00Z',
+    next: '2026-11-01T06:00:00Z', closes: '2026-11-01T06:15:00Z', expires: '2026-11-02T05:55:00Z',
+  },
+  {
+    clock: 'a wrapping fall-back window', windowStart: '01:30', windowEnd: '01:15',
+    floor: '2026-11-01T05:20:00Z', now: '2026-11-01T05:25:00Z',
+    next: '2026-11-01T05:30:00Z', closes: '2026-11-01T06:15:00Z', expires: '2026-11-01T06:00:00Z',
+  },
+  {
+    clock: 'a skipped overnight closure', windowStart: '02:40', windowEnd: '02:20',
+    floor: '2026-03-08T06:50:00Z', now: '2026-03-08T06:55:00Z',
+    next: '2026-03-08T06:50:00Z', closes: '2026-03-09T06:20:00Z', expires: '2026-03-08T07:20:00Z',
+  },
+  {
+    clock: 'a repeated midnight', windowStart: '23:30', windowEnd: '00:50', zone: 'America/Havana',
+    floor: '2026-11-01T04:05:00Z', now: '2026-11-01T04:05:00Z',
+    next: '2026-11-01T04:05:00Z', closes: '2026-11-01T04:50:00Z', expires: '2026-11-01T04:35:00Z',
+  },
+])('counts allowable preparation minutes across $clock', ({ windowStart, windowEnd, floor, now, next, closes, expires, zone }) => {
+  expect(writeWindowPreparation({ windowStart, windowEnd, timezone: zone ?? 'America/New_York' },
+    new Date(floor), 30 * 60_000, new Date(now))).toEqual({
+    notBefore: new Date(next), windowEnd: new Date(closes), deadline: Date.parse(expires),
   });
 });

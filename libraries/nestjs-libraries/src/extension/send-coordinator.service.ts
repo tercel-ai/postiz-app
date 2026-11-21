@@ -35,8 +35,11 @@ import {
   accountWriteNotBefore,
   canonicalSendAccount,
   confirmationCooldown,
+  isNativeXThread,
+  pacedXThreadContinuation,
   releaseExpiredAccountWriterIn,
   SEND_PREPARATION_LIMIT_MS,
+  X_THREAD_MIN_PERMIT_MS,
   matchesSendActor,
   postSendHash,
   sendHash,
@@ -223,6 +226,25 @@ export class SendCoordinatorService {
       let nextSendNotBefore: Date | null = null;
       let blockingExecutionId: string | null = null;
       let reason: string | null = blockCode ?? (summary.paused ? 'ACCOUNT_BINDINGS_NOT_ENABLED' : null);
+      const activeThread = summary.status === 'PARTIAL_SUCCESS' && intent?.status === 'SENDING'
+        ? executions.find(execution => execution.id === intent.activeExecutionId) : undefined;
+      if (!reason && activeThread && isNativeXThread(activeThread)) {
+        const threadSegments = segments.filter(segment => segment.executionId === activeThread.id);
+        const account = await tx.accountWriteState.findUnique({ where: { organizationId_canonicalAccountKey: {
+          organizationId: org, canonicalAccountKey: activeThread.canonicalAccountKey,
+        } } });
+        if (account?.activeExecutionId === activeThread.id && account.rolloutReady) {
+          const continuation = await pacedXThreadContinuation(tx, activeThread, threadSegments, account, serverNow);
+          if ((continuation && continuation.deadline > serverNow.getTime()) ||
+              threadSegments.some(segment => segment.status === 'AUTHORIZED' && segment.submitBefore && segment.submitBefore > serverNow)) {
+            summary.status = 'SENDING';
+            if (continuation && continuation.notBefore > serverNow) {
+              nextSendNotBefore = continuation.notBefore;
+              reason = continuation.reason;
+            }
+          }
+        }
+      }
       if (!reason && (summary.status === 'RECONCILING' || summary.status === 'PARTIAL_SUCCESS'))
         reason = 'SEND_RECONCILIATION_REQUIRED';
       if (!reason && ['RESERVED', 'SENDING'].includes(intent?.status ?? '')) reason = 'SEND_IN_PROGRESS';
@@ -2024,14 +2046,29 @@ export class SendCoordinatorService {
     const plan = await this.quotas.resolve(tx, await this.admissionIntent(tx, intent), account, index, now);
     const next = accountWriteNotBefore(account, plan.gapMs);
     if (next && next > now) reject('ACCOUNT_WRITE_INTERVAL');
+    const continuation = nativeFlow && index > 0 && isNativeXThread(execution)
+      ? await pacedXThreadContinuation(tx, execution, await tx.sendSegment.findMany({
+        where: { executionId: execution.id, organizationId: org },
+      }), account, now)
+      : undefined;
+    const currentContinuation = continuation?.index === index ? continuation : undefined;
+    if (currentContinuation && currentContinuation.notBefore > now) {
+      if (currentContinuation.reason === 'PLATFORM_WRITE_WINDOW_CLOSED')
+        throw new ForbiddenException(currentContinuation.reason);
+      reject(currentContinuation.reason);
+    }
+    const windowEnd = currentContinuation?.windowEnd?.getTime();
+    const preparationDeadline = currentContinuation?.deadline ??
+      execution.createdAt.getTime() + SEND_PREPARATION_LIMIT_MS;
     const submitBefore = new Date(
       Math.min(
         now.getTime() + (nativeFlow ? 10 * 60_000 : 30_000),
-        ...(nativeFlow ? [execution.createdAt.getTime() + SEND_PREPARATION_LIMIT_MS] : []),
+        ...(nativeFlow ? [preparationDeadline] : []),
+        ...(windowEnd === undefined ? [] : [windowEnd]),
         ...plan.budgets.map((b) => b.windowEnd.getTime() - 1_000)
       )
     );
-    if (submitBefore.getTime() - now.getTime() < 1_000)
+    if (submitBefore.getTime() - now.getTime() < (currentContinuation ? X_THREAD_MIN_PERMIT_MS : 1_000))
       reject('SEND_QUOTA_WINDOW_CLOSING');
     await this.quotas.reserve(tx, org, execution.id, index, plan.budgets, now);
     const permit = randomBytes(32).toString('base64url');

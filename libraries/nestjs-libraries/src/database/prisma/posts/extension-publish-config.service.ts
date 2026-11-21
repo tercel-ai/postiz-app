@@ -4,6 +4,7 @@ import utc from 'dayjs/plugin/utc';
 import timezone from 'dayjs/plugin/timezone';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
 import { PlatformPacingConfigService } from '@gitroom/nestjs-libraries/engage/platform-pacing-config.service';
+import { shiftDay, windowBounds, windowInstanceOn } from '../../../engage/platform-pacing-policy';
 import { resolvePacingWindow } from '@gitroom/helpers/extension/platform-pacing';
 import {
   DEFAULT_SEGMENT_GAP_RANGE,
@@ -333,57 +334,6 @@ export interface WindowAllocationResult {
   moved: Map<string, Date>;
   /** Window instances where minGapMinutes could not be honoured in full. */
   degraded: Array<{ windowStart: Date; requestedGapMinutes: number; appliedGapMinutes: number }>;
-}
-
-/**
- * Wall-clock geometry of a window: the two bounds in minutes-of-day, and
- * whether it wraps past midnight.
- *
- * Deliberately NOT a duration. `18:00 - 09:00` is nine hours on the clock but
- * eight or ten real hours on a DST transition day, and every duration this file
- * needs is a real one — see windowInstanceOn.
- */
-function windowBounds(window: Pick<PublishTimeWindow, 'windowStart' | 'windowEnd'>) {
-  const toMinutes = (hhmm: string) => {
-    const [h, m] = hhmm.split(':').map(Number);
-    return (h || 0) * 60 + (m || 0);
-  };
-  const startMin = toMinutes(window.windowStart);
-  const endMin = toMinutes(window.windowEnd);
-  return { startMin, endMin, wraps: startMin > endMin };
-}
-
-/** Calendar-day arithmetic, done in UTC so no DST-length day can distort it. */
-function shiftDay(dayStamp: string, days: number): string {
-  return dayjs.utc(dayStamp).add(days, 'day').format('YYYY-MM-DD');
-}
-
-/**
- * The concrete occurrence of `window` that OPENS on the local day `dayStamp`
- * ('YYYY-MM-DD'): the instant it opens, and how many REAL minutes it lasts.
- *
- * Both bounds are resolved as WALL-CLOCK times rather than by adding minutes to
- * midnight, because across a DST transition those are not the same thing:
- * midnight + 9h is 10:00 on a spring-forward day, and a 09:00-18:00 window is
- * only eight real hours long that day (ten on the fall-back day). Anchoring on
- * the wall clock is what makes "09:00 to 18:00" mean the same hours every day of
- * the year — which is the whole point of expressing a window in local time.
- *
- * Offsets are then REAL minutes from `start`, so a time picked inside
- * [0, spanMin) always lands inside the wall-clock window too.
- */
-function windowInstanceOn(
-  dayStamp: string,
-  window: Pick<PublishTimeWindow, 'windowStart' | 'windowEnd' | 'timezone'>
-): { start: dayjs.Dayjs; spanMin: number } {
-  const at = (day: string, hhmm: string) => {
-    const stamp = `${day}T${hhmm}:00`;
-    return window.timezone ? dayjs.tz(stamp, window.timezone) : dayjs.utc(stamp);
-  };
-  const { wraps } = windowBounds(window);
-  const start = at(dayStamp, window.windowStart);
-  const end = at(wraps ? shiftDay(dayStamp, 1) : dayStamp, window.windowEnd);
-  return { start, spanMin: end.diff(start, 'minute') };
 }
 
 /**

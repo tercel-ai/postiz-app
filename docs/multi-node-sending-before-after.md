@@ -794,3 +794,17 @@ created complete fixture. Failure cleanup and repeat initialization are tested.
 The internal narrow `SendModeContext` type prevents admission callers from
 depending on dashboard counts; reallocation validation remains in place. No
 platform operation, state transition, public API or client behavior is changed.
+
+## Paced X thread continuation
+
+A controlled X Post thread retains its existing execution and account writer
+while its untouched next segment waits for the current account pacing floor
+and the next open write window. Only allowed write time after pacing counts
+toward the segment's 30-minute preparation limit. Clock changes are handled in
+UTC order. Starts with less than 30 seconds available stay pending. The next
+write still obtains an independent permit after fresh account, revision, quota
+and pacing checks. A valid confirmation advances the thread and the pacing
+clock. A clean incomplete thread that misses its preparation window releases
+the account and enters reconciliation. An expired permit still enters the
+original UNKNOWN recovery path. AUTONOMOUS current-session sending, Engage
+Reply, and older clients without native opt-in keep their existing paths.

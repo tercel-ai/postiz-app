@@ -512,7 +512,7 @@ The extension displays waiting for an earlier attempt rather than implying that 
 
 ## Front-loaded native sends (2026-11-12)
 
-The user-approved NATIVE_FLOW_V1 contract in [API ownership](multi-node-sending-api-ownership.md#front-loaded-native-execution-contract-native_flow_v1-2026-11-12) moves backend preflight and authorization before native content mutation. CONTROLLED keeps its frozen actor, company composer proof and multi-node fencing; AUTONOMOUS keeps its current-browser actor. Already granted native work is bounded by the acknowledged execution deadline and is not interrupted by backend calls or lease renewals. Old client/API short permits remain unchanged when the opt-in mode is omitted. Implementation and permitted joint regression verification are complete. Live platform publication acceptance remains outstanding. Native permits are bounded to ten minutes and the original thirty-minute preparation/quota limits; already accepted work remains owned across mode handover and settles its original result.
+The user-approved NATIVE_FLOW_V1 contract in [API ownership](multi-node-sending-api-ownership.md#front-loaded-native-execution-contract-native_flow_v1-2026-11-12) moves backend preflight and authorization before native content mutation. CONTROLLED keeps its frozen actor, company composer proof and multi-node fencing; AUTONOMOUS keeps its current-browser actor. Already granted native work is bounded by the acknowledged execution deadline and is not interrupted by backend calls or lease renewals. Old client/API short permits remain unchanged when the opt-in mode is omitted. Implementation and permitted joint regression verification are complete. Live platform publication acceptance remains outstanding. Native permits are bounded to ten minutes and the applicable thirty-minute preparation and quota limits; already accepted work remains owned across mode handover and settles its original result.
 
 
 ## Explicit retry of uncertain controlled publications
@@ -992,3 +992,15 @@ publication evidence. Recovery preserves the original Post ID and failure audit
 and enters ordinary controlled discovery with the explicitly selected account.
 AUTONOMOUS continues to use the current browser session and its existing retry
 and handover rules. Switching modes alone never retries a failed Post.
+
+## Controlled X pacing between confirmed thread parts
+
+The account remains owned by the original active native X thread during
+the effective pacing wait and 30 minutes of open write-window time for its
+next untouched segment, including daylight-saving transitions. The existing
+controlled drain carries that ownership across mode changes. Autonomous admission continues to respect the account hold and
+cooldown. The server checks the current policy and browser actor again before
+issuing the next permit. An expired preparation window releases occupancy and
+leaves the incomplete original in reconciliation. Already uncertain writes,
+legacy draft exposure, standalone Reply and historical reconciliation retain
+their original recovery and pacing rules.

@@ -8,12 +8,13 @@ import {
   MAX_PACING_GAP_MS,
   PacingWindow,
   PlatformPacing,
-  PlatformPacingEntry,
   PacingKind,
   resolvePacingRangeMs,
   resolvePacingWindow,
   withinPacingWindow,
 } from '@gitroom/helpers/extension/platform-pacing';
+
+import { sanitizePlatformPacing } from './platform-pacing-policy';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -151,95 +152,5 @@ export class PlatformPacingConfigService implements OnModuleInit {
   }
 }
 
-/**
- * Resolve a stored value onto the built-in floor.
- *
- * A stored config that is missing, malformed, or only partially filled in must
- * never REMOVE the floor — every tier falls through to the shipped default, the
- * same posture the segment-gap and min-gap settings already take. The one thing
- * an admin can do here is make the floor wider or narrower, never absent.
- */
-export function sanitizePlatformPacing(stored: unknown): PlatformPacing {
-  if (!stored || typeof stored !== 'object') return DEFAULT_PLATFORM_PACING;
-  const raw = stored as Partial<PlatformPacing>;
-  const platforms: Record<string, PlatformPacingEntry> = {};
-  if (raw.platforms && typeof raw.platforms === 'object') {
-    for (const [key, entry] of Object.entries(raw.platforms)) {
-      if (!entry || typeof entry !== 'object') continue;
-      const clean: PlatformPacingEntry = { ...(entry as PlatformPacingEntry) };
-      // A malformed window must not survive: it reaches the PUBLISH allocator,
-      // which reads `window.windowStart.split(':')` and `dayjs.tz(...)`
-      // unguarded. Dropping it leaves the platform unconstrained — the same
-      // failure direction the old resolvePublishTimeWindows took, and the same
-      // one the reply side takes when withinPacingWindow fails closed.
-      if (!pickWindow(clean.window)) delete clean.window;
-      platforms[key] = clean;
-    }
-  }
-  return {
-    default: {
-      write: pickRange(raw.default?.write, DEFAULT_PLATFORM_PACING.default.write),
-      read: pickRange(raw.default?.read, DEFAULT_PLATFORM_PACING.default.read),
-      // An unset window is a meaningful value ("unconstrained"), so it must
-      // survive as absent — but a malformed one is dropped rather than passed
-      // on, for the reason above.
-      ...(pickWindow(raw.default?.window) ? { window: raw.default!.window } : {}),
-    },
-    platforms,
-  };
-}
-
-/**
- * A window wins only when it is structurally usable: 'HH:MM' bounds inside real
- * clock ranges, a non-empty span, and — when present — a timezone the runtime
- * can actually resolve.
- *
- * This restores the check `resolvePublishTimeWindows`/`isValidWindow` used to
- * apply before the window moved here. Without it the publish allocator receives
- * whatever JSON an admin PUT: `{start,end}` (wrong field names) reaches
- * `window.windowStart.split(':')` as undefined, and an unresolvable zone reaches
- * `dayjs.tz` — a TypeError and a RangeError respectively, both thrown from plan
- * activation rather than being quietly ignored.
- *
- * The reply side needs no equivalent because `withinPacingWindow` already fails
- * closed; dropping the value here makes the two sides agree on "unusable window
- * = no window" instead of one refusing and the other throwing.
- */
-function pickWindow(candidate: unknown): candidate is PacingWindow {
-  if (!candidate || typeof candidate !== 'object') return false;
-  const w = candidate as Partial<PacingWindow>;
-  const toMinutes = (v: unknown): number | null => {
-    if (typeof v !== 'string' || !/^\d{2}:\d{2}$/.test(v)) return null;
-    const [hours, minutes] = v.split(':').map(Number);
-    if (hours > 23 || minutes > 59) return null;
-    return hours * 60 + minutes;
-  };
-  const start = toMinutes(w.windowStart);
-  const end = toMinutes(w.windowEnd);
-  // start === end is how an empty window is spelled — it would block every
-  // write, so it is treated as unusable rather than honoured.
-  if (start === null || end === null || start === end) return false;
-  if (w.timezone === undefined) return true;
-  if (typeof w.timezone !== 'string' || !w.timezone) return false;
-  try {
-    Intl.DateTimeFormat(undefined, { timeZone: w.timezone });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** A range wins only when both bounds are finite, ordered and non-negative. */
-function pickRange(
-  candidate: unknown,
-  fallback: [number, number]
-): [number, number] {
-  if (!Array.isArray(candidate) || candidate.length !== 2) return fallback;
-  const [lo, hi] = candidate as [unknown, unknown];
-  if (typeof lo !== 'number' || typeof hi !== 'number') return fallback;
-  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return fallback;
-  if (lo < 0 || hi < lo) return fallback;
-  return [lo, hi];
-}
-
+export { sanitizePlatformPacing } from './platform-pacing-policy';
 export { MAX_PACING_GAP_MS, type PacingKind, type PacingWindow, type PlatformPacing };

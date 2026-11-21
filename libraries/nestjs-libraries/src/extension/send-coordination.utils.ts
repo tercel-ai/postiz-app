@@ -1,6 +1,8 @@
 import { createHash, createHmac } from 'node:crypto';
 import { ServiceUnavailableException } from '@nestjs/common';
 import { AccountWriteState, Prisma, SendExecution, SendSegment } from '@prisma/client';
+import { resolvePacingRangeMs, resolvePacingWindow } from '@gitroom/helpers/extension/platform-pacing';
+import { sanitizePlatformPacing, writeWindowPreparation } from '../engage/platform-pacing-policy';
 
 export function sendHash(value: unknown): string {
   const normalize = (v: any): any =>
@@ -140,10 +142,45 @@ export async function sendTransaction<T>(
 
 
 export const SEND_PREPARATION_LIMIT_MS = 30 * 60_000;
+// X must round-trip the grant and load its composer before it can consume the permit.
+export const X_THREAD_MIN_PERMIT_MS = 30_000;
 
-function expiredUnexposedPartialThread(execution: SendExecution, segments: SendSegment[], now: Date): boolean {
-  return execution.kind === 'EXTENSION' && execution.leaseExpiresAt <= now &&
-    execution.createdAt.getTime() + SEND_PREPARATION_LIMIT_MS <= now.getTime() &&
+export function isNativeXThread(execution: SendExecution): boolean {
+  return execution.kind === 'EXTENSION' && execution.platform === 'x' && execution.action === 'POST' &&
+    (execution.context as { authorizationMode?: string } | null)?.authorizationMode === 'NATIVE_FLOW_V1' &&
+    Array.isArray(execution.payload) && execution.payload.length > 1;
+}
+
+/** Only an untouched suffix may wait beyond the original preparation deadline. */
+export async function pacedXThreadContinuation(
+  tx: Prisma.TransactionClient, execution: SendExecution,
+  segments: Pick<SendSegment, 'segmentIndex' | 'status' | 'authorizedAt' | 'submitBefore' | 'permitHash' | 'result'>[],
+  account: AccountWriteState | null, now: Date
+) {
+  if (!isNativeXThread(execution) || execution.status !== 'SENDING' ||
+      account?.activeExecutionId !== execution.id || !account.rolloutReady || !account.nextWriteNotBefore ||
+      !Array.isArray(execution.payload) || segments.length !== execution.payload.length) return;
+  const index = segments.filter(segment => segment.status === 'CONFIRMED').length;
+  if (index === 0 || index === segments.length || !segments.every(segment => segment.segmentIndex < index
+    ? segment.status === 'CONFIRMED' && /^[1-9][0-9]*$/.test((segment.result as { platformId?: string } | null)?.platformId ?? '')
+    : segment.status === 'PENDING' && !segment.authorizedAt && !segment.submitBefore && !segment.permitHash && segment.result == null)) return;
+
+  const settings = await tx.settings.findUnique({ where: { key: 'platform_pacing' }, select: { value: true } });
+  const pacing = sanitizePlatformPacing(settings?.value);
+  // Later segments use the platform write floor. The confirmed Post's gap is already in the stored clock.
+  const gapMs = Math.ceil(resolvePacingRangeMs(pacing, execution.platform, 'write')[0]);
+  const floor = accountWriteNotBefore(account, gapMs) ?? account.nextWriteNotBefore;
+  const window = resolvePacingWindow(pacing, execution.platform);
+  const timing = window ? writeWindowPreparation(window, floor, SEND_PREPARATION_LIMIT_MS, now, X_THREAD_MIN_PERMIT_MS)
+    : { notBefore: floor, deadline: floor.getTime() + SEND_PREPARATION_LIMIT_MS, windowEnd: undefined };
+  return { index, ...timing, reason: timing.notBefore > floor ? 'PLATFORM_WRITE_WINDOW_CLOSED' : 'ACCOUNT_WRITE_INTERVAL' };
+}
+
+function expiredUnexposedPartialThread(
+  execution: SendExecution, segments: SendSegment[], now: Date,
+  deadline = execution.createdAt.getTime() + SEND_PREPARATION_LIMIT_MS
+): boolean {
+  return execution.kind === 'EXTENSION' && execution.leaseExpiresAt <= now && deadline <= now.getTime() &&
     segments.some(segment => segment.status === 'CONFIRMED') &&
     segments.some(segment => segment.status === 'PENDING') &&
     segments.every(segment => segment.status === 'CONFIRMED' || (segment.status === 'PENDING' &&
@@ -211,7 +248,8 @@ export async function releaseExpiredAccountWriterIn(
   const permits = draftBoundary
     ? segments.filter(segment => ['AUTHORIZED', 'UNKNOWN'].includes(segment.status) && segment.submitBefore)
     : expiredPermitSegments(segments, now);
-  const interruptedThread = expiredUnexposedPartialThread(execution, segments, now);
+  const continuation = expiredSender ? await pacedXThreadContinuation(tx, execution, segments, account, now) : undefined;
+  const interruptedThread = expiredUnexposedPartialThread(execution, segments, now, continuation?.deadline);
   const unreportedPermitIds = expiredSender || draftBoundary
     ? permits.filter(segment => segment.status === 'AUTHORIZED').map(segment => segment.id) : [];
   if (expiredSender) {
