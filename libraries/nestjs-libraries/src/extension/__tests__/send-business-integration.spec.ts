@@ -457,6 +457,52 @@ describe('ordinary user sending summary', () => {
     expect(result.status).toBe('RECONCILING');
     expect(Object.values(result.allowedActions).every(action => !action.allowed)).toBe(true);
     expect(JSON.stringify(result)).not.toContain('secret');
+    expect(result.segments[0]).not.toHaveProperty('unconfirmedCode');
+  });
+  it('exposes only whitelisted unconfirmed phase and code without leaking raw evidence', () => {
+    const post = { id: 'root', state: 'QUEUE', executionProtocol: 'ACCOUNT_BOUND_V1' };
+    const intent = { id: 'intent', status: 'RECONCILING', activeExecutionId: 'exec', hasConfirmedSegments: false };
+    const execution = { id: 'exec', status: 'RECONCILING', resolutionRevision: 1 };
+    const verified = sendBusinessSummary(post, intent, [execution], [{
+      executionId: 'exec', segmentIndex: 0, postId: 'root', status: 'UNKNOWN',
+      result: { evidence: 'The platform submission could not be conclusively matched to this execution and actor. Phase: SUBMITTING; code: SEND_RESULT_RESOURCE_UNVERIFIED.' },
+    }]);
+    expect(verified.segments[0]).toMatchObject({
+      status: 'UNKNOWN', unconfirmedPhase: 'SUBMITTING', unconfirmedCode: 'SEND_RESULT_RESOURCE_UNVERIFIED',
+    });
+
+    const upgradeRequired = sendBusinessSummary(post, intent, [execution], [{
+      executionId: 'exec', segmentIndex: 0, postId: 'root', status: 'UNKNOWN',
+      result: { evidence: 'Phase: AUTHORIZED; code: SEND_UPGRADE_REQUIRED.' },
+    }]);
+    expect(upgradeRequired.segments[0]).toMatchObject({
+      status: 'UNKNOWN', unconfirmedPhase: 'AUTHORIZED', unconfirmedCode: 'SEND_UPGRADE_REQUIRED',
+    });
+
+    const restarted = sendBusinessSummary(post, intent, [execution], [{
+      executionId: 'exec', segmentIndex: 0, postId: 'root', status: 'UNKNOWN',
+      result: { evidence: 'Worker restarted; no platform submission will be replayed.' },
+    }]);
+    expect(restarted.segments[0]).toMatchObject({
+      status: 'UNKNOWN', unconfirmedCode: 'SEND_WORKER_RESTARTED',
+    });
+    expect(restarted.segments[0]).not.toHaveProperty('unconfirmedPhase');
+
+    const unknownCode = sendBusinessSummary(post, intent, [execution], [{
+      executionId: 'exec', segmentIndex: 0, postId: 'root', status: 'UNKNOWN',
+      result: { evidence: 'secret details. Phase: SUBMITTING; code: SECRET_INTERNAL_TOKEN.' },
+    }]);
+    expect(unknownCode.segments[0]).toMatchObject({ status: 'UNKNOWN', unconfirmedPhase: 'SUBMITTING' });
+    expect(unknownCode.segments[0]).not.toHaveProperty('unconfirmedCode');
+    expect(JSON.stringify(unknownCode)).not.toContain('secret');
+    expect(JSON.stringify(unknownCode)).not.toContain('SECRET_INTERNAL_TOKEN');
+
+    const confirmed = sendBusinessSummary(post, { ...intent, status: 'SUCCEEDED', hasConfirmedSegments: true }, [{ ...execution, status: 'SUCCEEDED' }], [{
+      executionId: 'exec', segmentIndex: 0, postId: 'root', status: 'CONFIRMED',
+      result: { url: 'https://linkedin.com/feed/update/1', evidence: 'Phase: SUBMITTING; code: SEND_RESULT_RESOURCE_UNVERIFIED.' },
+    }]);
+    expect(confirmed.segments[0]).not.toHaveProperty('unconfirmedCode');
+    expect(confirmed.segments[0]).not.toHaveProperty('unconfirmedPhase');
   });
   it('checks membership and project ownership, including after the feature is disabled', async () => {
     const { service, create, projects } = setupSend();

@@ -966,3 +966,22 @@ checks before the server can authorize it. Status for a resumed execution adds
 unavailable. Concurrent or stale requests cannot
 reopen a different revision. Deploy the backend before the extension. No
 database migration is required.
+
+## Public unconfirmed diagnostics on business status (2026-11-23)
+
+`sendBusinessSummary` adds optional allowlisted `unconfirmedPhase`
+(`AUTHORIZING`, `AUTHORIZED`, `SUBMITTING`) and `unconfirmedCode` fields to
+`sending.segments[i]` only when `status === 'UNKNOWN'`. Values are parsed from
+stored segment evidence against a closed public allowlist, including
+`SEND_UPGRADE_REQUIRED` and `SEND_WORKER_RESTARTED`. These diagnostic fields
+carry a phase and reason code only. The existing segment `url` field still
+carries the reported platform URL, including an unverified candidate under
+`UNKNOWN`. The phase alone does not establish a platform click or supersede
+an existing specific local reason. The same `allowedActions`, uncertainty,
+retry eligibility, pacing, and quota rules apply. The fields are additive
+and compatible with older extensions and `aisee-app`. No migration is required.
+
+Toutiao Publish Activity uses the existing segment outcome route for a
+verified published match from Toutiao Works Management. A partial listing
+keeps the original result uncertain. The client still requires the existing
+server retry decision after a complete lookup supports absence.
