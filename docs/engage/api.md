@@ -1673,6 +1673,8 @@ Stream the generation of an AI reply draft. Response is Server-Sent Events (`tex
 
 > Reddit's real limit is ~10000 chars, so a 2000-char reply always posts fine. Keeping the target at 1000 favors concise, natural replies while tolerating a slight overshoot instead of failing the whole generation. A Reddit draft over the hard cap fails with `generation_failed` and is **not** retried (unlike X).
 
+For X replies, the generation prompt asks for one blank line between distinct points. A reply with one point stays in one paragraph. User-initiated and automatic generation use this guidance on the first attempt and on corrective rewrites.
+
 **Strategy Descriptions**
 
 | strategy | Use Case | Generation Style |

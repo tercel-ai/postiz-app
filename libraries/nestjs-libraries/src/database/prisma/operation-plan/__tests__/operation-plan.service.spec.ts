@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 import { zodResponseFormat } from 'openai/helpers/zod';
+import { OpenaiService } from '@gitroom/nestjs-libraries/openai/openai.service';
 import { OperationPlanService } from '../operation-plan.service';
+
+const X_PARAGRAPH_GUIDANCE = 'separate distinct points with one blank line (\\n\\n).';
 
 function makePlan(overrides: Partial<any> = {}) {
   return {
@@ -1350,7 +1353,7 @@ describe('OperationPlanService.create', () => {
     expect(trimmed.endsWith('lorem')).toBe(true);
   });
 
-  it('uses the LLM shrink (targeting the soft budget) when OPERATION_SHRINK_MODEL is set', async () => {
+  it('uses the X paragraph rule and soft budget when shortening an anchor and follow-up', async () => {
     vi.stubEnv('OPERATION_SHRINK_MODEL', 'anthropic/claude-haiku-4.5');
     try {
       const { openaiService, service } = createGenerationDependencies({
@@ -1361,19 +1364,35 @@ describe('OperationPlanService.create', () => {
             themeKey: 'k',
             themeTitle: 't',
             platforms: [
-              { id: '11111111-1111-4111-8111-111111111111', platform: 'x', content: 'a'.repeat(300), media: null },
+              {
+                id: '11111111-1111-4111-8111-111111111111',
+                platform: 'x',
+                content: 'a'.repeat(300),
+                media: null,
+                thread: [
+                  { id: '22222222-2222-4222-8222-222222222222', content: 'b'.repeat(300), media: null },
+                ],
+              },
             ],
           },
         ],
         engagePolicies: [],
         warnings: [],
       });
-      // Haiku returns a coherent, in-budget rewrite → used verbatim, no trim.
-      const rewrite = 'Concise rewrite that fits the budget.';
-      openaiService.shrinkToLimit.mockResolvedValue({
-        post: rewrite,
-        usage: { usage: { total_tokens: 8 } },
+      // Exercise the real shrink prompt builder with an in-budget model response.
+      const rewrite = 'The rollout starts today.\n\nExisting links will keep working.';
+      const parse = vi.fn(async (_request: { model: string; messages: { content: string }[] }) => ({
+        choices: [{ message: { parsed: { post: rewrite } } }],
+        usage: { total_tokens: 8 },
+      }));
+      const shrinker = new OpenaiService();
+      vi.spyOn(shrinker as any, 'getTextClient').mockReturnValue({
+        client: { chat: { completions: { parse } } },
+        model: 'default-model',
+        servicer: 'test',
+        provider: 'test',
       });
+      openaiService.shrinkToLimit.mockImplementation(shrinker.shrinkToLimit.bind(shrinker));
 
       const result = await service.create('org-1', 'proj-1', {
         taskId: 'task-1',
@@ -1382,17 +1401,24 @@ describe('OperationPlanService.create', () => {
         platforms: ['x'],
       }, { dryRun: true });
 
-      expect(openaiService.shrinkToLimit).toHaveBeenCalledWith(
+      expect(parse).toHaveBeenCalledTimes(2);
+      expect(parse.mock.calls.map(([request]) => request.messages[1].content)).toEqual([
         'a'.repeat(300),
-        240, // soft target for x
-        expect.objectContaining({ model: 'anthropic/claude-haiku-4.5' })
-      );
+        'b'.repeat(300),
+      ]);
+      for (const [request] of parse.mock.calls) {
+        expect(request.model).toBe('anthropic/claude-haiku-4.5');
+        expect(request.messages[0].content).toContain('AT MOST 240 characters');
+        expect(request.messages[0].content).toContain(X_PARAGRAPH_GUIDANCE);
+        expect(request.messages[0].content).toContain('Keep a single-point post in one paragraph.');
+      }
       expect(openaiService.shrinkToLimit).not.toHaveBeenCalledWith(
         expect.any(String),
         expect.any(Number),
         expect.objectContaining({ language: expect.any(String) })
       );
       expect(result.contentItems[0].platforms[0].content).toBe(rewrite);
+      expect(result.contentItems[0].platforms[0].thread[0].content).toBe(rewrite);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -1604,6 +1630,8 @@ describe('OperationPlanService.create', () => {
     // dev.to and Medium meant guessing away the structure their format needs.
     expect(systemPrompt).toContain('render NO markup');
     expect(systemPrompt).not.toContain('PLAIN TEXT for X: no Markdown');
+    expect(systemPrompt).toContain('including the main post and every thread follow-up');
+    expect(systemPrompt).toContain(X_PARAGRAPH_GUIDANCE);
   });
 
   it('sources per-platform character limits from each provider maxLength() (capped soft target)', async () => {
@@ -1627,6 +1655,7 @@ describe('OperationPlanService.create', () => {
     expect(systemPrompt).toContain('pinterest: aim for up to 500 characters; platform hard limit: 500 characters');
     expect(systemPrompt).toContain('reddit: aim for up to 3000 characters; platform hard limit: 10000 characters');
     expect(systemPrompt).toContain('facebook: aim for up to 3000 characters; platform hard limit: 63206 characters');
+    expect(systemPrompt).not.toContain(X_PARAGRAPH_GUIDANCE);
   });
 
   it('keeps Medium content that exceeds its prompt target but fits the platform hard limit', async () => {
@@ -2430,6 +2459,7 @@ describe('OperationPlanService.create', () => {
     const [backfillPrompt, backfillUserPrompt] = openaiService.generateStructuredText.mock.calls[1];
     expect(mainPrompt).not.toContain('Simplified Chinese');
     expect(backfillPrompt).not.toContain('Simplified Chinese');
+    expect(backfillPrompt).not.toContain(X_PARAGRAPH_GUIDANCE);
     expect(JSON.parse(backfillUserPrompt).platforms).toEqual(['reddit']);
 
     // Coverage completed — the plan bills and materializes normally, with
@@ -2449,6 +2479,55 @@ describe('OperationPlanService.create', () => {
       }),
       expect.any(Number)
     );
+  });
+
+  it('uses the same X paragraph rule when backfilling missing X content', async () => {
+    const item = {
+      contentId: 'linkedin-item',
+      utcDate: '2030-01-01T10:00:00.000Z',
+      themeKey: 'rollout',
+      themeTitle: 'Rollout',
+      platforms: [
+        {
+          id: '11111111-1111-4111-8111-111111111111',
+          platform: 'linkedin',
+          content: 'The rollout starts today.',
+        },
+      ],
+    };
+    const content = 'The rollout starts today.\n\nExisting links will keep working.';
+    const { service, openaiService } = createGenerationDependencies({
+      contentItems: [item],
+      engagePolicies: [],
+      warnings: [],
+    });
+    openaiService.generateStructuredText
+      .mockImplementationOnce(openaiService.generateStructuredText.getMockImplementation()!)
+      .mockResolvedValueOnce({
+        data: {
+          contentItems: [
+            {
+              ...item,
+              contentId: 'x-item',
+              themeKey: 'rollout-x',
+              platforms: [{ id: '22222222-2222-4222-8222-222222222222', platform: 'x', content }],
+            },
+          ],
+        },
+        usage: { usage: { total_tokens: 40 } },
+      });
+
+    const result = await service.create('org-1', 'proj-1', {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['linkedin', 'x'],
+    }, { dryRun: true });
+
+    expect(openaiService.generateStructuredText).toHaveBeenCalledTimes(2);
+    const [backfillPrompt] = openaiService.generateStructuredText.mock.calls[1];
+    expect(backfillPrompt).toContain(X_PARAGRAPH_GUIDANCE);
+    expect(result.contentItems[1].platforms[0].content).toBe(content);
   });
 
   it('asks for Simplified Chinese only for Toutiao bodies in generation, backfill, and shortening', async () => {
@@ -2506,6 +2585,11 @@ describe('OperationPlanService.create', () => {
         toutiaoContent,
         2000,
         expect.objectContaining({ language: 'Simplified Chinese (简体中文)' })
+      );
+      expect(openaiService.shrinkToLimit).not.toHaveBeenCalledWith(
+        toutiaoContent,
+        2000,
+        expect.objectContaining({ formattingInstruction: expect.any(String) })
       );
       expect(result.contentItems[0].themeTitle).toBe(item.themeTitle);
       expect(result.contentItems[0].platforms[0].content).toBe(xContent);

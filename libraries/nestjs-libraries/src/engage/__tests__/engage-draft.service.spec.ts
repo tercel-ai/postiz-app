@@ -6,6 +6,7 @@ import { EngageOpportunity } from '@prisma/client';
 const mockAnthropicResponse = {
   content: [{ type: 'text', text: 'Hello world!' }],
 };
+const X_PARAGRAPH_GUIDANCE = 'Separate distinct points with one blank line';
 
 // Mock Anthropic — prevents live API calls when ANTHROPIC_API_KEY is set
 vi.mock('@anthropic-ai/sdk', () => {
@@ -865,15 +866,18 @@ describe('EngageDraftService', () => {
     });
 
     it('corrects an over-limit AND brand-less X draft in a single retry', async () => {
+      const reply = 'Check the logs first.\n\nAISEE can help compare the results.';
       const generateRaw = vi
         .spyOn(service as any, '_generateRaw')
         .mockResolvedValueOnce('x'.repeat(281))
-        .mockResolvedValueOnce('Short reply naming AISEE.');
+        .mockResolvedValueOnce(reply);
 
-      expect(await consume(xOpportunity, 3, ['AISEE'])).toBe(
-        'Short reply naming AISEE.'
-      );
+      expect(await consume(xOpportunity, 3, ['AISEE'])).toBe(reply);
       expect(generateRaw).toHaveBeenCalledTimes(2);
+      for (const [prompt] of generateRaw.mock.calls) {
+        expect(prompt).toContain(X_PARAGRAPH_GUIDANCE);
+        expect(prompt).toContain('Keep a single-point reply in one paragraph.');
+      }
       // Both corrections ride on the same retry prompt.
       expect(generateRaw.mock.calls[1][0]).toContain(
         'Your previous draft exceeded the X character limit'
@@ -892,6 +896,7 @@ describe('EngageDraftService', () => {
         'Generated Reddit draft exceeded 2000 characters.'
       );
       expect(generateRaw).toHaveBeenCalledTimes(1);
+      expect(generateRaw.mock.calls[0][0]).not.toContain(X_PARAGRAPH_GUIDANCE);
     });
   });
 });

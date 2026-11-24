@@ -54,6 +54,9 @@ export { OPERATION_PLAN_PLATFORM_CADENCE_KEY } from './platform-cadence';
 
 dayjs.extend(utc);
 
+const X_POST_PARAGRAPH_RULE =
+  'Within each X post body, including the main post and every thread follow-up, separate distinct points with one blank line (\\n\\n). Keep a single-point post in one paragraph.';
+
 const TOUTIAO_CONTENT_LANGUAGE = 'Simplified Chinese (简体中文)';
 const TOUTIAO_CONTENT_LANGUAGE_RULE =
   `- For platform entries with \`platform: "toutiao"\` only, write \`content\` in natural ${TOUTIAO_CONTENT_LANGUAGE}, even if the source material is in another language. Keep brand names and technical terms in their conventional form when appropriate. Apply this rule only to the Toutiao body, leaving shared theme titles and other platforms' language choices independent.`;
@@ -904,6 +907,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         // platform and left the model to guess about the rest. It guessed
         // wrong on dev.to and Medium, whose native format is structured.
         ...buildMarkupGuidanceLines(platforms).map((line) => `- ${line}`),
+        ...(platforms.includes('x') ? [`- ${X_POST_PARAGRAPH_RULE}`] : []),
         '- Hashtags: a hashtag ENDS at the first space, so a multi-word tag silently breaks — "#MCP protocol" renders as the tag "#MCP" followed by the loose word "protocol". Never hashtag a multi-word keyword: either write it as plain prose (preferred — keywords belong in the sentence, not bolted on as tags) or close it up into one word ("#MCPprotocol"). Use at most 1-2 hashtags, and only single-word ones.',
         '- Prefer content AI systems can cite: concrete data points and answer-style framing. For owned/blog channels, reference the project\'s own canonical URL. "Build-in-public" (sharing real, specific progress/metrics) tends to be the most citable. Keep copy concise and publish-ready.',
         '- REDDIT TARGETING: for every `reddit` platform entry, set `subreddit` to the single most relevant EXISTING, ACTIVE, PUBLIC subreddit for this content (bare name, no "r/" prefix, e.g. "webdev"). Pick a real community you are confident exists and accepts text (self) posts on this topic — the backend verifies it against Reddit and DROPS the post if the subreddit is missing, private, link-only, or inactive, so a wrong guess wastes the post. For EVERY non-reddit platform entry, set `subreddit` to null.',
@@ -1609,6 +1613,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
           timeoutMs: OPERATION_PLAN_GEN_TIMEOUT_MS,
           maxRetries: OPERATION_PLAN_GEN_MAX_RETRIES,
           ...(platform === 'toutiao' ? { language: TOUTIAO_CONTENT_LANGUAGE } : {}),
+          ...(platform === 'x' ? { formattingInstruction: X_POST_PARAGRAPH_RULE } : {}),
         });
         content = shrunk.post;
         // Bill the shrink tokens even if the result still needs a mechanical
@@ -1708,6 +1713,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
           '- REDDIT SELF-PROMOTION / SPAM GUARDRAILS: if `reddit` is in the missing list, NEVER include the project\'s own URL or "I built X" framing in its `content` — write it as a genuine discussion/question, not an announcement, with a clear title and substantive body (no self-promotion, no spam links, no low-effort/empty content, no leaked material verbatim).',
           '- DEV.TO TAGGING: if `devto` is in the missing list, set `tags` to 1-4 single-word lowercase topic tags. For every non-devto entry set `tags` to null.',
           ...buildMarkupGuidanceLines(missingPlatforms).map((l) => `- ${l}`),
+          ...(missingPlatforms.includes('x') ? [`- ${X_POST_PARAGRAPH_RULE}`] : []),
           '- Follow the per-platform rhythm in `platformPlaybook` for tone/substance.',
         ].join('\n'),
         JSON.stringify({

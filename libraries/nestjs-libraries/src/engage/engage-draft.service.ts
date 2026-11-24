@@ -646,6 +646,10 @@ export class EngageDraftService {
     const brandReminder = requiredMentions.length
       ? ` and must name ${requiredMentions.map((m) => `"${m}"`).join(" or ")}`
       : "";
+    const paragraphGuidance =
+      platform === "x"
+        ? "\nSeparate distinct points with one blank line (two line breaks). Keep a single-point reply in one paragraph."
+        : "";
 
     // Length is stated FIRST, restated mid-prompt, and repeated last. It is the
     // one rule whose violation is fatal — an over-long reply is rejected
@@ -659,7 +663,7 @@ HARD LENGTH LIMIT — THIS OUTRANKS EVERY OTHER INSTRUCTION BELOW: keep the repl
 ${strategyInstruction}
 ${brandInstruction}
 ${communityGuardrails}${intentInstruction}
-Platform constraint (restated because it is the one that fails hardest): Keep the reply ${charLimit}.
+Platform constraint (restated because it is the one that fails hardest): Keep the reply ${charLimit}.${paragraphGuidance}
 Relevance requirements:
 - Reply directly to the central point, question, or situation in the original post.
 - Ground the reply in at least one specific detail from the original post. Do not give a generic reply that could apply to an unrelated post.
