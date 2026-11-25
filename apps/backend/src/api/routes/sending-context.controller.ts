@@ -11,7 +11,7 @@ export class SendingContextController {
   constructor(private readonly context: SendingContextService) {}
 
   @Get()
-  @ApiOperation({ summary: 'Initialize Project defaults and Post/Reply account pickers, including reported node sessions' })
+  @ApiOperation({ summary: 'Read Project sending defaults, accounts, node sessions, and Post/Reply character limits' })
   get(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User,
     @Param('projectId') projectId: string) {
     return this.context.get(org.id, user.id, projectId);

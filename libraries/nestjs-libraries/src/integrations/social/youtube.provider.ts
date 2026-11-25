@@ -7,8 +7,13 @@ import {
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
-import { google, youtube_v3 } from 'googleapis';
-import { OAuth2Client } from 'google-auth-library/build/src/auth/oauth2client';
+import { OAuth2Client } from 'google-auth-library';
+import { oauth2 as createOAuth2 } from 'googleapis/build/src/apis/oauth2';
+import {
+  youtube as createYoutube,
+  youtube_v3,
+} from 'googleapis/build/src/apis/youtube';
+import { youtubeAnalytics as createYoutubeAnalytics } from 'googleapis/build/src/apis/youtubeAnalytics';
 import axios from 'axios';
 import { YoutubeSettingsDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/youtube.settings.dto';
 import {
@@ -22,26 +27,26 @@ import Schema$Video = youtube_v3.Schema$Video;
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
 
 const clientAndYoutube = () => {
-  const client = new google.auth.OAuth2({
+  const client = new OAuth2Client({
     clientId: process.env.YOUTUBE_CLIENT_ID,
     clientSecret: process.env.YOUTUBE_CLIENT_SECRET,
     redirectUri: `${process.env.FRONTEND_URL}/integrations/social/youtube`,
   });
 
   const youtube = (newClient: OAuth2Client) =>
-    google.youtube({
+    createYoutube({
       version: 'v3',
       auth: newClient,
     });
 
   const youtubeAnalytics = (newClient: OAuth2Client) =>
-    google.youtubeAnalytics({
+    createYoutubeAnalytics({
       version: 'v2',
       auth: newClient,
     });
 
   const oauth2 = (newClient: OAuth2Client) =>
-    google.oauth2({
+    createOAuth2({
       version: 'v2',
       auth: newClient,
     });

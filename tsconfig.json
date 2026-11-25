@@ -1,3 +1,13 @@
 {
-  "extends": "./tsconfig.base.json"
+  "extends": "./tsconfig.base.json",
+  "include": [
+    "*.ts",
+    "apps/frontend/src/**/*.spec.ts",
+    "apps/frontend/src/**/*.test.ts",
+    "apps/sdk/tsup.config.ts",
+    "libraries/helpers/src",
+    "libraries/nestjs-libraries/src/**/*.spec.ts",
+    "libraries/nestjs-libraries/src/**/*.test.ts",
+    "libraries/react-shared-libraries/src/**/*.tsx"
+  ]
 }

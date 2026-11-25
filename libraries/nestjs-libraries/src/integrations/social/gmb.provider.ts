@@ -6,8 +6,8 @@ import {
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
-import { google } from 'googleapis';
-import { OAuth2Client } from 'google-auth-library/build/src/auth/oauth2client';
+import { OAuth2Client } from 'google-auth-library';
+import { oauth2 as createOAuth2 } from 'googleapis/build/src/apis/oauth2';
 import { SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import * as process from 'node:process';
 import dayjs from 'dayjs';
@@ -15,7 +15,7 @@ import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorato
 import { GmbSettingsDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/gmb.settings.dto';
 
 const clientAndGmb = () => {
-  const client = new google.auth.OAuth2({
+  const client = new OAuth2Client({
     clientId: process.env.GOOGLE_GMB_CLIENT_ID || process.env.YOUTUBE_CLIENT_ID,
     clientSecret:
       process.env.GOOGLE_GMB_CLIENT_SECRET || process.env.YOUTUBE_CLIENT_SECRET,
@@ -23,7 +23,7 @@ const clientAndGmb = () => {
   });
 
   const oauth2 = (newClient: OAuth2Client) =>
-    google.oauth2({
+    createOAuth2({
       version: 'v2',
       auth: newClient,
     });

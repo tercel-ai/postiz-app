@@ -75,6 +75,46 @@ describe('EngageReferencePostService', () => {
     expect(service).toBeDefined();
   });
 
+  it.each([
+    ['x', 65, 280, '0–65 Twitter-weighted characters'],
+    ['x', 130, 280, '65–130 Twitter-weighted characters'],
+    ['x', 260, 280, '130–260 Twitter-weighted characters'],
+    ['x', 4000, 25000, '1500–4000 Twitter-weighted characters'],
+    ['linkedin', 1275, 280, '638–1275 characters'],
+  ])('recommends the selected picker range for %s at %i', async (targetPlatform, outputLength, maxWeighted, range) => {
+    anthropicCreate.mockResolvedValueOnce(anthropicResponse('A considered take.'));
+
+    const result = await service.generate(REFERENCE, {
+      strategy: 'EXPERT_ANSWER', brandStrength: 1, targetPlatform, outputLength, maxWeighted,
+    });
+
+    expect(result.text).toBe('A considered take.');
+    expect(anthropicCreate).toHaveBeenCalledTimes(1);
+    const [request] = anthropicCreate.mock.calls[0];
+    expect(request.system).toContain(range);
+    expect(request.messages[0].content).toContain(range);
+  });
+
+  it.each([
+    ['medium', 638, '271–542', 271],
+    ['devto', 638, '271–542', 271],
+    ['medium', 1275, '638–1084', 542],
+  ])('retains the article floor for %s at picker value %i', async (targetPlatform, outputLength, range, floor) => {
+    anthropicCreate.mockResolvedValueOnce(
+      anthropicResponse('TITLE: A practical guide\n\nStart by writing down the problem.')
+    );
+
+    await service.generate(REFERENCE, {
+      strategy: 'EXPERT_ANSWER', brandStrength: 1, targetPlatform, outputLength,
+    });
+
+    const [request] = anthropicCreate.mock.calls[0];
+    for (const prompt of [request.system, request.messages[0].content]) {
+      expect(prompt).toContain(`within ${range} characters`);
+      expect(prompt).toContain(`under ${floor}`);
+    }
+  });
+
   it('returns the generated text and one usage entry on a clean first attempt', async () => {
     anthropicCreate.mockResolvedValueOnce(
       anthropicResponse(
@@ -108,18 +148,14 @@ describe('EngageReferencePostService', () => {
     expect(anthropicCreate.mock.calls[0][0].system).toContain('under 850 characters');
   });
 
-  // engage-draft.service.ts measured the model returning 251–294 chars on a
-  // 250 target, so the prompt asks for less than the ceiling. X gets its margin
-  // structurally (260 target under a 280 ceiling) and is only told to leave
-  // room; elsewhere the requested length IS the ceiling, so the target shrinks.
-  it('prompts X for the full target but tells it to leave a safety margin', async () => {
+  it('keeps the recommended X range below the hard ceiling', async () => {
     anthropicCreate.mockResolvedValueOnce(anthropicResponse('An original take.'));
 
     await service.generate(REFERENCE, { strategy: 'EXPERT_ANSWER', brandStrength: 1, outputLength: 260 });
 
     const systemPrompt = anthropicCreate.mock.calls[0][0].system;
-    expect(systemPrompt).toContain('under 260 Twitter-weighted characters');
-    expect(systemPrompt).toContain('leave a safety margin');
+    expect(systemPrompt).toContain('130–260 Twitter-weighted characters');
+    expect(systemPrompt).toContain('under 280 Twitter-weighted characters');
   });
 
   it('shrinks the prompted target to 85% on platforms where the request IS the ceiling', async () => {
@@ -149,7 +185,7 @@ describe('EngageReferencePostService', () => {
 
     const prompt = anthropicCreate.mock.calls[0][0].system as string;
     expect(prompt).toContain('TARGET LENGTH');
-    expect(prompt).toContain('advisory target, not a rejection threshold');
+    expect(prompt).toContain('A shorter result or a small overage is fine');
     expect(prompt).toContain('under 280 Twitter-weighted characters');
   });
 
@@ -242,7 +278,7 @@ describe('EngageReferencePostService', () => {
 
       const systemPrompt: string = anthropicCreate.mock.calls[0][0].system;
       expect(systemPrompt).toContain('TARGET LENGTH');
-      expect(systemPrompt).toContain('advisory target, not a rejection threshold');
+      expect(systemPrompt).toContain('A shorter result or a small overage is fine');
       expect(systemPrompt).toContain('PLATFORM HARD LENGTH LIMIT — THIS OUTRANKS EVERY OTHER INSTRUCTION');
       expect(systemPrompt).toContain('under 280 Twitter-weighted characters');
       expect(systemPrompt.trimEnd().endsWith('never truncate mid-thought.')).toBe(true);
@@ -295,7 +331,7 @@ describe('EngageReferencePostService', () => {
       // 220, not the 260 that was asked for: `outputLength` selects a TIER,
       // and `long` is 220 per post in a thread because every part faces the
       // ceiling independently. An honoured raw 260 skipped that adjustment.
-      expect(systemPrompt).toContain('keep EACH post of the thread under 220');
+      expect(systemPrompt).toContain('keep EACH post of the thread within 130–220');
       expect(systemPrompt).toContain('a thread is not a licence to spend more characters per post');
     });
 
@@ -309,7 +345,7 @@ describe('EngageReferencePostService', () => {
 
       const userContent: string = anthropicCreate.mock.calls[0][0].messages[0].content;
       expect(userContent).toContain('Length target: aim to keep');
-      expect(userContent).toContain('under 260 Twitter-weighted characters');
+      expect(userContent).toContain('130–260 Twitter-weighted characters');
       expect(userContent).toContain('under 280 Twitter-weighted characters');
       expect(userContent).toContain('regardless of how long the reference post above is');
     });
@@ -1653,7 +1689,7 @@ describe('EngageReferencePostService', () => {
         outputLength: 130,
       });
 
-      expect(systemPromptAt(1)).toContain('under 65 Twitter-weighted characters');
+      expect(systemPromptAt(1)).toContain('0–65 Twitter-weighted characters');
     });
 
     // `outputLength` is a client's Short/Medium/Long picker resolved to a
@@ -1661,9 +1697,7 @@ describe('EngageReferencePostService', () => {
     // honoured raw number skipped every adjustment keyed off the tier.
     it.each([
       [270, 260, 'above the widest tier, capped onto it'],
-      [260, 260, 'exactly the widest tier'],
       [200, 130, 'between tiers, snapped down'],
-      [130, 130, 'exactly the middle tier'],
       [100, 65, 'below the middle tier'],
       [2, 65, 'below every tier, floored'],
     ])('snaps outputLength %i onto the %i tier (%s)', async (asked, tier) => {
@@ -1695,7 +1729,7 @@ describe('EngageReferencePostService', () => {
         maxThreadParts: 2,
       });
 
-      expect(systemPromptAt(0)).toContain('under 220 Twitter-weighted characters');
+      expect(systemPromptAt(0)).toContain('130–220 Twitter-weighted characters');
     });
 
     // A thread's `long` IS 220, so 220 matches that tier rather than falling
@@ -1726,7 +1760,7 @@ describe('EngageReferencePostService', () => {
         { strategy: 'EXPERT_ANSWER', brandStrength: 1, outputLength: 260 }
       );
 
-      expect(systemPromptAt(0)).toContain('under 130 Twitter-weighted characters');
+      expect(systemPromptAt(0)).toContain('65–130 Twitter-weighted characters');
     });
 
     // Six platforms have no tiers to snap onto, and changing what the field
@@ -1775,6 +1809,7 @@ describe('EngageReferencePostService', () => {
       const result = await service.generate(REFERENCE, {
         strategy: 'EXPERT_ANSWER',
         brandStrength: 1,
+        outputLength: 260,
       });
 
       expect(anthropicCreate).toHaveBeenCalledTimes(1);

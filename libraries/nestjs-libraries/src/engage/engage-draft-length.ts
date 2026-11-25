@@ -13,7 +13,6 @@ import {
 //
 // (X: 260 target / 280 ceiling = X's exact max — weightedLength uses official
 // twitter-text weighting, so no safety margin needed; Reddit: 1000 / 2000).
-// Keep these in sync with engage-draft.service.ts.
 export const X_WEIGHTED_CHAR_LIMIT = 260;
 export const X_HARD_CHAR_LIMIT = 280;
 export const REDDIT_TARGET_CHAR_LIMIT = 1000;
@@ -65,20 +64,6 @@ const X_LONG_FORM_REFERENCE_POST_TARGETS: Record<
   long: 4096,
 };
 
-/**
- * The same ladder for REPLIES, and deliberately a third of the size.
- *
- * A reply is a reply. Several thousand characters aimed at someone else's post
- * is a different social act from a long-form original, and nobody who picked
- * "long reply" is asking for an essay. `long` at 2000 also sits well inside
- * the 2x headroom band rather than at the edge of it.
- */
-const X_LONG_FORM_REPLY_TARGETS: Record<ReplyLengthTier, number> = {
-  short: 200,
-  medium: 600,
-  long: 2000,
-};
-
 export type ReplyLengthTier = 'short' | 'medium' | 'long';
 
 export function normalizeEngagePlatform(platform: string): string {
@@ -94,28 +79,16 @@ const LENGTH_TARGETS: Record<ReplyLengthTier, { x: number; reddit: number }> = {
   long: { x: 255, reddit: 1800 },
 };
 
-/**
- * `maxWeighted` is the ACCOUNT's X ceiling, when the caller resolved one. It
- * moves the `long` tier and nothing else — the same rule, and the same
- * reasoning, as xReferencePostTarget: how long a reply SHOULD be is a content
- * decision, and being entitled to 25000 characters is not a reason to turn a
- * reply someone asked to be short into an essay.
- *
- * Defaults to X's free tier, so the unattended auto-reply driver — which never
- * resolves an account — keeps the exact targets it has always had.
- */
-export function outputLengthForLength(
-  platform: string,
-  length: ReplyLengthTier,
-  maxWeighted: number = X_FREE_MAX_WEIGHTED
-): number {
-  const normalized = normalizeEngagePlatform(platform);
+/** Applies the same soft ceiling to every X reply. */
+export function clampReplyOutputLength(platform: string, outputLength: number): number {
+  return normalizeEngagePlatform(platform) === 'x'
+    ? Math.min(outputLength, X_WEIGHTED_CHAR_LIMIT)
+    : outputLength;
+}
+
+export function outputLengthForLength(platform: string, length: ReplyLengthTier): number {
   const target = LENGTH_TARGETS[length];
-  if (normalized !== 'x') return target.reddit;
-  if (allowsLongForm(maxWeighted)) {
-    return Math.min(X_LONG_FORM_REPLY_TARGETS[length], maxWeighted);
-  }
-  return target.x;
+  return normalizeEngagePlatform(platform) === 'x' ? target.x : target.reddit;
 }
 
 /** The length vocabulary a reference-post generation for X is written against. */
@@ -190,6 +163,63 @@ const TIER_ORDER: readonly ReferencePostLengthTier[] = [
   'long',
 ] as const;
 
+export type LengthRange = { min: number; max: number };
+
+// Match aisee-app's shared Engage length picker. Keep arbitrary outputLength
+// values on the existing API path, including server-side auto-reply defaults.
+function pickerUpperBounds(platform: string, maxWeighted: number): number[] {
+  if (platform === 'x' && allowsLongForm(maxWeighted)) return [260, 1500, 4000];
+  const max =
+    platform === 'x'
+      ? X_WEIGHTED_CHAR_LIMIT
+      : platform === 'reddit'
+        ? 850
+        : (SCANNABLE_PLATFORMS as readonly string[]).includes(platform)
+          ? 2550
+          : 1000;
+  return [Math.round(max * 0.25), Math.round(max * 0.5), max];
+}
+
+export function engagePickerLengthRange(
+  platform: string,
+  outputLength?: number,
+  maxWeighted: number = X_FREE_MAX_WEIGHTED
+): (LengthRange & { tier: ReplyLengthTier }) | undefined {
+  if (outputLength === undefined) return;
+  const bounds = pickerUpperBounds(normalizeEngagePlatform(platform), maxWeighted);
+  const index = bounds.findIndex((bound) => bound === outputLength);
+  if (index === -1) return;
+  return { min: bounds[index - 1] ?? 0, max: bounds[index], tier: TIER_ORDER[index] };
+}
+
+/** The picker range corresponding to the X tier actually used for this attempt. */
+export function xReferencePostPickerLengthRange(
+  target: number,
+  threadPosts: number,
+  maxWeighted: number
+): LengthRange {
+  if (threadPosts > 1 && target === X_REFERENCE_POST_THREAD_LONG_TARGET) {
+    return { min: X_REFERENCE_POST_TARGETS.medium, max: target };
+  }
+  const bounds = pickerUpperBounds('x', maxWeighted);
+  const index = TIER_ORDER.findIndex(
+    (tier) => xReferencePostTarget(tier, threadPosts, maxWeighted) === target
+  );
+  return { min: bounds[index - 1] ?? 0, max: Math.min(bounds[index] ?? target, target) };
+}
+
+export function describeEngageLengthRange(
+  platform: string,
+  range: LengthRange,
+  ceiling = range.max
+): string {
+  const max = Math.min(range.max, ceiling);
+  const span = `${Math.min(range.min, max)}–${max}`;
+  return platform === 'x'
+    ? `${span} Twitter-weighted characters (CJK/emoji count as 2, URLs as 23)`
+    : `${span} characters`;
+}
+
 /**
  * Which tier a requested character count means.
  *
@@ -212,6 +242,13 @@ export function xReferencePostTierFor(
   threadPosts: number,
   maxWeighted: number = X_FREE_MAX_WEIGHTED
 ): ReferencePostLengthTier {
+  // Match the web picker's premium single-post values before snapping to the
+  // internal budget. Threads keep the existing per-part tier selection.
+  const pickerRange = threadPosts === 1
+    ? engagePickerLengthRange('x', requestedCharacters, maxWeighted)
+    : undefined;
+  if (pickerRange) return pickerRange.tier;
+
   for (let i = TIER_ORDER.length - 1; i >= 0; i--) {
     const tier = TIER_ORDER[i];
     if (

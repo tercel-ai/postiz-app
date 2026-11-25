@@ -1148,7 +1148,6 @@ export class EngageAutoReplyService implements OnModuleInit {
           policy.mentionTags,
           undefined,
           outputLength,
-          undefined,
           usages
         )) {
           text += chunk;

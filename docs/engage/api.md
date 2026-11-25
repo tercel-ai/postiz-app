@@ -1647,8 +1647,7 @@ Stream the generation of an AI reply draft. Response is Server-Sent Events (`tex
   "strategy": "EXPERT_ANSWER",  // Required: ReplyStrategy (see type def above)
   "brandStrength": 1,           // Required: 0-3 integer
   "mentions": ["AISEE"],        // Optional: brand names to weave in (max 20)
-  "outputLength": 1000,         // Optional: target reply length (chars); omit to use platform default
-  "maxWeighted": 25000,         // Optional, X only: the ACCOUNT's post ceiling (weighted); omit → 280
+  "outputLength": 260,          // Optional: length picker value (chars); omit to use the reply tier default
   "projectId": "product_123"    // Optional project scope
 }
 ```
@@ -1658,17 +1657,26 @@ Stream the generation of an AI reply draft. Response is Server-Sent Events (`tex
 | `strategy` | `ReplyStrategy` | ✓ | One of the 7 strategy keys (see Strategy Descriptions) |
 | `brandStrength` | `number` (0–3) | ✓ | Brand emphasis level (see table below) |
 | `mentions` | `string[]` (max 20) | | Brand names the model may mention (used when `brandStrength` ≥ 2) |
-| `outputLength` | `integer` (≥ 2) | | Target reply length fed into the prompt. Omitted → platform default (X = 260 weighted chars, Reddit = 1000 chars) |
-| `maxWeighted` | `integer` (280–25000) | | **X only.** The ACCOUNT's own post ceiling in weighted characters — 280 without a subscription, 25000 with one. Read live from the browser extension (`XSessionInfo.maxWeighted`) and passed on by the web app; nothing is stored server-side. Selects which tier ladder the reply is written against (`short`/`medium`/`long` = 120/200/255 free, 200/600/2000 long-form) and raises the hard-reject threshold to match. Omitted, out of range or non-numeric → 280 |
+| `outputLength` | `integer` (≥ 2) | | A matching web picker value supplies the upper bound of a recommended range. X targets are capped at 260 weighted characters. Omitted values use the target for `length` |
+| `length` | `short\|medium\|long` | | Reply billing tier and fallback generation target when `outputLength` is omitted. Defaults to `medium` |
+| `maxWeighted` | `integer` (280–25000) | | Deprecated. Accepted for existing clients. The reply ceiling is the same for every X account. |
 | `projectId` | `string` | | Optional project scope |
 
 **Output length & character limits**
 
-`outputLength` is the **target** the model is instructed to aim for — it is not the hard rejection threshold:
+Generate Reply uses the web picker values below. The prompt recommends the selected range and asks the model to use only the detail the content merits. A draft outside the range can still be returned without a length retry when it passes the existing ceiling check.
+
+| Web picker platform | Short | Medium | Long |
+|---|---:|---:|---:|
+| X (standard, weighted characters) | 0–65 | 65–130 | 130–260 |
+| Reddit | 0–213 | 213–425 | 425–850 |
+| LinkedIn, Quora, Hacker News, dev.to, Medium | 0–638 | 638–1275 | 1275–2550 |
+
+The reply hard caps and tier defaults apply independently.
 
 | Platform | Default target | Hard cap (draft rejected above this) |
 |---|---|---|
-| X / Twitter | 260 Twitter-weighted chars (255 on the `long` tier; 2000 when `maxWeighted` says the account is subscribed) | `max(outputLength, maxWeighted ?? 280)` — the ACCOUNT's ceiling, not a constant (one automatic retry if the first draft overshoots). Taking `280` here for a long-form account would reject at exactly the target and destroy the slack this split exists for |
+| X / Twitter | 200 weighted characters on `medium`, with a soft maximum of 260 | 280 weighted characters for every account. One automatic retry on an overrun |
 | Reddit | 1000 chars | `max(outputLength, 2000)` — drafts of 1000–2000 chars are accepted; only above 2000 fails |
 
 > Reddit's real limit is ~10000 chars, so a 2000-char reply always posts fine. Keeping the target at 1000 favors concise, natural replies while tolerating a slight overshoot instead of failing the whole generation. A Reddit draft over the hard cap fails with `generation_failed` and is **not** retried (unlike X).
@@ -1808,8 +1816,8 @@ Listing them back: `GET /api/posts` and `GET /api/posts/list` (and `/posts/list/
 | `strategy` | `string` (one of `VALID_STRATEGIES` — `EXPERT_ANSWER`, `DATA_BACKED`, `EMPATHY_LED`, `CONTRARIAN`, `QUESTION_LED`, `QUICK_TAKE`, `AMPLIFY`) | ✓ | Same 7 keys as `/draft` |
 | `brandStrength` | `number` (0–3) | ✓ | Same brand-mention control as `/draft`, same shared implementation |
 | `mentions` | `string[]` (≤20) | — | Optional brand names, used when `brandStrength` ≥ 2 |
-| `outputLength` | `integer` (≥ 2) | — | Target length; soft target only, same semantics as reply drafts |
-| `maxWeighted` | `integer` (280–25000) | — | **X targets only.** The account's post ceiling in weighted characters; selects the tier ladder. Omitted → 280. Same field and semantics as `/draft` |
+| `outputLength` | `integer` (≥ 2) | — | Web picker value for the target platform's recommended range (see [Reply output length](#post-apiengageopportunitiesiddraft)). X may use a shorter effective range for threads, dense references or a corrective retry. Other numeric values use the existing target rules |
+| `maxWeighted` | `integer` (280–25000) | — | **X targets only.** The account's post ceiling in weighted characters; selects the tier ladder. Omitted → 280. This ceiling applies to original Post and Rewrite generation |
 | `projectId` | `string` | — | Optional project scope |
 | `targetPlatform` | `string` (one of `SCANNABLE_PLATFORMS` — `x`, `reddit`, `linkedin`, `devto`, `hackernews`, `medium`, `quora`) | — | The platform the post is **written for**. Omitted ⇒ the opportunity's own platform, which is what this endpoint always did. Supplied ⇒ a cross-platform generation: the character budget, the format rules and the house style all come from the TARGET, while the opportunity stays the reference. `providerIdentifier` on the saved draft is the target. See `reference-post-generation.md` §6.4 |
 | `targetChannel` | `string` (bare subreddit name, 3–21 of `[a-z0-9_]`, no `r/`) | — | The community a `targetPlatform: 'reddit'` post is submitted into; ignored for every other target. **Required in practice when the opportunity is not itself a reddit post** — a reddit→reddit generation reuses the subreddit the scanner recorded, but nothing in an X or LinkedIn opportunity implies one, so without it the request is refused rather than guessing a community. See `reference-post-generation.md` §6.4 for the full three-source resolution order |

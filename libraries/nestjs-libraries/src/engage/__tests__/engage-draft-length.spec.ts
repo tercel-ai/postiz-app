@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   assertDraftWithinPlatformLimit,
+  clampReplyOutputLength,
   outputLengthForLength,
   downgradedReferencePostTarget,
   normalizeEngagePlatform,
@@ -225,18 +226,13 @@ describe('a per-account X ceiling', () => {
     expect(xReferencePostTarget('long', 1, 25000)).toBeLessThanOrEqual(4096);
   });
 
-  it('gives REPLIES a ladder about a third the size', () => {
-    // A reply is a reply. Several thousand characters aimed at someone else's
-    // post is a different social act from a long-form original.
-    expect(outputLengthForLength('x', 'short', 25000)).toBe(200);
-    expect(outputLengthForLength('x', 'medium', 25000)).toBe(600);
-    expect(outputLengthForLength('x', 'long', 25000)).toBe(2000);
-    // Every rung strictly below the original-post rung of the same name.
-    for (const tier of ['short', 'medium', 'long'] as const) {
-      expect(outputLengthForLength('x', tier, 25000)).toBeLessThan(
-        xReferencePostTarget(tier, 1, 25000)
-      );
-    }
+  it.each([
+    ['x', 1500, 260],
+    ['twitter', 1500, 260],
+    ['x', 130, 130],
+    ['reddit', 1500, 1500],
+  ])('clamps explicit %s reply targets from %i to %i', (platform, requested, expected) => {
+    expect(clampReplyOutputLength(platform, requested)).toBe(expected);
   });
 
   it('leaves every free-tier caller exactly where it was', () => {
@@ -254,12 +250,6 @@ describe('a per-account X ceiling', () => {
     // ahead of time and the browser may have switched X accounts by then.
     expect(outputLengthForLength('x', 'long')).toBe(255);
     expect(outputLengthForLength('twitter', 'long')).toBe(255);
-  });
-
-  it('does not widen reply targets on other platforms', () => {
-    expect(outputLengthForLength('reddit', 'long', 25000)).toBe(
-      outputLengthForLength('reddit', 'long')
-    );
   });
 
   it('keeps a thread a thread on a long-form account', () => {

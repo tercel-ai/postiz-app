@@ -1330,14 +1330,13 @@ describe('EngageAutoReplyService.getDueReplies — per-platform overrides', () =
       ['@aisee', '@support'],
       undefined,
       expect.any(Number),
-      undefined,
       expect.any(Array)
     );
     expect(engage.settleReplyGeneration).toHaveBeenCalledWith(
       org, 'task-1', 'long', 3, expect.any(Array)
     );
     // The list the draft service filled is the one settle records on the charge.
-    const handedToDraft = draft.generateDraft.mock.calls[0][7];
+    const handedToDraft = draft.generateDraft.mock.calls[0][6];
     expect(engage.settleReplyGeneration.mock.calls[0][4]).toBe(handedToDraft);
   });
 

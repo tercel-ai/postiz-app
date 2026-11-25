@@ -1122,22 +1122,7 @@ export class GenerateDraftDto {
   @Type(() => Number)
   outputLength?: number;
 
-  /**
-   * The X ACCOUNT's own post ceiling in WEIGHTED characters — 280 without a
-   * subscription, 25000 with one (measured 2026-09-22).
-   *
-   * Sent by the web app, which reads it live from the browser extension over
-   * the social-sessions bridge (`XSessionInfo.maxWeighted`). It is NOT stored
-   * server-side: the only client that generates is the one already holding the
-   * current value, so a copy here could only ever be staler.
-   *
-   * Absent means "not known", which resolves to X's free-tier 280 — the limit
-   * every X account has, and the safe direction to be wrong in. Bounded rather
-   * than trusted: a value outside the range X is known to grant is a bug or a
-   * stale client, not a more generous account.
-   *
-   * Ignored on every other platform, which have ceilings of their own.
-   */
+  /** @deprecated Accepted for existing clients. X reply limits are account-independent. */
   @IsOptional()
   @IsInt()
   @Min(X_FREE_MAX_WEIGHTED)
@@ -1444,6 +1429,8 @@ export class GenerateReferencePostDto {
 
 // ─── Reply Sending ────────────────────────────────────────────────────────────
 
+export const REPLY_INPUT_MAX_LENGTH = 4000;
+
 export class SendReplyDto {
   @ValidateIf(value => value.integrationId !== undefined)
   @IsString()
@@ -1451,7 +1438,7 @@ export class SendReplyDto {
   integrationId?: string; // Resolved at enqueue, or at first coordinated claim under OPTIONAL.
 
   @IsString()
-  @MaxLength(4000)
+  @MaxLength(REPLY_INPUT_MAX_LENGTH)
   draftContent: string;
 
   @IsString()
@@ -1602,7 +1589,7 @@ export class ReportReplyFailedDto extends ReportTargetGoneDto {
 
 export class ConfirmManualReplyDto {
   @IsString()
-  @MaxLength(4000)
+  @MaxLength(REPLY_INPUT_MAX_LENGTH)
   draftContent: string;
 
   @IsString()
@@ -1725,7 +1712,7 @@ export class SaveDraftDto {
   projectId?: string;
 
   @IsString()
-  @MaxLength(4000)
+  @MaxLength(REPLY_INPUT_MAX_LENGTH)
   draftContent: string;
 
   @IsString()
@@ -1749,7 +1736,7 @@ export class SaveDraftDto {
 export class UpdateScheduledReplyDto {
   @IsOptional()
   @IsString()
-  @MaxLength(4000)
+  @MaxLength(REPLY_INPUT_MAX_LENGTH)
   content?: string;
 
   @IsOptional()

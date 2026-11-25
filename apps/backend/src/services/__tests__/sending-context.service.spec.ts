@@ -44,6 +44,47 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(now); vi.stubEnv('ACCOUN
 afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 
 describe('shared Project, Post and Reply sending context', () => {
+  it('returns the Post and Reply character limits by platform and X subscription tier', async () => {
+    const { service } = setup();
+    const result = await service.get('org', 'user', 'project');
+    expect(result.contentLimits.x).toEqual({
+      unit: 'weighted',
+      oauthPostLimits: { unverified: 280, verified: 4000 },
+      tiers: {
+        free: { post: 280, reply: 260 },
+        basic: { post: 25000, reply: 260 },
+        premium: { post: 25000, reply: 260 },
+        premiumPlus: { post: 25000, reply: 260 },
+      },
+    });
+    expect(result.contentLimits.reddit).toEqual({
+      unit: 'characters', tiers: { default: { post: 10000, reply: 2000 } },
+    });
+    expect(result.contentLimits.linkedin.tiers.default).toEqual({ post: 3000, reply: 3000 });
+    expect(result.replyInputMaxLength).toBe(4000);
+  });
+  it.each([
+    [JSON.stringify([{ title: 'Verified', type: 'checkbox', value: true }]), true],
+    [JSON.stringify([{ title: 'Verified', type: 'checkbox', value: false }]), false],
+    [JSON.stringify([{ title: 'Verified', value: 'false' }]), null],
+    [null, null],
+    ['[]', null],
+    ['null', null],
+    ['invalid JSON', null],
+  ])('returns the stored X verification value for settings %s without an extension report', async (additionalSettings, verified) => {
+    const { service, db } = setup();
+    db.integration.findMany.mockResolvedValue([{ ...account, additionalSettings }]);
+    db.extensionNode.findMany.mockResolvedValue([]);
+
+    const result = await service.get('org', 'user', 'project');
+
+    expect(db.integration.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      select: expect.objectContaining({ additionalSettings: true }),
+    }));
+    expect(result.accounts[0].verified).toBe(verified);
+    expect(result.accounts[0].accountLevel).toEqual({ verified });
+    expect(result.accounts[0]).not.toHaveProperty('additionalSettings');
+  });
   it('allows Toutiao post and reply account selection', async () => {
     const { service, db } = setup();
     db.integration.findMany.mockResolvedValue([{ ...account, providerIdentifier: 'toutiao', identityNamespace: 'toutiao.user_id' }]);
@@ -247,7 +288,9 @@ describe('shared Project, Post and Reply sending context', () => {
   it('returns legacy mode without interpreting empty accounts as a controlled send capability', async () => {
     const { service, db, policies, modes } = setup();
     modes.stateIn.mockResolvedValue({ mode: 'AUTONOMOUS', revision: 0, systemEnabled: true, autonomousAllowed: true });
-    expect(await service.get('org', 'user', 'project')).toMatchObject({ mode: 'AUTONOMOUS', accounts: [], defaults: {}, requireAccountSelection: null, autonomousAllowed: true });
+    expect(await service.get('org', 'user', 'project')).toMatchObject({ mode: 'AUTONOMOUS', accounts: [], defaults: {}, requireAccountSelection: null, autonomousAllowed: true,
+      contentLimits: { x: { unit: 'weighted', oauthPostLimits: { unverified: 280, verified: 4000 },
+        tiers: { free: { post: 280, reply: 260 }, premium: { post: 25000, reply: 260 } } } } });
     expect(db.integration.findMany).not.toHaveBeenCalled();
     expect(db.extensionNode.findMany).not.toHaveBeenCalled();
     expect(policies.snapshotInTransaction).not.toHaveBeenCalled();

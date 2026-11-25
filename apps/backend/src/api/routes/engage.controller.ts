@@ -51,9 +51,9 @@ import {
 } from '@gitroom/nestjs-libraries/dtos/engage/scan-ingest.dto';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
 import { TooSimilarToReferenceError } from '@gitroom/nestjs-libraries/engage/engage-reference-post.service';
-import { resolveRequestedXCeiling } from '@gitroom/nestjs-libraries/integrations/x-account-ceiling';
 import {
   assertDraftWithinPlatformLimit,
+  clampReplyOutputLength,
   outputLengthForLength,
 } from '@gitroom/nestjs-libraries/engage/engage-draft-length';
 import { EngageAutoReplyService } from '@gitroom/nestjs-libraries/engage/engage-auto-reply.service';
@@ -964,19 +964,10 @@ export class EngageController {
         opportunity.id
       );
 
-      // X's ceiling belongs to the ACCOUNT's subscription — 280 weighted
-      // characters without one, 25000 with one — and it rides in on the
-      // request: the web app reads it live from the extension over the
-      // social-sessions bridge, so there is nothing server-side that could know
-      // it better. Bounded here rather than trusted, and fed to BOTH the target
-      // and the gate below — feeding only one of them would either write a
-      // reply the gate then rejects, or reject a reply this account could
-      // perfectly well have sent.
-      const maxWeighted = resolveRequestedXCeiling(body.maxWeighted);
-
-      const outputLength =
-        body.outputLength ??
-        outputLengthForLength(opportunity.platform, length, maxWeighted);
+      const outputLength = clampReplyOutputLength(
+        opportunity.platform,
+        body.outputLength ?? outputLengthForLength(opportunity.platform, length)
+      );
 
       let draft = '';
       for await (const chunk of this._engageDraftService.generateDraft(
@@ -986,7 +977,6 @@ export class EngageController {
         body.mentions,
         abortController.signal,
         outputLength,
-        maxWeighted,
         usages
       )) {
         if (abortController.signal.aborted) break;
@@ -996,7 +986,7 @@ export class EngageController {
         // Client gone mid-stream — uncount the reservation; nothing delivered.
         await this._engageService.releaseReplyGeneration(reservation.taskId, usages);
       } else {
-        assertDraftWithinPlatformLimit(opportunity.platform, draft, maxWeighted);
+        assertDraftWithinPlatformLimit(opportunity.platform, draft);
         // Settle only after a successful, non-aborted generation (spec §3.3).
         // Best-effort: a billing hiccup must not fail an already-produced draft —
         // the reservation stays counted (status reserved/unbilled) so the cap holds.

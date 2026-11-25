@@ -62,25 +62,49 @@ describe('EngageDraftService', () => {
       postContent: 'How do I do X?',
     };
 
+    it.each([
+      ['x', 65, '0–65 Twitter-weighted characters'],
+      ['x', 130, '65–130 Twitter-weighted characters'],
+      ['x', 260, '130–260 Twitter-weighted characters'],
+      ['x', 1500, '130–260 Twitter-weighted characters'],
+      ['reddit', 425, '213–425 characters'],
+    ])('recommends the selected picker range for %s at %i', async (platform, outputLength, range) => {
+      const generateRaw = vi.spyOn(service as any, '_generateRaw').mockResolvedValue('A relevant reply.');
+      const chunks: string[] = [];
+      for await (const chunk of service.generateDraft(
+        { ...mockOpportunity, platform } as EngageOpportunity,
+        'EXPERT_ANSWER', 1, undefined, undefined, outputLength
+      )) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks).toEqual(['A relevant reply.']);
+      expect(generateRaw).toHaveBeenCalledTimes(1);
+      const [systemPrompt, userPrompt] = generateRaw.mock.calls[0];
+      expect(systemPrompt).toContain(range);
+      expect(userPrompt).toContain(range);
+    });
+
     it('should include platform-specific character limits in system prompt', () => {
       const xPrompt = (service as any)._buildSystemPrompt('x', 'EXPERT_ANSWER', 'help_seeking', 1);
-      expect(xPrompt).toContain('under 260 Twitter-weighted characters');
+      expect(xPrompt).toContain('never exceed 280 Twitter-weighted characters');
 
       // Reddit prompt targets the SAFETY_MARGIN-adjusted length (1000 * 0.85 = 850),
       // not the raw 1000 — the hard reject still uses 2000.
       const redditPrompt = (service as any)._buildSystemPrompt('reddit', 'EXPERT_ANSWER', 'help_seeking', 1);
-      expect(redditPrompt).toContain('under 850 characters');
+      expect(redditPrompt).toContain('never exceed 2000 characters');
+      expect(redditPrompt).toContain('Aim for under 850 characters');
     });
 
     it('should restate the platform character limit as an IMPORTANT final instruction', () => {
       const xPrompt = (service as any)._buildSystemPrompt('x', 'EXPERT_ANSWER', 'help_seeking', 1);
       expect(xPrompt).toContain(
-        'IMPORTANT: The final reply must stay under 260 Twitter-weighted characters'
+        'Never exceed 280 Twitter-weighted characters.'
       );
 
       const redditPrompt = (service as any)._buildSystemPrompt('reddit', 'EXPERT_ANSWER', 'help_seeking', 1);
       expect(redditPrompt).toContain(
-        'IMPORTANT: The final reply must stay under 850 characters'
+        'IMPORTANT: Aim for under 850 characters. Never exceed 2000 characters.'
       );
     });
 
@@ -90,7 +114,7 @@ describe('EngageDraftService', () => {
     it('states the length limit at the top, in the middle, and at the very end', () => {
       const xPrompt: string = (service as any)._buildSystemPrompt('x', 'EXPERT_ANSWER', 'help_seeking', 1);
 
-      const occurrences = xPrompt.split('under 260 Twitter-weighted characters').length - 1;
+      const occurrences = xPrompt.toLowerCase().split('never exceed 280 twitter-weighted characters').length - 1;
       expect(occurrences).toBe(3);
       expect(xPrompt).toContain('HARD LENGTH LIMIT — THIS OUTRANKS EVERY OTHER INSTRUCTION');
       expect(xPrompt.trimEnd().endsWith('never truncate mid-thought.')).toBe(true);
@@ -117,7 +141,7 @@ describe('EngageDraftService', () => {
         undefined
       );
 
-      expect(userPrompt).toContain('Length is the hard constraint');
+      expect(userPrompt).toContain('Never exceed 280 Twitter-weighted characters');
       expect(userPrompt).toContain('under 260 Twitter-weighted characters');
       expect(userPrompt).toContain('regardless of how long the original post above is');
     });
@@ -537,7 +561,7 @@ describe('EngageDraftService', () => {
         1,
         65
       );
-      expect(prompt).toContain('under 65 Twitter-weighted characters');
+      expect(prompt).toContain('Aim for 0–65 Twitter-weighted characters');
     });
 
     it('should retry X draft generation once when the first draft exceeds the weighted limit', async () => {

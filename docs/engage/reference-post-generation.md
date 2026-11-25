@@ -413,7 +413,7 @@ reply-draft composer already has:
 | `strategy` | `string` (one of `VALID_STRATEGIES`) | ✓ | Same 7 strategy keys as `/draft` (`EXPERT_ANSWER`, `DATA_BACKED`, …), but resolved against **different, reworded prompt text** — see §6 on why the reply-draft wording (e.g. QUESTION_LED's literal "Reply with...") isn't reused as-is |
 | `brandStrength` | `number` (0–3) | ✓ | Same brand-mention control as `/draft`, same mechanism (`engage-brand-instruction.ts`, shared with the reply flow) |
 | `mentions` | `string[]` (≤20) | | Optional brand names, used when `brandStrength` ≥ 2 |
-| `outputLength` | `integer` (≥ 2) | | Target length; same soft-target semantics as reply drafts |
+| `outputLength` | `integer` (≥ 2) | | Web picker value for the target platform's recommended range. Other numbers follow the existing target rules in §6.6 |
 | `maxWeighted` | `integer` (280–25000) | | **X targets only.** The ACCOUNT's own post ceiling in weighted characters, read live from the browser extension (`XSessionInfo.maxWeighted`). Selects which tier ladder the generation uses — see §6.7. Omitted, out of range or non-numeric → 280, X's free tier |
 | `projectId` | `string` | | Optional project scope |
 | `targetPlatform` | `string` (one of `SCANNABLE_PLATFORMS`) | | The platform the post is WRITTEN FOR. Omitted → the opportunity's own platform (the original a→a behaviour). Supplied → an a→any generation: the character budget, the format rules, the house style, the draft's `providerIdentifier` and its `Post.settings` all come from the TARGET, while the opportunity stays the reference (`settings.referenceOpportunity.platform` keeps naming the SOURCE). Thread capability follows the target too, so `thread: true` for a `medium`/`quora`/`devto` target degrades to a single post rather than 400-ing. See §6.4 |
@@ -1125,7 +1125,17 @@ to overshoot, not one — and is asked for through a longer prompt (part
 separator, exact post count, per-part ceiling) that leaves less attention for
 any single part. The 40 characters are not a visible difference on X.
 
-**`outputLength` selects a tier; it is not the target.** A client's
+**The web picker selects a recommended range.** The prompt uses the previous
+picker value as the lower bound and the selected value as the upper bound.
+For standard X this gives 0–65, 65–130, and 130–260 weighted characters. For a
+long-form account's single post, the picker values are 260, 1500, and 4000.
+The generator still sizes its token budget from the internal X ladder. When
+the generator uses a shorter X tier for a dense reference or a corrective
+retry, it recommends that tier's range. The long X thread range is 130–220
+per post. A draft outside its recommended range can still be returned if it
+passes the existing ceiling and content checks.
+
+**Other numeric values on X select the existing tier.** A client's
 Short/Medium/Long picker resolves to a number before it reaches the API, so the
 number is a tier by another name. It snaps DOWN to the largest tier at or below
 it (270 → `long`/260, 200 → `medium`/130, anything under 65 → `short`), matched
@@ -1136,10 +1146,9 @@ up would put it in the tier with the least headroom.
 
 This is what keeps every rule below reachable. An honoured raw number skipped
 all of them — a client sending 260 with `thread: true` got 260 per part, not
-220. The six non-X targets keep `outputLength` as the literal target it has
-always been; they have no tiers to snap onto, and inventing some to make this
-uniform would change the field's meaning on six platforms to fix something
-measured on one.
+220. Medium and dev.to picker ranges stay within the article floor and the
+existing target with its length margin. On non-X targets, other numeric values
+continue to use the existing target and article-length guidance.
 
 **A long reference starts one tier down** (`DENSE_REFERENCE_TARGET_MULTIPLE`,
 4x the target in force), whoever asked for the wider one — after the snap there
@@ -1236,7 +1245,7 @@ both report `none`. The same defect exists in the OAuth send path today
 browser extension measures it from the composer ring as a by-product of
 publishing and hands it to the web app over the social-sessions bridge
 (`XSessionInfo.maxWeighted`); the app passes it down as an optional
-`maxWeighted` on `POST /generate-post` and `POST /:id/draft`.
+`maxWeighted` on `POST /generate-post`.
 
 It is therefore **client-supplied**, and treated as such: `@Min(280)
 @Max(25000)` at the DTO and re-checked by `resolveRequestedXCeiling`, which

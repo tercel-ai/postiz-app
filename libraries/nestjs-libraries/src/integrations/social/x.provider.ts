@@ -2,6 +2,7 @@ import { controlledSubmit, currentSendContext } from '../../extension/controlled
 import { PrismaClient } from '@prisma/client';
 import { TweetV2, TwitterApi, type IClientSettings } from 'twitter-api-v2';
 import { weightedLength } from '@gitroom/helpers/utils/count.length';
+import { X_FREE_MAX_WEIGHTED, X_OAUTH_VERIFIED_MAX_WEIGHTED } from '@gitroom/nestjs-libraries/integrations/x-account-ceiling';
 import {
   AccountMetrics,
   AnalyticsData,
@@ -149,7 +150,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   }
 
   maxLength(isTwitterPremium: boolean) {
-    return isTwitterPremium ? 4000 : 280;
+    return isTwitterPremium ? X_OAUTH_VERIFIED_MAX_WEIGHTED : X_FREE_MAX_WEIGHTED;
   }
 
   async refreshToken(refreshToken: string): Promise<AuthTokenDetails> {

@@ -57,6 +57,9 @@ export const X_FREE_MAX_WEIGHTED = 280;
 /** X's ceiling for a subscribed account (measured 2026-09-22). */
 export const X_SUBSCRIBED_MAX_WEIGHTED = 25000;
 
+/** X provider's post limit on the OAuth route for verified accounts. */
+export const X_OAUTH_VERIFIED_MAX_WEIGHTED = 4000;
+
 /**
  * The ceiling to generate against, from whatever the request carried.
  *
