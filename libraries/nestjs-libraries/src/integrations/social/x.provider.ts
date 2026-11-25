@@ -78,6 +78,16 @@ function xClientSettings(signal?: AbortSignal): Partial<IClientSettings> {
   };
 }
 
+function xVerificationSetting(verified: boolean, verifiedType: string | null) {
+  return {
+    title: 'Verified',
+    description: 'Is this a verified user? (Premium)',
+    type: 'checkbox' as const,
+    value: verified,
+    verified_type: verifiedType,
+  };
+}
+
 @Rules(
   'X can have maximum 4 pictures, or maximum one video, it can also be without attachments'
 )
@@ -526,7 +536,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     }
 
     const newClient = new TwitterApi(accessToken, xClientSettings());
-    const { username, verified, profile_image_url, name, id } =
+    const { username, verified, verified_type, profile_image_url, name, id } =
       await this._getUserInfo(newClient);
 
     return {
@@ -537,14 +547,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       expiresIn,
       picture: profile_image_url || '',
       username,
-      additionalSettings: [
-        {
-          title: 'Verified',
-          description: 'Is this a verified user? (Premium)',
-          type: 'checkbox' as const,
-          value: verified,
-        },
-      ],
+      additionalSettings: [xVerificationSetting(verified, verified_type)],
     };
   }
 
@@ -605,7 +608,14 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     return { id: actor.id, idNamespace: 'x.rest_id' };
   }
 
-  private async _getUserInfo(client: TwitterApi): Promise<{ id: string; username: string; verified: boolean; profile_image_url: string; name: string }> {
+  private async _getUserInfo(client: TwitterApi): Promise<{
+    id: string;
+    username: string;
+    verified: boolean;
+    verified_type: string | null;
+    profile_image_url: string;
+    name: string;
+  }> {
     let result: Awaited<ReturnType<typeof client.v2.me>>;
     try {
       result = await client.v2.me({
@@ -653,13 +663,16 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       throw err;
     }
     const { data } = result;
+    const verifiedType = typeof data.verified_type === 'string' && data.verified_type
+      ? data.verified_type : null;
     // GET /2/users/me is NOT an owned-read endpoint (owned reads are the
     // /2/users/{id}/* collection endpoints) → always a User read.
     recordApiUsage('x', X_USAGE.USER_READ, 1);
     return {
       id: data.id,
       username: data.username,
-      verified: ['blue', 'business', 'government'].includes(data.verified_type as any) || !!data.verified,
+      verified: ['blue', 'business', 'government'].includes(verifiedType ?? '') || !!data.verified,
+      verified_type: verifiedType,
       profile_image_url: data.profile_image_url!,
       name: data.name,
     };
@@ -710,10 +723,14 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   }
 
   /**
-   * Sync the verified (premium) status from X API to the integration's additionalSettings.
+   * Sync X's verification flag and type to the integration's additionalSettings.
    * Only updates the database when the value has actually changed.
    */
-  private async _syncVerifiedStatus(integration: Integration, verified: boolean): Promise<void> {
+  private async _syncVerifiedStatus(
+    integration: Integration,
+    verified: boolean,
+    verifiedType: string | null
+  ): Promise<void> {
     // Read fresh from DB to avoid overwriting account:* entries written by
     // updateAccountMetrics (which runs on a separate schedule). Using the
     // in-memory integration object here would cause a last-write-wins race.
@@ -725,12 +742,12 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
     const current = parseAdditionalSettings(fresh.additionalSettings);
     const verifiedSetting = current.find((s) => s.title === 'Verified');
-    if (verifiedSetting && verifiedSetting.value === verified) {
-      return; // no change
-    }
+    const storedType = verifiedSetting && 'verified_type' in verifiedSetting
+      ? verifiedSetting.verified_type : null;
+    if (verifiedSetting?.value === verified && storedType === verifiedType) return;
 
     const newSettingsJson = mergeAdditionalSettings(fresh.additionalSettings, [
-      { title: 'Verified', description: 'Is this a verified user? (Premium)', type: 'checkbox', value: verified },
+      xVerificationSetting(verified, verifiedType),
     ]);
 
     await XProvider._prisma.integration.update({
@@ -962,7 +979,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     integration: Integration
   ): Promise<PostResponse[]> {
     const client = await this.getClient(accessToken);
-    const { id: userId, username, verified } = await this._getUserInfo(client);
+    const { id: userId, username, verified, verified_type } = await this._getUserInfo(client);
 
     const limit = this.maxLength(verified);
     const [firstPost] = postDetails;
@@ -975,7 +992,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     }
 
     // Best-effort sync — do not block posting if this fails
-    this._syncVerifiedStatus(integration, verified).catch((err) =>
+    this._syncVerifiedStatus(integration, verified, verified_type).catch((err) =>
       console.warn('[x] Failed to sync verified status:', err?.message || err)
     );
 
@@ -1182,7 +1199,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     integration: Integration
   ): Promise<PostResponse[]> {
     const client = await this.getClient(accessToken);
-    const { username, verified } = await this._getUserInfo(client);
+    const { username, verified, verified_type } = await this._getUserInfo(client);
 
     const limit = this.maxLength(verified);
     const [commentPost] = postDetails;
@@ -1195,7 +1212,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     }
 
     // Best-effort sync — do not block posting if this fails
-    this._syncVerifiedStatus(integration, verified).catch((err) =>
+    this._syncVerifiedStatus(integration, verified, verified_type).catch((err) =>
       console.warn('[x] Failed to sync verified status:', err?.message || err)
     );
 

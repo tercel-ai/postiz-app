@@ -228,7 +228,9 @@ Official API: `GET /2/users/me?user.fields=public_metrics`,
 | Dropped labels (Postiz posts, 30d) | — |
 
 `Verified` reflects `verified_type ∈ {blue, business, government}` or the
-legacy `verified` flag. `stats.followers` is `null` by design: followers are an
+legacy `verified` flag. The same setting stores X's reported `verified_type`
+alongside the boolean for `sending-context`. Existing records can acquire the
+type when the account reconnects with OAuth or uses the X API send path. `stats.followers` is `null` by design: followers are an
 account-wide value, not a per-post metric, so they live under
 `additionalSettings.account:followers` and are never populated by `stats`.
 

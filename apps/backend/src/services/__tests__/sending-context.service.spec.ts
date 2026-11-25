@@ -64,14 +64,18 @@ describe('shared Project, Post and Reply sending context', () => {
     expect(result.replyInputMaxLength).toBe(4000);
   });
   it.each([
-    [JSON.stringify([{ title: 'Verified', type: 'checkbox', value: true }]), true],
-    [JSON.stringify([{ title: 'Verified', type: 'checkbox', value: false }]), false],
-    [JSON.stringify([{ title: 'Verified', value: 'false' }]), null],
-    [null, null],
-    ['[]', null],
-    ['null', null],
-    ['invalid JSON', null],
-  ])('returns the stored X verification value for settings %s without an extension report', async (additionalSettings, verified) => {
+    [JSON.stringify([{ title: 'Verified', type: 'checkbox', value: true, verified_type: 'blue' }]), true, 'blue'],
+    [JSON.stringify([{ title: 'Verified', value: true, verified_type: 'business' }]), true, 'business'],
+    [JSON.stringify([{ title: 'Verified', value: false, verified_type: 'none' }]), false, 'none'],
+    [JSON.stringify([{ title: 'Verified', value: false, verified_type: 1 }]), false, null],
+    [JSON.stringify([{ title: 'Verified', type: 'checkbox', value: true }]), true, null],
+    [JSON.stringify([{ title: 'Verified', type: 'checkbox', value: false }]), false, null],
+    [JSON.stringify([{ title: 'Verified', value: 'false' }]), null, null],
+    [null, null, null],
+    ['[]', null, null],
+    ['null', null, null],
+    ['invalid JSON', null, null],
+  ])('returns the stored X verification value for settings %s without an extension report', async (additionalSettings, verified, verifiedType) => {
     const { service, db } = setup();
     db.integration.findMany.mockResolvedValue([{ ...account, additionalSettings }]);
     db.extensionNode.findMany.mockResolvedValue([]);
@@ -82,13 +86,16 @@ describe('shared Project, Post and Reply sending context', () => {
       select: expect.objectContaining({ additionalSettings: true }),
     }));
     expect(result.accounts[0].verified).toBe(verified);
-    expect(result.accounts[0].accountLevel).toEqual({ verified });
+    expect(result.accounts[0].verified_type).toBe(verifiedType);
+    expect(result.accounts[0]).not.toHaveProperty('accountLevel');
     expect(result.accounts[0]).not.toHaveProperty('additionalSettings');
   });
   it('allows Toutiao post and reply account selection', async () => {
     const { service, db } = setup();
     db.integration.findMany.mockResolvedValue([{ ...account, providerIdentifier: 'toutiao', identityNamespace: 'toutiao.user_id' }]);
     const result = await service.get('org', 'user', 'project');
+    expect(result.accounts[0]).toMatchObject({ verified: null, verified_type: null });
+    expect(result.accounts[0]).not.toHaveProperty('accountLevel');
     expect(result.accounts[0].actions.POST.canSelect).toBe(true);
     expect(result.accounts[0].actions.REPLY.canSelect).toBe(true);
     expect(result.defaults.toutiao.REPLY.blockCode).not.toBe('CONTROLLED_PLATFORM_UNSUPPORTED');

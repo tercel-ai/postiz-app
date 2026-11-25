@@ -50,10 +50,14 @@ const contentLimits: Record<string, {
 
 function storedXVerification(additionalSettings: string | null) {
   const settings = parseAdditionalSettings(additionalSettings);
-  const verified = Array.isArray(settings)
-    ? settings.find(setting => setting?.title === 'Verified')?.value
+  const setting = Array.isArray(settings)
+    ? settings.find(entry => entry?.title === 'Verified')
     : undefined;
-  return typeof verified === 'boolean' ? verified : null;
+  const verifiedType = setting && 'verified_type' in setting ? setting.verified_type : undefined;
+  return {
+    verified: typeof setting?.value === 'boolean' ? setting.value : null,
+    verified_type: typeof verifiedType === 'string' && verifiedType ? verifiedType : null,
+  };
 }
 
 @Injectable()
@@ -103,14 +107,16 @@ export class SendingContextService {
       const choices = accounts.map(account => {
         const platform = canonicalControlledPlatform(account.providerIdentifier);
         const relation = byRelation.get(account.id);
-        const verified = platform === 'x' ? storedXVerification(account.additionalSettings) : null;
+        const { verified, verified_type } = platform === 'x'
+          ? storedXVerification(account.additionalSettings)
+          : { verified: null, verified_type: null };
         const terminals = sessions.filter(({ session }) => matchesAccountSession(account, session))
           .map(({ node, session }) => projectAccountTerminal(node, session, now));
         return {
           key: account.id, integrationId: account.id, platform, providerIdentifier: account.providerIdentifier,
           name: account.name, handle: account.profile, picture: account.picture,
           verified,
-          accountLevel: platform === 'x' ? { verified } : null,
+          verified_type,
           projectAssigned: !!relation && !relation.disabled, detectedByExtension: terminals.length > 0,
           actions: Object.fromEntries(actions.map(action => {
             const reason = block ?? (action === 'REPLY' && !(CONTROLLED_REPLY_PLATFORMS as readonly string[]).includes(platform)
