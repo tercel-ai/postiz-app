@@ -520,14 +520,11 @@ describe('EngageDraftService', () => {
       expect(generateRaw).toHaveBeenCalledTimes(1);
     });
 
-    it('accepts an X draft that overshoots a short requested target but stays within the 280 ceiling (no retry, no throw)', async () => {
-      // Regression for "Generated X draft exceeded 65 Twitter-weighted characters
-      // after retry": a short requested target (outputLength=65) is a SOFT target —
-      // the model is instructed to aim for it, but a longer-but-still-valid (<=280)
-      // reply must be accepted rather than hard-failing the generation.
+    it('retries a reply above the selected X short cap and accepts the boundary', async () => {
       const generateRaw = vi
         .spyOn(service as any, '_generateRaw')
-        .mockResolvedValue('x'.repeat(120)); // 120 weighted: > 65 target, <= 280 ceiling
+        .mockResolvedValueOnce('中'.repeat(33))
+        .mockResolvedValueOnce('中'.repeat(32) + 'a');
       const mockOpportunity: Partial<EngageOpportunity> = {
         platform: 'x',
         primaryIntent: 'help_seeking',
@@ -547,13 +544,37 @@ describe('EngageDraftService', () => {
         chunks.push(chunk);
       }
 
-      expect(chunks.join('')).toBe('x'.repeat(120));
-      expect(generateRaw).toHaveBeenCalledTimes(1); // accepted on first try, no retry
+      expect(chunks.join('')).toBe('中'.repeat(32) + 'a');
+      expect(generateRaw).toHaveBeenCalledTimes(2);
+      expect(generateRaw.mock.calls[1][0]).toContain('65 Twitter-weighted characters or fewer');
+    });
+
+    it.each([130, 131])('applies the X Medium cap after a brand retry, with final length %i', async (finalLength) => {
+      const generateRaw = vi.spyOn(service as any, '_generateRaw')
+        .mockResolvedValueOnce('A reply without the requested name.')
+        .mockResolvedValueOnce('a'.repeat(131))
+        .mockResolvedValueOnce('b'.repeat(finalLength));
+      const opportunity = {
+        platform: 'x', primaryIntent: 'discussion', postContent: 'What would you try?',
+      } as EngageOpportunity;
+      const result = (async () => {
+        const chunks = [];
+        for await (const chunk of service.generateDraft(
+          opportunity, 'EXPERT_ANSWER', 50, ['Acme'], undefined, 130
+        )) chunks.push(chunk);
+        return chunks.join('');
+      })();
+
+      if (finalLength === 130) {
+        await expect(result).resolves.toBe('b'.repeat(130));
+      } else {
+        await expect(result).rejects.toThrow('exceeded 130 Twitter-weighted characters after retry');
+      }
+      expect(generateRaw).toHaveBeenCalledTimes(3);
+      expect(generateRaw.mock.calls[2][0]).toContain('130 Twitter-weighted characters or fewer');
     });
 
     it('still instructs the model to aim for the short requested target', async () => {
-      // The reject threshold relaxes to the 280 ceiling, but the system prompt must
-      // still TARGET the requested length so the model writes short by default.
       const prompt = (service as any)._buildSystemPrompt(
         'x',
         'EXPERT_ANSWER',

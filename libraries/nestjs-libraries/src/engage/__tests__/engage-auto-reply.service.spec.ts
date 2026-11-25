@@ -403,6 +403,23 @@ describe('EngageAutoReplyService.getDueReplies', () => {
     expect(engage.queueAutoReply).not.toHaveBeenCalled();
   });
 
+  it('rejects a generated X reply above the selected tier before queueing it', async () => {
+    const { svc, engage, draft } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { x: { autoReplyEnabled: true, length: 'medium' } } }],
+      budget: budgetWith(),
+      candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
+    });
+    engage.getOpportunityForReply.mockResolvedValue({ id: 'opp-1', platform: 'x' });
+    draft.generateDraft.mockImplementation(async function* () {
+      yield `${'中'.repeat(65)}a`;
+    });
+
+    expect(await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'))).toEqual([]);
+    expect(draft.generateDraft).toHaveBeenCalledTimes(1);
+    expect(engage.releaseReplyGeneration).toHaveBeenCalledWith('task-1', expect.any(Array));
+    expect(engage.queueAutoReply).not.toHaveBeenCalled();
+  });
+
   it('a failing draft never aborts the rest of the sweep', async () => {
     const { svc, engage } = makeService({
       configs: [{ ...enabledConfig, id: 'c1', projectId: 'p1', autoReplyMode: 'review' }],

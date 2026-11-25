@@ -1850,15 +1850,8 @@ export class EngageService implements OnApplicationBootstrap {
       const result = await this._referencePostService.generate(opportunity, {
         strategy: dto.strategy,
         targetPlatform,
-        // Carried by the REQUEST, not looked up: the only client that
-        // generates is the web app, which already holds this account's live
-        // ceiling from the extension over the social-sessions bridge
-        // (XSessionInfo.maxWeighted). A server-side copy would only be a
-        // staler version of what the caller just read from the browser.
-        //
-        // Client-supplied, so it is bounded on the way in — see
-        // resolveRequestedXCeiling. Only consulted when the target is x; every
-        // other platform has a ceiling of its own and ignores this.
+        // The request selects the X generation ladder. The value is bounded
+        // here and does not authorize publication for any account.
         ...(targetPlatform === 'x'
           ? { maxWeighted: resolveRequestedXCeiling(dto.maxWeighted) }
           : {}),

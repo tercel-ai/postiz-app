@@ -24,15 +24,14 @@
 // Nothing here can read it. X states the ceiling only in the logged-in web UI,
 // so the browser EXTENSION observes it as a by-product of publishing, keeps it
 // under the session cookie that invalidates it, and hands it to the web app
-// over the social-sessions bridge (`XSessionInfo.maxWeighted`). The app then
-// passes it down with the generation request.
+// over the social-sessions bridge (`XSessionInfo.maxWeighted`). The website
+// currently sends its own 4000-character picker maximum when it offers X
+// long-form generation. The extension's measured bound governs its writer.
 //
 // WHY IT IS NOT STORED SERVER-SIDE. It was, briefly: an endpoint, a column in
 // `Integration.metadata`, and a seven-day expiry to stop a lapsed subscription
 // being believed forever. All of that was machinery for keeping a COPY honest,
-// and the copy bought nothing — the only client that generates is the one
-// already holding the live value, read from the browser moments earlier. So the
-// request carries it, and there is no copy to go stale.
+// and the copy bought nothing. The generation budget stays on the request.
 //
 // THE VALUE IS THEREFORE CLIENT-SUPPLIED, and treated as such: bounded at the
 // DTO, re-checked here, and never trusted to widen anything beyond what X is

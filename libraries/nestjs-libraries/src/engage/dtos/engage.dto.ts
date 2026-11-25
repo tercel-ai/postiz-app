@@ -1285,16 +1285,9 @@ export class GenerateReferencePostDto {
   @ArrayMaxSize(20)
   mentions?: string[];
 
-  // Advisory target length. On an `x` TARGET it selects a length TIER rather
-  // than being honoured verbatim: it snaps down to the largest of
-  // short/medium/long at or below it (270 means long/260; 200 means
-  // medium/130), and the tier's own rules then apply — notably that `long`
-  // is 220 per post in a thread, not 260. See reference-post-generation.md
-  // §6.6. An honoured raw number bypassed those rules entirely, which is how
-  // a threaded request came back budgeted as a single post.
-  //
-  // Every other target keeps it as the literal target it has always been:
-  // there are no tiers to snap onto there.
+  // A recognized single-post picker value is an inclusive maximum. The
+  // previous bound is the suggested minimum. Threads and other numeric
+  // values use their existing generation targets.
   @IsOptional()
   @IsInt()
   @Min(2)
@@ -1302,20 +1295,10 @@ export class GenerateReferencePostDto {
   outputLength?: number;
 
   /**
-   * The X ACCOUNT's own post ceiling in WEIGHTED characters — 280 without a
-   * subscription, 25000 with one (measured 2026-09-22).
-   *
-   * Sent by the web app, which reads it live from the browser extension over
-   * the social-sessions bridge (`XSessionInfo.maxWeighted`). It is NOT stored
-   * server-side: the only client that generates is the one already holding the
-   * current value, so a copy here could only ever be staler.
-   *
-   * Absent means "not known", which resolves to X's free-tier 280 — the limit
-   * every X account has, and the safe direction to be wrong in. Bounded rather
-   * than trusted: a value outside the range X is known to grant is a bug or a
-   * stale client, not a more generous account.
-   *
-   * Ignored on every other platform, which have ceilings of their own.
+   * X weighted ceiling used for generation only. The website passes the
+   * upper bound of its X long-form picker when those choices are available.
+   * Clients with a measured account ceiling may pass that value. Omission
+   * defaults to 280. The actual sending account still enforces its own limit.
    */
   @IsOptional()
   @IsInt()

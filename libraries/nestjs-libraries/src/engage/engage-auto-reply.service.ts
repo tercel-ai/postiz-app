@@ -26,6 +26,7 @@ import {
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
 import {
   assertDraftWithinPlatformLimit,
+  engagePickerLengthRange,
   outputLengthForLength,
 } from '@gitroom/nestjs-libraries/engage/engage-draft-length';
 import { PlatformPacingConfigService } from '@gitroom/nestjs-libraries/engage/platform-pacing-config.service';
@@ -1152,7 +1153,12 @@ export class EngageAutoReplyService implements OnModuleInit {
         )) {
           text += chunk;
         }
-        assertDraftWithinPlatformLimit(opportunity.platform, text);
+        assertDraftWithinPlatformLimit(
+          opportunity.platform,
+          text,
+          undefined,
+          engagePickerLengthRange(opportunity.platform, outputLength)?.max
+        );
       } catch (err) {
         await this._engageService
           .releaseReplyGeneration(reservation.taskId, usages)

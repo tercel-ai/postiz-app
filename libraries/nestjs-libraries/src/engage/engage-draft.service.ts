@@ -62,7 +62,8 @@ function defaultOutputLimitForPlatform(platform: string): number {
     : X_WEIGHTED_CHAR_LIMIT;
 }
 
-function replyHardLimit(platform: string, outputLimit: number): number | undefined {
+function replyHardLimit(platform: string, outputLimit: number, selectedLimit?: number): number | undefined {
+  if (selectedLimit !== undefined) return selectedLimit;
   if (platform === "x") {
     return X_HARD_CHAR_LIMIT;
   }
@@ -233,7 +234,8 @@ export class EngageDraftService {
     );
 
     if (signal?.aborted) return;
-    const hardLimit = replyHardLimit(platform, outputLimit);
+    const selectedLimit = engagePickerLengthRange(platform, requestedTarget)?.max;
+    const hardLimit = replyHardLimit(platform, outputLimit, selectedLimit);
     const isX = platform === "x";
     yield* this._generateDraftWithConstraints({
       systemPrompt,
@@ -245,7 +247,7 @@ export class EngageDraftService {
       isWithinLimit: (draft) =>
         hardLimit === undefined ||
         (isX ? weightedLength(draft) : draft.length) <= hardLimit,
-      allowLengthRetry: isX,
+      allowLengthRetry: isX || selectedLimit !== undefined,
       requiredMentions,
       outputLimit,
       signal,
@@ -328,25 +330,21 @@ export class EngageDraftService {
         );
       }
 
-      if (missingMention) {
-        if (mentionRetryUsed) {
-          // Already asked once and the model still won't name the brand. The
-          // draft is otherwise valid (not over limit — that path threw above),
-          // so ship it rather than burning the user's credits on a hard failure.
-          this.logger.warn(
-            `Generated ${platformLabel} draft omitted the required brand mention (${requiredMentions.join(
-              ", ",
-            )}) after a corrective retry; delivering it anyway.`,
-          );
-          yield draft;
-          return;
-        }
+      if (missingMention && !mentionRetryUsed) {
         mentionRetryUsed = true;
         corrections.push(
           `Your previous draft left out the required brand name. Rewrite the reply so it still answers the post directly AND includes ${requiredMentions
             .map((m) => `"${m}"`)
             .join(" or ")} spelled exactly as written. Weave the name into the reply naturally — do not append it as a tagline or a disclaimer.`,
         );
+      } else if (missingMention && !overLimit) {
+        this.logger.warn(
+          `Generated ${platformLabel} draft omitted the required brand mention (${requiredMentions.join(
+            ", ",
+          )}) after a corrective retry; delivering it anyway.`,
+        );
+        yield draft;
+        return;
       }
 
       if (signal?.aborted) return;
@@ -550,7 +548,7 @@ export class EngageDraftService {
     const resolvedOutputLimit =
       outputLimit ?? defaultOutputLimitForPlatform(platform);
     const range = engagePickerLengthRange(platform, outputLimit);
-    const hardLimit = replyHardLimit(platform, resolvedOutputLimit);
+    const hardLimit = replyHardLimit(platform, resolvedOutputLimit, range?.max);
     const unit = platform === "x" ? "Twitter-weighted characters" : "characters";
     const fallbackTarget = platform === "x"
       ? `under ${resolvedOutputLimit} ${unit} (CJK/emoji count as 2, URLs as 23)`

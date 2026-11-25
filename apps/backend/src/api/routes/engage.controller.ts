@@ -54,6 +54,7 @@ import { TooSimilarToReferenceError } from '@gitroom/nestjs-libraries/engage/eng
 import {
   assertDraftWithinPlatformLimit,
   clampReplyOutputLength,
+  engagePickerLengthRange,
   outputLengthForLength,
 } from '@gitroom/nestjs-libraries/engage/engage-draft-length';
 import { EngageAutoReplyService } from '@gitroom/nestjs-libraries/engage/engage-auto-reply.service';
@@ -986,7 +987,12 @@ export class EngageController {
         // Client gone mid-stream — uncount the reservation; nothing delivered.
         await this._engageService.releaseReplyGeneration(reservation.taskId, usages);
       } else {
-        assertDraftWithinPlatformLimit(opportunity.platform, draft);
+        assertDraftWithinPlatformLimit(
+          opportunity.platform,
+          draft,
+          undefined,
+          engagePickerLengthRange(opportunity.platform, outputLength)?.max
+        );
         // Settle only after a successful, non-aborted generation (spec §3.3).
         // Best-effort: a billing hiccup must not fail an already-produced draft —
         // the reservation stays counted (status reserved/unbilled) so the cap holds.

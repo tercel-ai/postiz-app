@@ -235,21 +235,21 @@ describe('a per-account X ceiling', () => {
     expect(clampReplyOutputLength(platform, requested)).toBe(expected);
   });
 
-  it('leaves every free-tier caller exactly where it was', () => {
+  it('uses the standard picker values for X Reply', () => {
     expect(xReferencePostTarget('short', 1)).toBe(65);
     expect(xReferencePostTarget('medium', 1)).toBe(130);
     expect(xReferencePostTarget('long', 1)).toBe(X_WEIGHTED_CHAR_LIMIT);
-    expect(outputLengthForLength('x', 'short')).toBe(120);
-    expect(outputLengthForLength('x', 'medium')).toBe(200);
-    expect(outputLengthForLength('x', 'long')).toBe(255);
+    expect(outputLengthForLength('x', 'short')).toBe(65);
+    expect(outputLengthForLength('x', 'medium')).toBe(130);
+    expect(outputLengthForLength('x', 'long')).toBe(260);
   });
 
   it('leaves the unattended auto-reply driver on the free tier', () => {
     // engage-auto-reply.service.ts calls this WITHOUT a ceiling, and the
     // operation-plan track is deliberately outside this feature: it generates
     // ahead of time and the browser may have switched X accounts by then.
-    expect(outputLengthForLength('x', 'long')).toBe(255);
-    expect(outputLengthForLength('twitter', 'long')).toBe(255);
+    expect(outputLengthForLength('x', 'long')).toBe(260);
+    expect(outputLengthForLength('twitter', 'long')).toBe(260);
   });
 
   it('keeps a thread a thread on a long-form account', () => {

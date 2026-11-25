@@ -73,10 +73,10 @@ export function normalizeEngagePlatform(platform: string): string {
 
 // Length tier → generation target. Used only when the caller doesn't pass an
 // explicit outputLength; it only supplies an advisory prompt target.
-const LENGTH_TARGETS: Record<ReplyLengthTier, { x: number; reddit: number }> = {
-  short: { x: 120, reddit: 400 },
-  medium: { x: 200, reddit: REDDIT_TARGET_CHAR_LIMIT },
-  long: { x: 255, reddit: 1800 },
+const REDDIT_REPLY_TARGETS: Record<ReplyLengthTier, number> = {
+  short: 400,
+  medium: REDDIT_TARGET_CHAR_LIMIT,
+  long: 1800,
 };
 
 /** Applies the same soft ceiling to every X reply. */
@@ -87,8 +87,9 @@ export function clampReplyOutputLength(platform: string, outputLength: number): 
 }
 
 export function outputLengthForLength(platform: string, length: ReplyLengthTier): number {
-  const target = LENGTH_TARGETS[length];
-  return normalizeEngagePlatform(platform) === 'x' ? target.x : target.reddit;
+  return normalizeEngagePlatform(platform) === 'x'
+    ? X_REFERENCE_POST_TARGETS[length]
+    : REDDIT_REPLY_TARGETS[length];
 }
 
 /** The length vocabulary a reference-post generation for X is written against. */
@@ -169,14 +170,12 @@ export type LengthRange = { min: number; max: number };
 // values on the existing API path, including server-side auto-reply defaults.
 function pickerUpperBounds(platform: string, maxWeighted: number): number[] {
   if (platform === 'x' && allowsLongForm(maxWeighted)) return [260, 1500, 4000];
-  const max =
-    platform === 'x'
-      ? X_WEIGHTED_CHAR_LIMIT
-      : platform === 'reddit'
-        ? 850
-        : (SCANNABLE_PLATFORMS as readonly string[]).includes(platform)
-          ? 2550
-          : 1000;
+  if (platform === 'x') return TIER_ORDER.map((tier) => X_REFERENCE_POST_TARGETS[tier]);
+  const max = platform === 'reddit'
+    ? 850
+    : (SCANNABLE_PLATFORMS as readonly string[]).includes(platform)
+      ? 2550
+      : 1000;
   return [Math.round(max * 0.25), Math.round(max * 0.5), max];
 }
 
@@ -334,10 +333,7 @@ export function platformHardCeilingFor(
 }
 
 /**
- * Throws when a generated draft exceeds the PLATFORM's hard ceiling. The
- * requested `outputLength` only steers the prompt — it is a soft target, so a
- * draft that overshoots it is kept as long as the platform would still accept
- * it (see the engage draft-length note in the module docs).
+ * Checks the platform ceiling and any stricter selected draft length limit.
  *
  * Covers EVERY platform engage can generate for, not just x/reddit. It used to
  * check those two and silently pass anything else, which was harmless only
@@ -357,15 +353,17 @@ export function platformHardCeilingFor(
 export function assertDraftWithinPlatformLimit(
   platform: string,
   draft: string,
-  maxWeighted: number = X_FREE_MAX_WEIGHTED
+  maxWeighted: number = X_FREE_MAX_WEIGHTED,
+  selectedLimit?: number
 ) {
   const normalized = normalizeEngagePlatform(platform);
   // Anything outside the scannable set has no engage generation path and no
   // agreed ceiling — staying silent there preserves the previous behaviour
   // for callers passing a platform this module was never taught about,
   // rather than inventing a limit for it.
-  const hardLimit = platformHardCeilingFor(normalized, maxWeighted);
-  if (hardLimit === null) return;
+  const platformLimit = platformHardCeilingFor(normalized, maxWeighted);
+  if (platformLimit === null) return;
+  const hardLimit = Math.min(platformLimit, selectedLimit ?? platformLimit);
   // The MEASURED length rides along in every message. A model told only that
   // it went over has no idea whether it missed by 5 characters or 400, and
   // that is the difference between trimming a clause and rewriting the post —

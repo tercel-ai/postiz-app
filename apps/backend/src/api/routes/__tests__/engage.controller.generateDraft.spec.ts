@@ -61,6 +61,7 @@ function build(overrides: Record<string, any> = {}) {
     {} as any,
     {} as any,
     {} as any,
+    {} as any,
     {} as any
   );
   return { controller, engageService, draftService };
@@ -275,7 +276,7 @@ describe('EngageController.generateDraft — standard X reply length', () => {
 
     await controller.generateDraft(ORG, 'opp1', { ...BODY, length: 'long', maxWeighted }, req, res);
 
-    expect(draftService.generateDraft.mock.calls[0][5]).toBe(255);
+    expect(draftService.generateDraft.mock.calls[0][5]).toBe(260);
   });
 
   it.each([[65, 65], [1500, 260]])('resolves an explicit X target of %i to %i', async (outputLength, target) => {
@@ -290,7 +291,7 @@ describe('EngageController.generateDraft — standard X reply length', () => {
     expect(draftService.generateDraft.mock.calls[0][5]).toBe(target);
   });
 
-  it.each([[140, true], [141, false]])('applies the weighted ceiling at %i CJK characters', async (characters, accepted) => {
+  it.each([[65, true], [66, false]])('applies the default medium tier ceiling at %i CJK characters', async (characters, accepted) => {
     const draft = '中'.repeat(characters);
     const { controller, engageService } = build({
       generateDraft: async function* () {

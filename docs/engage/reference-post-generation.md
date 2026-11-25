@@ -91,15 +91,10 @@ Design revision 5 (**the ceiling belongs to the ACCOUNT** — see §6.7):
   and does not need to be, since either reading refutes a fixed limit. Every
   tier in revision 4 was sized against 280 because that was believed to be X's
   number; it is the UNSUBSCRIBED number.
-- The ceiling arrives on the request as an optional `maxWeighted`. The web app
-  reads it live from the browser extension over the social-sessions bridge
-  (`XSessionInfo.maxWeighted`), which measures it from X's own composer ring
-  while publishing. Nothing is stored server-side — the only client that
-  generates is the one already holding the current value — so it is
-  client-supplied and bounded rather than trusted (`resolveRequestedXCeiling`).
-- A long-form account gets a WHOLE LADDER, not a widened `long`, and replies
-  get a separate one about a third the size. Absent, out-of-range or
-  unparseable all resolve to 280, which is the cheap direction to be wrong in.
+- The bounded `maxWeighted` request value selects the X generation ladder.
+  The website sends the existing 4000-character picker maximum where it
+  offers the long-form picker. The extension measures actual account capacity
+  from the composer. X Reply uses the standard picker for every account.
 
 Design revision 3 (**cross-platform generation** — `a→any`):
 - `/generate-post` takes an optional `targetPlatform`. Omitting it is exactly
@@ -413,8 +408,8 @@ reply-draft composer already has:
 | `strategy` | `string` (one of `VALID_STRATEGIES`) | ✓ | Same 7 strategy keys as `/draft` (`EXPERT_ANSWER`, `DATA_BACKED`, …), but resolved against **different, reworded prompt text** — see §6 on why the reply-draft wording (e.g. QUESTION_LED's literal "Reply with...") isn't reused as-is |
 | `brandStrength` | `number` (0–3) | ✓ | Same brand-mention control as `/draft`, same mechanism (`engage-brand-instruction.ts`, shared with the reply flow) |
 | `mentions` | `string[]` (≤20) | | Optional brand names, used when `brandStrength` ≥ 2 |
-| `outputLength` | `integer` (≥ 2) | | Web picker value for the target platform's recommended range. Other numbers follow the existing target rules in §6.6 |
-| `maxWeighted` | `integer` (280–25000) | | **X targets only.** The ACCOUNT's own post ceiling in weighted characters, read live from the browser extension (`XSessionInfo.maxWeighted`). Selects which tier ladder the generation uses — see §6.7. Omitted, out of range or non-numeric → 280, X's free tier |
+| `outputLength` | `integer` (≥ 2) | | Recognized single-post picker value sets the inclusive maximum. Threads and other numbers follow the existing target rules in §6.6 |
+| `maxWeighted` | `integer` (280–25000) | | **X targets only.** Weighted ceiling for generation. The website sends 4000 when it offers the long-form picker. Clients may also supply a measured ceiling. Omitted → 280 |
 | `projectId` | `string` | | Optional project scope |
 | `targetPlatform` | `string` (one of `SCANNABLE_PLATFORMS`) | | The platform the post is WRITTEN FOR. Omitted → the opportunity's own platform (the original a→a behaviour). Supplied → an a→any generation: the character budget, the format rules, the house style, the draft's `providerIdentifier` and its `Post.settings` all come from the TARGET, while the opportunity stays the reference (`settings.referenceOpportunity.platform` keeps naming the SOURCE). Thread capability follows the target too, so `thread: true` for a `medium`/`quora`/`devto` target degrades to a single post rather than 400-ing. See §6.4 |
 | `sourceAdaptation` | `PRESERVE_STRUCTURE` \| `REFRAME` \| `FRESH_ANGLE` | | How closely the post may follow the reference; default `REFRAME`. A separate axis from `strategy` — that picks the voice, this picks the distance from the source. No mode relaxes the anti-plagiarism gate. See §6.3 |
@@ -1125,15 +1120,20 @@ to overshoot, not one — and is asked for through a longer prompt (part
 separator, exact post count, per-part ceiling) that leaves less attention for
 any single part. The 40 characters are not a visible difference on X.
 
-**The web picker selects a recommended range.** The prompt uses the previous
-picker value as the lower bound and the selected value as the upper bound.
-For standard X this gives 0–65, 65–130, and 130–260 weighted characters. For a
-long-form account's single post, the picker values are 260, 1500, and 4000.
-The generator still sizes its token budget from the internal X ladder. When
-the generator uses a shorter X tier for a dense reference or a corrective
-retry, it recommends that tier's range. The long X thread range is 130–220
-per post. A draft outside its recommended range can still be returned if it
-passes the existing ceiling and content checks.
+**The single-post picker sets an inclusive maximum.** The lower bound guides
+the model. A complete shorter draft can be returned. The same preferred range
+and maximum apply to the first attempt and the shortening retry.
+
+| Target | Short | Medium | Long |
+|---|---:|---:|---:|
+| X standard (weighted) | 0–65 | 65–130 | 130–260 |
+| X long-form (weighted) | 0–260 | 260–1500 | 1500–4000 |
+| Reddit | 0–213 | 213–425 | 425–850 |
+| LinkedIn, Quora, Hacker News, Medium, dev.to | 0–638 | 638–1275 | 1275–2550 |
+
+Requests that resolve to one post use these picker bounds, including
+`thread: true` with `maxThreadParts: 1`. Multi-post threads use their
+existing targets. The long X thread range is 130–220 per post.
 
 **Other numeric values on X select the existing tier.** A client's
 Short/Medium/Long picker resolves to a number before it reaches the API, so the
@@ -1146,12 +1146,11 @@ up would put it in the tier with the least headroom.
 
 This is what keeps every rule below reachable. An honoured raw number skipped
 all of them — a client sending 260 with `thread: true` got 260 per part, not
-220. Medium and dev.to picker ranges stay within the article floor and the
-existing target with its length margin. On non-X targets, other numeric values
-continue to use the existing target and article-length guidance.
+220. On non-X targets, other numeric values continue to use the existing
+target and article-length guidance.
 
-**A long reference starts one tier down** (`DENSE_REFERENCE_TARGET_MULTIPLE`,
-4x the target in force), whoever asked for the wider one — after the snap there
+**A long reference starts one tier down for fallback X targets and threads**
+(`DENSE_REFERENCE_TARGET_MULTIPLE`, 4x the target in force) — after the snap there
 is no "the caller said so" left to respect, only a tier, and the tier that
 overruns is the one this rule exists to avoid starting from. It caps at
 `medium` rather than stepping down blindly, so an explicit `short` stays
@@ -1161,7 +1160,7 @@ have a floor" and marks `quora` as `short`, yet a Quora answer is exactly the
 essay this guard is for — while a three-sentence Medium post is not a
 compression job just because of where it was published.
 
-**The retry downgrades the target instead of restating it.** A model that just
+**The retry downgrades fallback X targets and thread targets.** A model that just
 overran a budget it could not measure cannot act on "fit the limit you missed";
 it can act on a budget it is unlikely to reach at all. So `downgradedReferencePostTarget`
 steps to the largest tier strictly below whatever was in force (which also
@@ -1242,35 +1241,29 @@ but wrong — and `verified_type` cannot separate Free from Basic at all, since
 both report `none`. The same defect exists in the OAuth send path today
 (`x.provider.ts`'s `maxLength(verified)` returns 280 for a Basic account, and
 4000 rather than 25000 for a verified one). The
-browser extension measures it from the composer ring as a by-product of
-publishing and hands it to the web app over the social-sessions bridge
-(`XSessionInfo.maxWeighted`); the app passes it down as an optional
-`maxWeighted` on `POST /generate-post`.
+browser extension measures capacity from the composer ring and exposes it
+through `XSessionInfo.maxWeighted`. The website currently sends its existing
+4000-character picker maximum as `maxWeighted` on `POST /generate-post` when
+all selected accounts qualify for its long-form controls. The value budgets
+generation. Publication still uses the sending path's account-specific checks.
 
 It is therefore **client-supplied**, and treated as such: `@Min(280)
 @Max(25000)` at the DTO and re-checked by `resolveRequestedXCeiling`, which
 resolves absent, out-of-range, fractional-below-bound and non-numeric all to
-280. It is deliberately NOT stored server-side — the only client that generates
-is the one already holding the live value, so a copy here could only ever be a
-staler version of what the caller just read from the browser, with an expiry
-policy to maintain for the privilege. The blast radius of a wrong value is one
-wasted generation for the org that sent it, and the extension's own gate at
-publish time is the real backstop.
+280. The ceiling is request-scoped. Deploy the backend and website together
+to pass and enforce all three X long-form picker ranges. Older website
+requests without `maxWeighted` still use the standard X ladder.
 
-**Two ladders, not one widened tier**
-(`X_LONG_FORM_REFERENCE_POST_TARGETS` / `X_LONG_FORM_REPLY_TARGETS`):
+**Internal fallback targets** (`X_LONG_FORM_REFERENCE_POST_TARGETS`):
 
-| Tier | Original post | Reply | free-tier equivalent (post / reply) |
-|---|---|---|---|
-| `short` | 280 | 200 | 65 / 120 |
-| `medium` | 1500 | 600 | 130 / 200 |
-| `long` | **4096** | **2000** | 260 / 255 |
+| Tier | X long-form post | X standard post |
+|---|---:|---:|
+| `short` | 280 | 65 |
+| `medium` | 1500 | 130 |
+| `long` | 4096 | 260 |
 
-Moving only `long` was tried first and is wrong: it leaves a 30x hole between
-`medium` (130) and `long` that no picker setting can land in. And replies are
-about a third of an original post throughout — several thousand characters
-aimed at someone else's post is a different social act, and nobody choosing
-"long reply" is asking for an essay.
+Single-post picker requests use the exact bounds in §6.6. All X Reply picker
+requests use 65, 130 and 260.
 
 `short` at 280 is one full standard tweet: the ceiling a free account lives
 under, and the length everyone already recognises as "a post".
