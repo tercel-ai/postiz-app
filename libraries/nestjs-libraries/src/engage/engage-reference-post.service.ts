@@ -11,7 +11,7 @@ import {
 import { checkReferenceSimilarity } from '@gitroom/nestjs-libraries/engage/reference-similarity';
 import {
   REDDIT_TARGET_CHAR_LIMIT,
-google.provider.ts  normalizeEngagePlatform,
+  normalizeEngagePlatform,
   assertDraftWithinPlatformLimit,
   describeEngageLengthRange,
   engagePickerLengthRange,
