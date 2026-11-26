@@ -7,6 +7,7 @@ import {
   Delete,
   Get,
   HttpException,
+  BadGatewayException,
   Param,
   Patch,
   Post,
@@ -20,6 +21,8 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { Request } from 'express';
+import { ApiResponseError } from 'twitter-api-v2';
+import { XProvider } from '@gitroom/nestjs-libraries/integrations/social/x.provider';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { ConnectIntegrationDto } from '@gitroom/nestjs-libraries/dtos/integrations/connect.integration.dto';
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
@@ -708,93 +711,43 @@ export class IntegrationsController {
   async fetchUserByUsername(
     @GetOrgFromRequest() org: Organization,
     @Body() body: UserByUsernameDto
-  ): Promise<any> {
-    let getIntegration: any;
-
-    if (body.id) {
-      getIntegration = await this._integrationService.getIntegrationById(org.id, body.id);
-      if (!getIntegration) {
-        throw new HttpException('Invalid integration', 400);
-      }
-    } else {
-      // No integration ID supplied — fall back to round-robin across all active integrations.
-      // Default to 'x' so callers can omit provider when doing X username lookups.
-      const provider = body.provider ?? 'x';
+  ) {
+    const provider = body.provider ?? 'x';
+    if (provider !== 'x') {
       if (!this._integrationManager.getAllowedSocialsIntegrations().includes(provider)) {
         throw new HttpException('Invalid provider', 400);
       }
-      getIntegration = await this._integrationService.pickActiveIntegrationByProvider(provider);
-      if (!getIntegration) {
-        throw new HttpException(`No active integration available for provider: ${provider}`, 503);
+      throw new HttpException(
+        { error: 'unsupported', message: `${provider} does not support username lookup` },
+        501
+      );
+    }
+
+    const result = await runWithBizUsage(
+      { organizationId: org.id, bizCategory: BIZ_USAGE.USER_LOOKUP },
+      () => XProvider.fetchPublicUserByUsername(body.username)
+    ).catch((error: unknown) => {
+      const status = error instanceof ApiResponseError ? error.code : undefined;
+      Logger.warn(
+        `X public username lookup failed (${status ?? 'transport error'})`,
+        IntegrationsController.name
+      );
+      if (status === 429) {
+        throw new HttpException({ error: 'rate_limited', message: 'X username lookup rate limited' }, 429);
       }
+      throw new BadGatewayException({ error: 'x_lookup_failed', message: 'X username lookup failed' });
+    });
+
+    if ('missingCredentials' in result) {
+      throw new ServiceUnavailableException({
+        error: 'x_lookup_not_configured',
+        message: 'X application credentials are not configured',
+      });
     }
-
-    const integrationProvider = this._integrationManager.getSocialIntegration(
-      getIntegration.providerIdentifier
-    );
-    if (!integrationProvider) {
-      throw new HttpException('Invalid provider', 400);
+    if ('notFound' in result) {
+      throw new HttpException({ error: 'not_found', message: 'User not found' }, 404);
     }
-
-    // Retry loop: at most one token refresh attempt on the same integration.
-    // Avoids unbounded recursion and ensures the refreshed token is the one used.
-    let currentToken = getIntegration.token;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const result = await runWithBizUsage(
-          { organizationId: org.id, bizCategory: BIZ_USAGE.USER_LOOKUP },
-          () =>
-            integrationProvider.fetchUserByUsername(
-              currentToken,
-              { username: body.username },
-              getIntegration.internalId,
-              { ...getIntegration, token: currentToken }
-            )
-        );
-
-        if (result && 'supported' in result && result.supported === false) {
-          throw new HttpException(
-            {
-              error: 'unsupported',
-              message: `${getIntegration.providerIdentifier} does not support username lookup`,
-            },
-            501
-          );
-        }
-
-        if (result && 'notFound' in result && result.notFound === true) {
-          throw new HttpException(
-            { error: 'not_found', message: 'User not found' },
-            404
-          );
-        }
-
-        return result;
-      } catch (err) {
-        if (err instanceof HttpException) {
-          throw err;
-        }
-        if (err instanceof RefreshToken && attempt === 0) {
-          const refreshed = await this._refreshIntegrationService.refresh(getIntegration);
-          if (refreshed && refreshed.accessToken) {
-            if (integrationProvider.refreshWait) {
-              await timer(10000);
-            }
-            currentToken = refreshed.accessToken;
-            continue;
-          }
-          throw new HttpException('Token refresh failed', 401);
-        }
-        console.error('fetchUserByUsername error:', {
-          integrationId: getIntegration.id,
-          internalId: getIntegration.internalId,
-          provider: getIntegration.providerIdentifier,
-          err,
-        });
-        throw new HttpException('Failed to fetch user', 500);
-      }
-    }
-    throw new HttpException('Failed to fetch user', 500);
+    return result;
   }
 
   @Post('/function')

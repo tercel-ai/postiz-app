@@ -79,11 +79,6 @@ export interface SocialUserLookupSuccess {
   raw?: any;
 }
 
-export type SocialUserLookupResult =
-  | SocialUserLookupSuccess
-  | { notFound: true }
-  | { supported: false };
-
 function safeStringify(obj: any) {
   const seen = new WeakSet();
 
@@ -160,15 +155,6 @@ export abstract class SocialAbstract {
     | { none: true }
   > {
     return { none: true };
-  }
-
-  public async fetchUserByUsername(
-    token: string,
-    d: { username: string },
-    id: string,
-    integration: Integration
-  ): Promise<SocialUserLookupResult> {
-    return { supported: false };
   }
 
   async runInConcurrent<T>(

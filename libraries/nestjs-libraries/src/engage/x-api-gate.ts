@@ -16,7 +16,7 @@
 // extension is the primary path anyway) and never "we hit X from a datacentre
 // IP" (not recoverable — the account carries it).
 //
-// WHAT IT GATES. Every server-side READ of the X API:
+// WHAT IT GATES. Engage server-side reads of the X API:
 //   · engage keyword / tracked scan   (third-party content — the whole reason)
 //   · our own reply's metrics         (own token, own post — but the extension
 //                                      covers it via metrics.reply.ts)
@@ -27,6 +27,8 @@
 // PUBLISHING to the org's own account with the org's own OAuth token. Writing as
 // yourself is the sanctioned use of the API and has nothing to do with the
 // scraping-risk this switch exists for. Gating it would simply break posting.
+// Authenticated public profile lookup by username also runs independently of
+// this switch. It uses the server's app-only credential.
 
 /** Env name, exported so tests and docs cannot drift from the implementation. */
 export const X_API_ENABLED_ENV = 'X_API_ENABLED';

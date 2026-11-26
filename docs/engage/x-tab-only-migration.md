@@ -113,6 +113,10 @@ org's own account with the org's own OAuth token — the sanctioned use of the
 API, unrelated to the scraping risk this switch exists for. Gating it would only
 break posting.
 
+The authenticated `POST /integrations/user-by-username` endpoint runs
+independently of this switch. It queries one public X profile using the app-only
+credentials configured on the backend. See the [API contract](../api.md).
+
 The decision was to **keep the code behind the switch rather than delete it**:
 the switch already removes the whole risk, and a reversible gate is worth more
 than a deletion if the server path is ever needed again.

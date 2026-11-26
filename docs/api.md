@@ -117,6 +117,21 @@ Modules with a dedicated, parameter-level API reference:
 | PUT | `/integrations/plugs/:id/activate` |
 | GET | `/integrations/telegram/updates` |
 
+`POST /integrations/user-by-username` looks up a public X profile for an
+authenticated organization. Send a `username` with an optional `@` prefix.
+The optional `provider` defaults to `x`. The endpoint accepts the legacy `id`
+field for older clients and ignores it. The response keeps the public profile
+fields and the X payload in `raw`.
+
+The backend calls X with `X_BEARER_TOKEN`, or obtains an app-only token using
+`X_API_KEY` and `X_API_SECRET` if the bearer is unset. The lookup works without
+an X integration and runs independently of the Engage `X_API_ENABLED` switch.
+HTTP `404` indicates an invalid handle or missing account, `429` indicates X
+rate limiting, `503` with `x_lookup_not_configured` indicates missing app
+credentials, and `502` indicates another upstream failure. A registered
+provider without public lookup support returns `501`. An unknown provider
+returns `400`.
+
 ### [posts.controller.ts](../apps/backend/src/api/routes/posts.controller.ts) — `/posts`
 📖 **[posts-api.md](./posts-api.md)** · publish body → [post-publish-api.md](./post-publish-api.md) · list → [posts-list-module.md](./posts-list-module.md)
 | Method | Path |

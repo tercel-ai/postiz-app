@@ -1,5 +1,4 @@
 import { Integration } from '@prisma/client';
-import { SocialUserLookupResult } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 
 export interface ClientInformation {
   client_id: string;
@@ -216,12 +215,6 @@ export interface SocialProvider
     | { none: true }
   >;
   mentionFormat?(idOrHandle: string, name: string): string;
-  fetchUserByUsername(
-    token: string,
-    data: { username: string },
-    id: string,
-    integration: Integration
-  ): Promise<SocialUserLookupResult>;
   fetchPageInformation?(
     accessToken: string,
     data: any

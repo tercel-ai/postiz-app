@@ -1,6 +1,6 @@
 import { controlledSubmit, currentSendContext } from '../../extension/controlled-api-submit';
 import { PrismaClient } from '@prisma/client';
-import { TweetV2, TwitterApi, type IClientSettings } from 'twitter-api-v2';
+import { ApiResponseError, TweetV2, TwitterApi, type IClientSettings } from 'twitter-api-v2';
 import { weightedLength } from '@gitroom/helpers/utils/count.length';
 import { X_FREE_MAX_WEIGHTED, X_OAUTH_VERIFIED_MAX_WEIGHTED } from '@gitroom/nestjs-libraries/integrations/x-account-ceiling';
 import {
@@ -19,6 +19,7 @@ import {
   ReferencePostSettingsContext,
   RefreshToken,
   SocialAbstract,
+  type SocialUserLookupSuccess,
 } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { Plug } from '@gitroom/helpers/decorators/plug.decorator';
 import { Integration } from '@prisma/client';
@@ -1764,12 +1765,22 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     return [];
   }
 
-  override async fetchUserByUsername(token: string, d: { username: string }) {
-    const client = this.buildClient(token);
-    const handle = (d.username || '').trim().replace(/^@+/, '');
-    if (!handle) {
-      return { notFound: true as const };
+  static async fetchPublicUserByUsername(username: string): Promise<
+    SocialUserLookupSuccess | { notFound: true } | { missingCredentials: true }
+  > {
+    const handle = username.trim().replace(/^@+/, '');
+    if (!/^[a-z0-9_]{1,15}$/i.test(handle)) return { notFound: true };
+
+    const bearer = process.env.X_BEARER_TOKEN?.trim();
+    const appKey = process.env.X_API_KEY?.trim();
+    const appSecret = process.env.X_API_SECRET?.trim();
+    if (!bearer && !(appKey && appSecret)) {
+      return { missingCredentials: true };
     }
+    const settings = xClientSettings(AbortSignal.timeout(15000));
+    const client = bearer
+      ? new TwitterApi(bearer, settings)
+      : await new TwitterApi({ appKey: appKey!, appSecret: appSecret! }, settings).appLogin();
 
     try {
       const result = await client.v2.userByUsername(handle, {
@@ -1810,15 +1821,11 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         following: user.public_metrics?.following_count,
         raw: user,
       };
-    } catch (err: any) {
-      const status = err?.code || err?.data?.status || err?.status;
-      if (status === 404 || status === 400) {
-        return { notFound: true as const };
+    } catch (error) {
+      if (error instanceof ApiResponseError && error.code === 404) {
+        return { notFound: true };
       }
-      if (status === 401) {
-        throw new RefreshToken(this.identifier, JSON.stringify(err?.data || {}), '', 'X token expired');
-      }
-      throw err;
+      throw error;
     }
   }
 

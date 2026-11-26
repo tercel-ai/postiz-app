@@ -1,6 +1,7 @@
 import { IsDefined, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class UserByUsernameDto {
+  /** Accepted for older clients. Public X lookup uses application credentials. */
   @IsString()
   @IsOptional()
   id?: string;

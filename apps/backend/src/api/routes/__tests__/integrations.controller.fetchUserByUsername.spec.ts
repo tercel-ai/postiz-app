@@ -1,215 +1,141 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { HttpException } from '@nestjs/common';
+import type { Organization } from '@prisma/client';
+import { ApiResponseError, TwitterApi } from 'twitter-api-v2';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getBizUsageContext } from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
 import { IntegrationsController } from '../integrations.controller';
-import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 
-// ---------------------------------------------------------------------------
-// Mocks
-// ---------------------------------------------------------------------------
-
-const ALLOWED_PROVIDERS = ['x', 'reddit', 'linkedin'];
-
-function createMocks() {
-  return {
-    integrationManager: {
-      getAllowedSocialsIntegrations: vi.fn().mockReturnValue(ALLOWED_PROVIDERS),
-      getSocialIntegration: vi.fn().mockReturnValue({
-        refreshWait: false,
-        fetchUserByUsername: vi.fn().mockResolvedValue({ id: 'user-123', username: 'alice' }),
-      }),
-      getAllIntegrations: vi.fn().mockReturnValue([]),
-      getInternalPlugs: vi.fn(),
-      getAllPlugs: vi.fn().mockReturnValue([]),
-    },
-    integrationService: {
-      getIntegrationById: vi.fn(),
-      pickActiveIntegrationByProvider: vi.fn(),
-      getIntegrationsList: vi.fn().mockResolvedValue([]),
-      customers: vi.fn(),
-      setTimes: vi.fn(),
-      getMentions: vi.fn().mockResolvedValue([]),
-      insertMentions: vi.fn(),
-      getIntegrationForOrder: vi.fn(),
-      saveProviderPage: vi.fn(),
-      disableChannel: vi.fn(),
-      enableChannel: vi.fn(),
-      deleteChannel: vi.fn(),
-      softDeleteUnpublishedPostsForChannel: vi.fn(),
-      getPlugsByIntegrationId: vi.fn(),
-      createOrUpdatePlug: vi.fn(),
-      changePlugActivation: vi.fn(),
-      getPostsForChannel: vi.fn().mockResolvedValue([]),
-      getPostsLevelAnalytics: vi.fn().mockResolvedValue([]),
-      updateIntegrationGroup: vi.fn(),
-      updateOnCustomerName: vi.fn(),
-      updateProviderSettings: vi.fn(),
-      updateNameAndUrl: vi.fn(),
-      checkPreviousConnections: vi.fn(),
-      createOrUpdateIntegration: vi.fn(),
-    },
-    postService: {},
-    refreshIntegrationService: { refresh: vi.fn() },
-    dataTicksService: { syncAccountMetricsById: vi.fn().mockResolvedValue(null) },
-    aiseeClient: { syncIntegration: vi.fn() },
-  };
-}
-
-function createController(mocks: ReturnType<typeof createMocks>) {
-  return new IntegrationsController(
-    mocks.integrationManager as any,
-    mocks.integrationService as any,
-    mocks.postService as any,
-    mocks.refreshIntegrationService as any,
-    mocks.dataTicksService as any,
-    mocks.aiseeClient as any,
+function createController() {
+  const integrationService = { getIntegrationById: vi.fn(), pickActiveIntegrationByProvider: vi.fn() };
+  const refreshService = { refresh: vi.fn() };
+  const manager = { getAllowedSocialsIntegrations: () => ['x', 'reddit'] };
+  const controller = new IntegrationsController(
+    manager as never,
+    integrationService as never,
+    {} as never,
+    refreshService as never,
+    {} as never,
+    {} as never,
+    {} as never,
   );
+  return { controller, integrationService, refreshService };
 }
 
-const fakeOrg = { id: 'org-1' } as any;
+function upstreamError(code: number) {
+  return new ApiResponseError('upstream private details', {
+    code, request: {} as never, response: {} as never, headers: {}, data: {},
+  });
+}
 
-const fakeIntegration = {
-  id: 'int-1',
-  token: 'tok-aaa',
-  internalId: 'internal-1',
-  providerIdentifier: 'x',
-  refreshToken: 'ref-aaa',
-  tokenExpiration: null as Date | null,
-  organizationId: 'org-1',
-};
-
-// ---------------------------------------------------------------------------
-// Branch A: org-scoped lookup (body.id present)
-// ---------------------------------------------------------------------------
-
-describe('IntegrationsController.fetchUserByUsername — branch A (body.id present)', () => {
-  let mocks: ReturnType<typeof createMocks>;
-  let controller: IntegrationsController;
+describe('IntegrationsController.fetchUserByUsername', () => {
+  const organization = { id: 'org-1' } as Organization;
+  const xUser = { id: 'user-123', username: 'alice', name: 'Alice' };
+  const userByUsername = vi.fn();
+  const readAuth = vi.fn();
 
   beforeEach(() => {
-    vi.clearAllMocks();
-    mocks = createMocks();
-    controller = createController(mocks);
-    mocks.integrationService.getIntegrationById.mockResolvedValue(fakeIntegration);
+    vi.stubEnv('X_BEARER_TOKEN', 'app-bearer');
+    vi.stubEnv('X_API_KEY', '');
+    vi.stubEnv('X_API_SECRET', '');
+    vi.stubEnv('X_API_ENABLED', 'false');
+    readAuth.mockClear();
+    userByUsername.mockReset().mockResolvedValue({ data: xUser });
+    vi.spyOn(TwitterApi.prototype, 'v2', 'get').mockImplementation(function (this: TwitterApi) {
+      readAuth(this.getActiveTokens());
+      return { userByUsername } as never;
+    });
   });
 
-  it('looks up integration by org.id + body.id', async () => {
-    await controller.fetchUserByUsername(fakeOrg, { id: 'int-1', username: 'alice' });
-    expect(mocks.integrationService.getIntegrationById).toHaveBeenCalledWith('org-1', 'int-1');
-    expect(mocks.integrationService.pickActiveIntegrationByProvider).not.toHaveBeenCalled();
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
-  it('throws 400 when integration not found', async () => {
-    mocks.integrationService.getIntegrationById.mockResolvedValue(null);
-    await expect(
-      controller.fetchUserByUsername(fakeOrg, { id: 'bad-id', username: 'alice' })
-    ).rejects.toThrow(HttpException);
+  it.each([{ username: 'alice' }, { username: '@alice', id: 'unavailable-integration', provider: 'x' }])(
+    'looks up a public X user without integration or refresh access for %j',
+    async (body) => {
+      const { controller, integrationService, refreshService } = createController();
+      userByUsername.mockImplementationOnce(async () => {
+        expect(getBizUsageContext()).toEqual({ organizationId: 'org-1', bizCategory: 'user_lookup' });
+        return { data: xUser };
+      });
+
+      await expect(controller.fetchUserByUsername(organization, body)).resolves.toMatchObject({
+        ...xUser,
+        url: 'https://twitter.com/alice',
+        raw: xUser,
+      });
+      expect(readAuth).toHaveBeenCalledWith({ type: 'oauth2', bearerToken: 'app-bearer' });
+      expect(userByUsername).toHaveBeenCalledWith('alice', expect.objectContaining({
+        'user.fields': expect.arrayContaining(['username', 'profile_image_url', 'public_metrics']),
+      }));
+      expect(integrationService.getIntegrationById).not.toHaveBeenCalled();
+      expect(integrationService.pickActiveIntegrationByProvider).not.toHaveBeenCalled();
+      expect(refreshService.refresh).not.toHaveBeenCalled();
+    },
+  );
+
+  it('prioritizes the configured bearer even when consumer credentials are present', async () => {
+    vi.stubEnv('X_API_KEY', 'app-key');
+    vi.stubEnv('X_API_SECRET', 'app-secret');
+    const appLogin = vi.spyOn(TwitterApi.prototype, 'appLogin');
+
+    await createController().controller.fetchUserByUsername(organization, { username: 'alice' });
+
+    expect(appLogin).not.toHaveBeenCalled();
+    expect(readAuth).toHaveBeenCalledWith({ type: 'oauth2', bearerToken: 'app-bearer' });
   });
 
-  it('returns provider result on success', async () => {
-    const result = await controller.fetchUserByUsername(fakeOrg, { id: 'int-1', username: 'alice' });
-    expect(result).toEqual({ id: 'user-123', username: 'alice' });
-  });
-});
+  it('gets an app bearer using consumer credentials when no bearer is configured', async () => {
+    vi.stubEnv('X_BEARER_TOKEN', '');
+    vi.stubEnv('X_API_KEY', 'app-key');
+    vi.stubEnv('X_API_SECRET', 'app-secret');
+    const appLogin = vi.spyOn(TwitterApi.prototype, 'appLogin').mockImplementation(
+      async function (this: TwitterApi) {
+        expect(this.getActiveTokens()).toMatchObject({
+          type: 'oauth-1.0a', appKey: 'app-key', appSecret: 'app-secret',
+          accessToken: undefined, accessSecret: undefined,
+        });
+        return new TwitterApi('issued-app-bearer');
+      },
+    );
 
-// ---------------------------------------------------------------------------
-// Branch B: system round-robin (body.id absent, body.provider present)
-// ---------------------------------------------------------------------------
-
-describe('IntegrationsController.fetchUserByUsername — branch B (provider round-robin)', () => {
-  let mocks: ReturnType<typeof createMocks>;
-  let controller: IntegrationsController;
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mocks = createMocks();
-    controller = createController(mocks);
-    mocks.integrationService.pickActiveIntegrationByProvider.mockResolvedValue(fakeIntegration);
-  });
-
-  it('throws 400 for an unknown provider (not in allowlist)', async () => {
-    await expect(
-      controller.fetchUserByUsername(fakeOrg, { provider: 'unknown-provider', username: 'alice' })
-    ).rejects.toMatchObject({ status: 400 });
-    expect(mocks.integrationService.pickActiveIntegrationByProvider).not.toHaveBeenCalled();
+    await expect(createController().controller.fetchUserByUsername(organization, { username: 'alice' }))
+      .resolves.toMatchObject(xUser);
+    expect(appLogin).toHaveBeenCalledTimes(1);
+    expect(readAuth).toHaveBeenCalledWith({ type: 'oauth2', bearerToken: 'issued-app-bearer' });
   });
 
-  it('throws 503 when no active integration is available', async () => {
-    mocks.integrationService.pickActiveIntegrationByProvider.mockResolvedValue(null);
-    await expect(
-      controller.fetchUserByUsername(fakeOrg, { provider: 'x', username: 'alice' })
-    ).rejects.toMatchObject({ status: 503 });
+  it('returns a configuration error before any upstream call with incomplete app credentials', async () => {
+    vi.stubEnv('X_BEARER_TOKEN', ' ');
+    vi.stubEnv('X_API_KEY', 'app-key');
+    const appLogin = vi.spyOn(TwitterApi.prototype, 'appLogin');
+    await expect(createController().controller.fetchUserByUsername(organization, { username: 'alice' }))
+      .rejects.toMatchObject({ status: 503, response: { error: 'x_lookup_not_configured' } });
+    expect(appLogin).not.toHaveBeenCalled();
+    expect(userByUsername).not.toHaveBeenCalled();
   });
 
-  it('calls pickActiveIntegrationByProvider with the provider name', async () => {
-    await controller.fetchUserByUsername(fakeOrg, { provider: 'x', username: 'alice' });
-    expect(mocks.integrationService.pickActiveIntegrationByProvider).toHaveBeenCalledWith('x');
-    expect(mocks.integrationService.getIntegrationById).not.toHaveBeenCalled();
+  it('returns 404 when X finds no user', async () => {
+    userByUsername.mockResolvedValueOnce({ errors: [{ type: 'https://api.x.com/2/problems/resource-not-found' }] });
+    await expect(createController().controller.fetchUserByUsername(organization, { username: 'nobody' }))
+      .rejects.toMatchObject({ status: 404, response: { error: 'not_found' } });
   });
 
-  it('returns provider result on success', async () => {
-    const result = await controller.fetchUserByUsername(fakeOrg, { provider: 'x', username: 'alice' });
-    expect(result).toEqual({ id: 'user-123', username: 'alice' });
-  });
+  it.each([[401, 502], [403, 502], [429, 429], [500, 502]])(
+    'maps upstream %i to HTTP %i without refreshing an integration or exposing the raw error',
+    async (upstream, status) => {
+      userByUsername.mockRejectedValueOnce(upstreamError(upstream));
+      const { controller, refreshService } = createController();
+      const error = await controller.fetchUserByUsername(organization, { username: 'alice' }).catch(err => err);
+      expect(error.status).toBe(status);
+      expect(JSON.stringify(error.response)).not.toContain('upstream private details');
+      expect(refreshService.refresh).not.toHaveBeenCalled();
+    },
+  );
 
-  it('retries with refreshed token on RefreshToken — uses same integration (not a new one)', async () => {
-    const provider = mocks.integrationManager.getSocialIntegration('x') as any;
-    provider.fetchUserByUsername
-      .mockRejectedValueOnce(new RefreshToken('', '', ''))
-      .mockResolvedValueOnce({ id: 'user-456', username: 'bob' });
-
-    mocks.refreshIntegrationService.refresh.mockResolvedValue({ accessToken: 'tok-refreshed' });
-
-    const result = await controller.fetchUserByUsername(fakeOrg, { provider: 'x', username: 'bob' });
-
-    // Should have refreshed exactly once
-    expect(mocks.refreshIntegrationService.refresh).toHaveBeenCalledTimes(1);
-    expect(mocks.refreshIntegrationService.refresh).toHaveBeenCalledWith(fakeIntegration);
-
-    // pickActiveIntegrationByProvider called only ONCE — not again on retry
-    expect(mocks.integrationService.pickActiveIntegrationByProvider).toHaveBeenCalledTimes(1);
-
-    expect(result).toEqual({ id: 'user-456', username: 'bob' });
-  });
-
-  it('throws 401 when token refresh fails', async () => {
-    const provider = mocks.integrationManager.getSocialIntegration('x') as any;
-    provider.fetchUserByUsername.mockRejectedValueOnce(new RefreshToken('', '', ''));
-    mocks.refreshIntegrationService.refresh.mockResolvedValue(null);
-
-    await expect(
-      controller.fetchUserByUsername(fakeOrg, { provider: 'x', username: 'alice' })
-    ).rejects.toMatchObject({ status: 401 });
-  });
-
-  it('does not recurse infinitely — retries at most once on RefreshToken', async () => {
-    const provider = mocks.integrationManager.getSocialIntegration('x') as any;
-    // Always throw RefreshToken — should not loop more than 2 iterations
-    provider.fetchUserByUsername.mockRejectedValue(new RefreshToken('', '', ''));
-    mocks.refreshIntegrationService.refresh.mockResolvedValue({ accessToken: 'tok-new' });
-
-    await expect(
-      controller.fetchUserByUsername(fakeOrg, { provider: 'x', username: 'alice' })
-    ).rejects.toMatchObject({ status: 500 });
-
-    // fetchUserByUsername called at most twice (attempt 0 + attempt 1)
-    expect(provider.fetchUserByUsername).toHaveBeenCalledTimes(2);
-    // pickActiveIntegrationByProvider NOT called again on retry
-    expect(mocks.integrationService.pickActiveIntegrationByProvider).toHaveBeenCalledTimes(1);
-  });
-
-  it('throws 501 when provider does not support username lookup', async () => {
-    const provider = mocks.integrationManager.getSocialIntegration('x') as any;
-    provider.fetchUserByUsername.mockResolvedValue({ supported: false });
-    await expect(
-      controller.fetchUserByUsername(fakeOrg, { provider: 'x', username: 'alice' })
-    ).rejects.toMatchObject({ status: 501 });
-  });
-
-  it('throws 404 when user not found', async () => {
-    const provider = mocks.integrationManager.getSocialIntegration('x') as any;
-    provider.fetchUserByUsername.mockResolvedValue({ notFound: true });
-    await expect(
-      controller.fetchUserByUsername(fakeOrg, { provider: 'x', username: 'nobody' })
-    ).rejects.toMatchObject({ status: 404 });
+  it.each([['unknown', 400], ['reddit', 501]])('rejects provider %s with %i before lookup', async (provider, status) => {
+    await expect(createController().controller.fetchUserByUsername(organization, { username: 'alice', provider }))
+      .rejects.toMatchObject({ status });
+    expect(userByUsername).not.toHaveBeenCalled();
   });
 });
