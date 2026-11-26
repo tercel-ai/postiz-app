@@ -35,15 +35,17 @@ const plan = {
   platforms: ['x'],
   executionRevision: 0,
   executionRoutes: null,
+  createdAt: new Date('2030-05-01'),
 };
 function setup() {
   const db = {
     operationPlan: {
-      findFirst: vi.fn().mockResolvedValue(plan),
+      findFirst: vi.fn().mockImplementation(async ({ where }) => where.id === plan.id ? plan : null),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     post: {
       findMany: vi.fn().mockResolvedValue([draft]),
+      count: vi.fn().mockResolvedValue(0),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       createMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
@@ -326,9 +328,30 @@ describe('plan account route snapshots', () => {
       service.materialize('org', 'plan', [draft])
     ).rejects.toMatchObject({ status: 404 });
   });
+  it('does not create older posts once a later plan has materialized', async () => {
+    const { service, db } = setup();
+    db.operationPlan.findFirst.mockResolvedValueOnce(plan).mockResolvedValueOnce({ id: 'newer' });
+
+    await expect(service.materialize('org', 'plan', [draft])).resolves.toEqual({ count: 0, superseded: true });
+    expect(db.post.createMany).not.toHaveBeenCalled();
+    expect(db.post.updateMany).not.toHaveBeenCalled();
+    expect(db.$transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: 'Serializable' });
+  });
+  it('replaces earlier drafts in the materialization transaction and keeps queued content out of cleanup', async () => {
+    const { service, db } = setup();
+
+    await expect(service.materialize('org', 'plan', [draft])).resolves.toEqual({ count: 1 });
+    expect(db.post.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        organizationId: 'org', projectId: 'project', state: 'DRAFT', deletedAt: null,
+        operationPlan: { is: { createdAt: { lt: plan.createdAt } } },
+      },
+    }));
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+  });
   it('materializes inherited drafts without applying historical plan routes', async () => {
     const { service, db } = setup();
-    db.operationPlan.findFirst.mockResolvedValue({
+    db.operationPlan.findFirst.mockResolvedValueOnce({
       ...plan,
       executionRevision: 2,
       executionRoutes: routes,
@@ -349,7 +372,7 @@ describe('plan account route snapshots', () => {
   });
   it('does not treat an omitted historical route as a missing required draft account', async () => {
     const { service, db } = setup();
-    db.operationPlan.findFirst.mockResolvedValue({
+    db.operationPlan.findFirst.mockResolvedValueOnce({
       ...plan,
       executionRoutes: routes,
     });

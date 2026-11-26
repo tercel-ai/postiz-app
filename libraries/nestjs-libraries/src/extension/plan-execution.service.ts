@@ -1,4 +1,5 @@
 import { preserveDispatchTarget } from './send-dispatch';
+import { persistPlanDrafts } from '../database/prisma/operation-plan/operation-plan-supersession';
 import { SendModeService } from './send-mode.service';
 import {
   BadRequestException,
@@ -399,9 +400,7 @@ export class PlanExecutionService {
           ? { executionProtocol: ACCOUNT_BOUND_PROTOCOL }
           : {}),
       }));
-      return data.length
-        ? tx.post.createMany({ data, skipDuplicates: true })
-        : { count: 0 };
+      return persistPlanDrafts(tx, plan, data);
     });
   }
 }

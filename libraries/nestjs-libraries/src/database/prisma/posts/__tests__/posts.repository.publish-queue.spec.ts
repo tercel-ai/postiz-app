@@ -187,6 +187,28 @@ describe('schedulePostGroupToQueue', () => {
     expect(arg.data).toEqual({ state: 'QUEUE', publishMethod: 'EXTENSION' });
   });
 
+  it('leaves the group in DRAFT if the ready Reddit settings change before the autonomous write', async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const updateMany = vi.fn();
+    const repo = createRepo({ findFirst, updateMany });
+    const expected = { id: 'reddit-root', settings: '{"subreddit":[{"value":{"flairLabel":"Discussion"}}]}' };
+
+    await expect(repo.schedulePostGroupToQueue(
+      'org-1', 'reddit-group', 'EXTENSION', undefined, undefined, undefined, expected
+    )).resolves.toEqual({ count: 0 });
+
+    expect(findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        ...expected,
+        organizationId: 'org-1',
+        group: 'reddit-group',
+        parentPostId: null,
+        state: 'DRAFT',
+      }),
+    }));
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
   it('overrides publishDate group-wide when a new date is passed', async () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 1 });
     const repo = createRepo({ updateMany });

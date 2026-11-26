@@ -60,22 +60,40 @@ on for that platform gets `QUEUE` posts with no further action needed.
 to whichever integration happened to exist then; a commit resolves it, whether
 that commit runs here or later.
 
-Two rows never make it this far:
+A Reddit item awaiting community or flair resolution is materialized as a draft
+with the existing `settings.redditTargetPending` marker. A community confirmed
+unusable may still be retired through the target resolver. Posts that need a
+required flair and have no valid selection stay as drafts with their resolved
+community and the existing `flairRequired` setting. A different observed set of
+Flair options restages only unsent plan drafts still missing a required selection.
+They stay in `DRAFT` until ordinary admission succeeds. Repeated observations of
+the same set do not restage them. Saving a different community
+restages a plan draft for Flair lookup before it can schedule. The plan
+materialization sweep recovers only schedulable roots. Soft-deleted posts are
+evidence that a plan was already materialized, and plan cleanup can only
+supersede earlier drafts in the same project. A resolved Reddit root still
+awaiting admission can be retried individually by the same sweeper even after
+the ordinary plan-age recovery window. Manual edits cancel that handoff.
 
-- a **reddit** item whose target did not resolve is dropped rather than persisted
-  (it would throw at submit on `undefined.subreddit`);
-- nothing else — every other platform's item is written.
-
-**Supersede sweep.** When a plan materializes and owns at least one post, every
-*earlier* plan's `DRAFT` posts in that project are soft-deleted
-(`deletedAt = now`). `QUEUE` / `PUBLISHED` / `ERROR` rows survive — they are
-committed work. The `planHasPosts` guard stops a degenerate plan (zero posts
-resolved) from wiping a valid predecessor.
+**Supersession.** Post creation and cleanup of earlier `DRAFT` rows share
+the materialization transaction. A plan that finishes late yields if a newer
+plan in the same project already owns posts, including soft-deleted posts. A
+newer plan with zero materialized posts leaves the previous plan eligible.
+Automatic admission checks the same order before attempting to queue a plan
+draft. The existing write guards reject drafts removed in the meantime.
+Explicit scheduling of an individual live draft follows the ordinary Post
+rules. Existing `QUEUE`, `PUBLISHED`, and `ERROR` rows survive supersession.
 
 ## Stage 1 — the commit gates (DRAFT → QUEUE)
 
-Owned by `PostsService.schedulePlanPosts`. Evaluated in this order; the first
-that fails ends the batch.
+`PostsService.schedulePlanPosts` owns draft admission. Project-level gates
+apply to the batch. Reddit roots still resolving their community or flair, or
+missing a required flair, stay in `DRAFT` while the batch schedules other eligible
+posts. Asynchronous completion reuses the same plan-scheduling entry point for
+the resolved root and rechecks the project's current publishing policy and
+controlled automation owner. Direct scheduling returns a per-item reason for
+an incomplete Reddit plan draft. The existing SendIntent, claim, permit, and
+outcome contracts apply once a ready root enters the queue.
 
 ### ① Master switch — `metadata.automationEnabled`
 

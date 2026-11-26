@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 // What a subreddit REQUIRES of a post, cached on the monitored-channel row.
 //
 // Why this is observed rather than fetched: Reddit's flair endpoints
@@ -6,10 +8,8 @@
 // in a run where /r/<sub>/about.json returned 200, so the rejection is Reddit's
 // auth check and not the WAF. The OAuth route that WOULD answer needs Reddit API
 // credentials this deployment does not have, so no server-side call can read a
-// flair list at all. What CAN read it is the browser extension: Reddit renders
-// the real option set into its own submit page, and the extension is already
-// there whenever it publishes. This module is the shape that observation is
-// stored in.
+// flair list at all. The browser extension observes it using the signed-in
+// Reddit session. This module stores those observations for plan generation.
 //
 // Storage lives on EngageTrackedAccount.metadata (an unstructured Json column)
 // under a `reddit` sub-object rather than flattened beside the existing
@@ -21,13 +21,8 @@
 /**
  * One option from a subreddit's post-flair picker.
  *
- * Label only, deliberately. Reddit's flair TEMPLATE ID would be the better key,
- * but no observer this deployment has can see one: the extension reads the
- * picker's rendered text, and the endpoints that return ids answer
- * USER_REQUIRED without OAuth credentials this deployment does not have. A
- * modelled `id` was carried through every layer here for a while and never
- * written by anyone — add it back alongside an observer that can actually
- * populate it.
+ * The cache stores labels for plan selection. The executor resolves them
+ * against the signed-in account's live Reddit templates before submission.
  */
 export interface RedditFlairOption {
   /** Visible text, in Reddit's own casing and including any emoji. */
@@ -41,8 +36,12 @@ export interface RedditChannelCapability {
    * is not the same as "this subreddit has no flairs".
    */
   flairs?: RedditFlairOption[];
-  /** Observed SUBMIT_VALIDATION_FLAIR_REQUIRED — a post here needs a flair. */
+  /** The option list observation time. Null means its legacy date is unknown. */
+  flairsObservedAt?: string | null;
+  /** Whether an observed community rule requires flair. */
   flairRequired?: boolean;
+  /** The requirement observation time. Null means its legacy date is unknown. */
+  flairRequiredObservedAt?: string | null;
   /** Observed POST_GUIDANCE_VALIDATION_FAILED — the title needs a tag. */
   titleTagRequired?: boolean;
   /** ISO timestamp of the observation this record came from. */
@@ -74,7 +73,12 @@ function readFlairs(value: unknown): RedditFlairOption[] | undefined {
     options.push({ label: label.slice(0, MAX_LABEL_LENGTH) });
     if (options.length >= MAX_FLAIRS) break;
   }
-  return options;
+  return options.length || !value.length ? options : undefined;
+}
+
+function fieldObservedAt(value: unknown, legacyObservedAt: string | undefined) {
+  if (value === undefined) return legacyObservedAt;
+  return typeof value === 'string' ? value : null;
 }
 
 /**
@@ -89,15 +93,23 @@ function readFlairs(value: unknown): RedditFlairOption[] | undefined {
 export function readRedditCapability(metadata: unknown): RedditChannelCapability {
   const reddit = asRecord(asRecord(metadata).reddit);
   const flairs = readFlairs(reddit.flairs);
+  const flairRequired = typeof reddit.flairRequired === 'boolean' ? reddit.flairRequired : undefined;
+  const observedAt = typeof reddit.observedAt === 'string' ? reddit.observedAt : undefined;
+  const flairsObservedAt = fieldObservedAt(reddit.flairsObservedAt, observedAt);
+  const flairRequiredObservedAt = fieldObservedAt(reddit.flairRequiredObservedAt, observedAt);
   return {
-    ...(flairs ? { flairs } : {}),
-    ...(typeof reddit.flairRequired === 'boolean'
-      ? { flairRequired: reddit.flairRequired }
-      : {}),
+    ...(flairs !== undefined ? {
+      flairs,
+      ...(flairsObservedAt !== undefined ? { flairsObservedAt } : {}),
+    } : {}),
+    ...(flairRequired !== undefined ? {
+      flairRequired,
+      ...(flairRequiredObservedAt !== undefined ? { flairRequiredObservedAt } : {}),
+    } : {}),
     ...(typeof reddit.titleTagRequired === 'boolean'
       ? { titleTagRequired: reddit.titleTagRequired }
       : {}),
-    ...(typeof reddit.observedAt === 'string' ? { observedAt: reddit.observedAt } : {}),
+    ...(observedAt !== undefined ? { observedAt } : {}),
     ...(reddit.source === 'extension' ? { source: reddit.source } : {}),
   };
 }
@@ -114,7 +126,8 @@ export function readRedditCapability(metadata: unknown): RedditChannelCapability
  *     means "this observation did not cover it", NOT false — a publish that
  *     succeeded says nothing about whether flair is required, and must not
  *     silently clear a `flairRequired: true` learned from a real rejection.
- *   - `observedAt` is stamped on every write so staleness is comparable.
+ *   - Options and the flair requirement get separate timestamps. Preserve
+ *     their legacy dates before advancing the record-wide observation time.
  */
 export function mergeRedditCapability(
   metadata: unknown,
@@ -123,15 +136,20 @@ export function mergeRedditCapability(
 ): Record<string, unknown> {
   const existingMetadata = asRecord(metadata);
   const existing = readRedditCapability(metadata);
-  const flairs = patch.flairs ? readFlairs(patch.flairs) : existing.flairs;
+  const newFlairs = readFlairs(patch.flairs);
+  const newFlairRequired = typeof patch.flairRequired === 'boolean' ? patch.flairRequired : undefined;
+  const flairs = newFlairs ?? existing.flairs;
+  const flairRequired = newFlairRequired ?? existing.flairRequired;
 
   const next: RedditChannelCapability = {
-    ...(flairs?.length ? { flairs } : {}),
-    ...(typeof patch.flairRequired === 'boolean'
-      ? { flairRequired: patch.flairRequired }
-      : typeof existing.flairRequired === 'boolean'
-      ? { flairRequired: existing.flairRequired }
-      : {}),
+    ...(flairs !== undefined ? {
+      flairs,
+      flairsObservedAt: newFlairs !== undefined ? observedAt : existing.flairsObservedAt ?? null,
+    } : {}),
+    ...(flairRequired !== undefined ? {
+      flairRequired,
+      flairRequiredObservedAt: newFlairRequired !== undefined ? observedAt : existing.flairRequiredObservedAt ?? null,
+    } : {}),
     ...(typeof patch.titleTagRequired === 'boolean'
       ? { titleTagRequired: patch.titleTagRequired }
       : typeof existing.titleTagRequired === 'boolean'
@@ -142,6 +160,24 @@ export function mergeRedditCapability(
   };
 
   return { ...existingMetadata, reddit: next };
+}
+
+// Multiple templates with the same visible label cannot be verified at send time.
+export function usableRedditFlairLabels(labels: string[]) {
+  const options = labels.map((label) => label.trim()).filter(Boolean);
+  const keyOf = (label: string) => label.replace(/\s+/g, ' ').toLowerCase();
+  const counts = new Map<string, number>();
+  for (const label of options) {
+    const key = keyOf(label);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return options.filter((label) => counts.get(keyOf(label)) === 1);
+}
+
+/** Identify the effective set supplied to the selector, regardless of display order. */
+export function redditFlairOptionsRevision(labels: string[] | undefined): string | undefined {
+  if (labels === undefined) return undefined;
+  return createHash('sha256').update(JSON.stringify(usableRedditFlairLabels(labels).sort())).digest('hex');
 }
 
 const normalizeLabel = (s: string): string =>
@@ -194,7 +230,7 @@ export function matchRedditFlairLabel(
  */
 export function isEmptyRedditCapability(patch: RedditChannelCapability): boolean {
   return (
-    !patch.flairs?.length &&
+    readFlairs(patch.flairs) === undefined &&
     typeof patch.flairRequired !== 'boolean' &&
     typeof patch.titleTagRequired !== 'boolean'
   );

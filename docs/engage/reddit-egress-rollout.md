@@ -190,3 +190,60 @@ banned" — that single confusion produced three wrong diagnoses in a row.
 - **9 pre-existing test failures** in
   `users.service.getUserLimits.spec.ts` — present before this work (verified by
   stashing), unrelated.
+
+## Operation Plan flair selection
+
+New Reddit plan posts use the existing `settings.redditTargetPending` marker
+until the extension identifies the final subreddit and observes its post flair
+options. If the plan already verified a destination, the marked draft retains
+that community. The pending response can supply a fresh organization-scoped
+option list for it. The extension otherwise reads Reddit with its signed-in
+session. Adding a monitored subreddit can wake a background cache refresh
+after the save, independently of the plan's own resolution. The extension
+retains a busy or incomplete refresh locally and retries it on the existing
+Engage scan alarm. A confirmed candidate 404 allows fallback search and does
+not block later posts. A failed Reddit read cannot retire a draft.
+
+The extension echoes `pendingRevision` and submits `flairOptions` in the
+existing resolve request. An empty list means Reddit returned no options.
+Null means the read failed. When Reddit explicitly supplies the current
+requirement, the extension also includes `flairRequired`. The backend may use
+a fresh cached snapshot if the live read is unavailable.
+
+For the confirmed subreddit, the backend asks the model to choose from the
+current numbered options. The number identifies an option within that request
+only. The plan saves its selected label. To write a controlled post, the
+extension verifies the saved ID or uniquely matches the label to a current
+template and submits the ID, irrespective of the list order.
+
+The backend commits the community and selection for the original draft and
+thread against their original snapshots. It preserves the titles last saved in
+the editor and advances the content revision when the saved settings change.
+Changing a plan draft's community restages it with the new fixed destination
+when it still needs Flair resolution. An explicit selection ends automatic
+Flair matching, including an already saved selection with an older pending
+marker. A never-submitted controlled Post can be saved as a draft with its
+existing cancelled, editable intent. The resolver updates its linked draft
+and intent revisions after rechecking the earlier attempt evidence. It stays
+a draft until explicitly scheduled. Manual Schedule and Post Now enforce the
+same Flair readiness as automation. Required Flair with no match leaves the post in Draft and
+records the effective option set tried. A changed capability report for that
+subreddit restages only untouched plan drafts still missing required Flair,
+including older drafts without an option-set record. The comparison ignores
+display order and repeating the same report does not trigger another selection.
+The existing pending poll processes the restaged draft. Each subsequent no-match
+stays in Draft until another report changes its options. Existing selections
+remain intact. A temporary model failure for a required rule or lack of rule
+evidence keeps the draft pending so later drafts can progress. Admission rechecks project
+activation using the existing project policy and still applies the ordinary
+per-post mode and scheduling checks. The resolved, unadmitted root records
+its scheduling handoff in existing post settings so an interrupted admission
+can be retried by the plan materialization sweeper irrespective of plan age.
+The retry checks current automation and plan eligibility and targets only
+that root. Admission or a manual edit clears the handoff. A dormant controlled
+draft with a saved intent does not become an automatic retry candidate.
+
+Deploy the backend with the updated extension. Older extensions can still
+resolve legacy parked rows. Posts staged by the new backend await a resolver
+that can send the option snapshot and its revision. Capability refresh uses
+the existing monitored-channel metadata and requires no migration.

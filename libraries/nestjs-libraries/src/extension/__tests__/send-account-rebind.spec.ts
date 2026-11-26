@@ -334,6 +334,43 @@ async function realEditorFixture() {
   settings:{__type:'x'},value:[{id:'root',content:'editable original',image:[]}]}]};
  return {...f,svc,modes,body,convert};
 }
+it('saves a retargeted Reddit plan post as a dormant draft on the original controlled intent', async () => {
+  const f = await realEditorFixture();
+  const root = f.db.rows('post')[0];
+  const intent = f.db.rows('sendIntent')[0];
+  const settings = (subreddit: string) => ({
+    __type: 'reddit', subreddit: [{ value: { subreddit, title: 'A saved title', type: 'self', is_flair_required: false } }],
+  });
+  Object.assign(root, { providerIdentifier: 'reddit', operationPlanId: 'plan', settings: JSON.stringify(settings('oldsite')) });
+  Object.assign(intent, { platform: 'reddit', status: 'QUEUED', activeExecutionId: null });
+  f.db.rows('sendExecution').length = 0;
+  f.db.rows('sendSegment').length = 0;
+  Object.assign(f.body.posts[0], { providerIdentifier: 'reddit', settings: settings('newsite') });
+  const accepted = await f.svc.createPost('org', f.body, 'user');
+  expect(accepted[0]).toMatchObject({ postId: 'root', state: 'DRAFT', sending: { sendIntentId: intent.id } });
+  expect(f.db.rows('sendIntent')[0]).toMatchObject({ id: intent.id, status: 'CANCELLED', activeExecutionId: null, context: { editableDraft: true } });
+  expect(JSON.parse(f.db.rows('post')[0].settings).redditTargetPending).toMatchObject({ candidate: 'newsite', reason: 'flair-pending' });
+});
+
+it('requires a still-present Reddit schedule handoff and consumes it in controlled admission', async () => {
+  const { db, service } = setupSend();
+  const settings = { subreddit: [{ value: { subreddit: 'opensource', flairLabel: 'Discussion' } }] };
+  db.seed('post', {
+    id: 'reddit-root', organizationId: 'org', projectId: 'project', operationPlanId: 'plan',
+    parentPostId: null, group: 'reddit-root', providerIdentifier: 'reddit', integrationId: 'account',
+    accountSelectionMode: 'EXPLICIT', routeRevision: 0, contentRevision: 1,
+    state: 'DRAFT', content: 'hello', source: 'calendar', settings: JSON.stringify(settings), image: '[]',
+    publishDate: sendNow, publishMethod: 'EXTENSION',
+  });
+  const options = { userId: 'user', origin: 'AUTOMATION' as const, requireRedditPlanSchedulePending: true as const };
+  await expect(service.enqueue('org', 'reddit-root', options)).rejects.toThrow('SEND_DRAFT_CHANGED');
+  expect(db.rows('sendIntent')).toHaveLength(0);
+  db.rows('post')[0].settings = JSON.stringify({ ...settings, redditPlanSchedulePending: true });
+  await service.enqueue('org', 'reddit-root', options);
+  expect(db.rows('post')[0]).toMatchObject({ state: 'QUEUE', settings: JSON.stringify(settings) });
+  expect(db.rows('sendIntent')).toHaveLength(1);
+});
+
 it('a saved original extension draft grants no fresh claim and does not block actual autonomous handover',async()=>{
  const f=await realEditorFixture();
  const accepted=await f.svc.createPost('org',f.body,'user');

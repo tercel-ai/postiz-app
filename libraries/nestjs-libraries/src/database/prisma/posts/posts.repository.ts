@@ -12,7 +12,8 @@ import { PostSource } from '@gitroom/nestjs-libraries/dtos/posts/post-source';
 import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
 import { LocatePostInListDto } from '@gitroom/nestjs-libraries/dtos/posts/locate.post-in-list.dto';
 import { titleFromSettings } from '@gitroom/nestjs-libraries/database/prisma/posts/settings-title';
-import { REDDIT_TARGET_PENDING_KEY } from '@gitroom/nestjs-libraries/engage/reddit-pending-target';
+import { clearRedditPlanSchedulePending, hasRedditPlanSchedulePending, REDDIT_TARGET_PENDING_KEY } from '@gitroom/nestjs-libraries/engage/reddit-pending-target';
+import { prepareRedditPlanEdit, redditPlanScheduleBlock } from '@gitroom/nestjs-libraries/engage/reddit-plan-readiness';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import weekOfYear from 'dayjs/plugin/weekOfYear';
@@ -2448,7 +2449,22 @@ export class PostsRepository {
       // would make the post unpublishable. mapTypeToPost guarantees it is
       // present on every path into here: it overwrites it from the bound
       // account, and rejects an accountless post that doesn't carry its own.
-      const previousTarget = value.id ? (await (tx?.post ?? this._post.model.post).findFirst({ where: { id, organizationId: orgId }, select: { sendTarget: true } }))?.sendTarget : null;
+      const previous = value.id ? await (tx?.post ?? this._post.model.post).findFirst({
+        where: { id, organizationId: orgId },
+        select: { sendTarget: true, operationPlanId: true, providerIdentifier: true, deletedAt: true, contentRevision: true, settings: true },
+      }) : null;
+      const planRedditRoot = !posts.length && previous?.operationPlanId && previous.providerIdentifier === 'reddit' ? previous : null;
+      if (planRedditRoot) {
+        if (planRedditRoot.deletedAt ||
+            (body.expectedContentRevision !== undefined && body.expectedContentRevision !== planRedditRoot.contentRevision)) {
+          throw new ConflictException('SEND_CONTENT_REVISION_CONFLICT');
+        }
+        const settings = prepareRedditPlanEdit(planRedditRoot.settings, JSON.stringify(body.settings));
+        const block = redditPlanScheduleBlock({ providerIdentifier: 'reddit', settings });
+        if (block && state !== 'draft') throw new BadRequestException(block);
+        body = { ...body, settings: JSON.parse(settings) };
+      }
+      const previousTarget = previous?.sendTarget ?? null;
       const updateData = (type: 'create' | 'update') => ({
         publishDate: dayjs(date).toDate(),
         sendTarget: withPublishNowRequestedAt(type === 'update' ? previousTarget : null, state === 'now' && !posts.length ? dayjs(date).toDate() : null),
@@ -2551,6 +2567,7 @@ export class PostsRepository {
           where: {
             id,
             organizationId: orgId,
+            ...(planRedditRoot ? { contentRevision: planRedditRoot.contentRevision, deletedAt: null } : {}),
             ...(restrictToUnclaimedDrafts && !withdrawalIds.has(id) ? { state: 'DRAFT', releaseId: null } : {}),
             ...(withdrawalIds.has(id) ? {
               state: { in: ['QUEUE', 'DRAFT'] }, deletedAt: null,
@@ -3590,7 +3607,7 @@ export class PostsRepository {
       // (POST /projects/:projectId/automation/publishing) without a second query.
       // publishDate lets the caller check it against a configured per-platform
       // time window (extension_publish.time_window) and re-pick it if outside.
-      select: { id: true, state: true, providerIdentifier: true, publishDate: true },
+      select: { id: true, state: true, providerIdentifier: true, publishDate: true, settings: true },
     });
   }
 
@@ -3641,6 +3658,7 @@ export class PostsRepository {
         state: true,
         releaseId: true,
         sendIntentId: true,
+        settings: true,
       },
     });
   }
@@ -3881,16 +3899,27 @@ export class PostsRepository {
     publishMethod: PublishMethod,
     publishDate?: Date,
     tx?: Prisma.TransactionClient,
-    publishNow?: boolean
+    publishNow?: boolean,
+    expectedRedditDraft?: { id: string; settings: string | null }
   ): Promise<Prisma.BatchPayload> {
     if (this._sendModes && !tx) {
       if (!this._tx) throw new ServiceUnavailableException('SEND_DRAFT_TRANSACTION_REQUIRED');
       return sendTransaction(this._tx.model, async client => {
         await this._sendModes!.assertAutonomousIn(client, organizationId);
-        return this.schedulePostGroupToQueue(organizationId, group, publishMethod, publishDate, client, publishNow);
+        return this.schedulePostGroupToQueue(organizationId, group, publishMethod, publishDate, client, publishNow, expectedRedditDraft);
       });
     }
     const model = tx?.post ?? this._post.model.post;
+    if (expectedRedditDraft) {
+      // The parent call uses the existing autonomous serializable transaction.
+      // Recheck that the ready settings still belong to the root before changing the group.
+      const original = await model.findFirst({
+        where: { ...expectedRedditDraft, organizationId, group, parentPostId: null,
+          state: State.DRAFT, deletedAt: null, AND: [legacyExecutionWhere()] },
+        select: { id: true },
+      });
+      if (!original) return { count: 0 };
+    }
     const schedulingRows = publishNow !== undefined || publishDate ? await model.findMany({ where: { organizationId, group, state: State.DRAFT, deletedAt: null, AND: [legacyExecutionWhere()] }, select: { id: true, parentPostId: true, sendTarget: true } }) : [];
     const result = await model.updateMany({
       where: {
@@ -3909,6 +3938,13 @@ export class PostsRepository {
         ...(publishDate ? { publishDate } : {}),
       },
     });
+    if (result.count && expectedRedditDraft?.settings && hasRedditPlanSchedulePending(expectedRedditDraft.settings)) {
+      const cleared = await model.updateMany({
+        where: { ...expectedRedditDraft, organizationId, group, parentPostId: null, state: State.QUEUE, deletedAt: null },
+        data: { settings: clearRedditPlanSchedulePending(expectedRedditDraft.settings) },
+      });
+      if (cleared.count !== 1) throw new ConflictException('SEND_DRAFT_CHANGED');
+    }
     const requestedAt = publishNow ? publishDate ?? new Date() : null;
     if (result.count) for (const row of schedulingRows) {
       const changed = await model.updateMany({

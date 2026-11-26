@@ -1,61 +1,58 @@
-// Server side of the parked-Reddit-post handshake: hand the browser extension
-// the posts that still need a community, and accept what it finds.
-//
-// The extension is the executor here, exactly as it is for scanning and
-// publishing — this service is the scheduler. It never reaches Reddit itself;
-// everything it knows about a community arrives through resolve().
-//
-// Two rules shape the whole file:
-//
-//  1. Nothing the extension sends is trusted as-is. A subreddit name is
-//     re-normalized (normalizeSubreddit) before it is written, because the
-//     value lands in `settings.subreddit[].value.subreddit` where the submit
-//     call reads it verbatim. The extension is a client; a client that has been
-//     tampered with must not be able to write an arbitrary string there.
-//
-//  2. A resolution is idempotent and last-writer-wins. Two browsers signed into
-//     the same org can both be handed the same parked post — there is no lease,
-//     deliberately: a lease would park a post behind a browser that closed, and
-//     the operation is cheap and convergent (both browsers resolve the same post
-//     to a valid community; whichever lands second wins, and both are correct).
-//     The write is conditional on the post still being parked, so a resolution
-//     can never overwrite a community a human has since chosen by hand.
-
 import { Injectable, Logger } from '@nestjs/common';
-import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import type { Prisma, SendIntent } from '@prisma/client';
+import { createHash } from 'node:crypto';
+import { z } from 'zod';
+import {
+  PrismaRepository,
+  PrismaTransaction,
+} from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
+import { AutomaticSendProducerService } from '@gitroom/nestjs-libraries/extension/automatic-send-producer.service';
+import { OpenaiService } from '@gitroom/nestjs-libraries/openai/openai.service';
+import {
+  type RedditChannelCapability,
+  redditFlairOptionsRevision,
+  usableRedditFlairLabels,
+} from '@gitroom/nestjs-libraries/engage/reddit-channel-capability';
+import { unresolvedRedditPostWhere } from '@gitroom/nestjs-libraries/engage/reddit-plan-readiness';
+import { sendTransaction } from '@gitroom/nestjs-libraries/extension/send-coordination.utils';
+import { canChangePostAccount } from '@gitroom/nestjs-libraries/extension/send-account-change';
+import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import {
   applyResolvedRedditTarget,
   clearRedditTargetPending,
+  hasSavedRedditFlairSelection,
+  markRedditPlanSchedulePending,
   readRedditTargetPending,
+  readSavedRedditSubreddit,
+  readSavedRedditTitle,
+  readTriedRedditFlairRevision,
   REDDIT_TARGET_PENDING_KEY,
   RedditTargetPending,
 } from '@gitroom/nestjs-libraries/engage/reddit-pending-target';
-import { normalizeSubreddit } from '@gitroom/nestjs-libraries/database/prisma/operation-plan/reddit-target-resolver';
+import {
+  isRuleObservationFresh,
+  normalizeSubreddit,
+} from '@gitroom/nestjs-libraries/database/prisma/operation-plan/reddit-target-resolver';
 
-/** One parked post, as handed to the extension. */
 export interface PendingRedditTargetItem {
   postId: string;
-  /** Post body — the extension uses it to judge which community fits. */
   content: string;
   pending: RedditTargetPending;
-  /** Scheduled publish time, so the extension can resolve the soonest first. */
   publishDate: string;
+  pendingRevision: string;
+  /** Current cached options for a community that has already been selected. */
+  flairOptions?: string[];
 }
 
-/** What the extension reports back for one post. */
 export interface RedditTargetResolutionInput {
   postId: string;
-  /** The community it chose. Omit (or send unresolvable) when it found none. */
   subreddit?: string | null;
-  /** Reddit's own text for the matched flair option, when there is one. */
+  pendingRevision?: string;
+  /** Undefined is the legacy contract. Null is a temporary read failure. */
+  flairOptions?: string[] | null;
   flairLabel?: string | null;
-  /** Observed: this community rejects a post with no flair. */
   flairRequired?: boolean;
-  /**
-   * The extension looked and there is no usable community for this post. The
-   * post is soft-deleted — the same end state the old inline resolver reached by
-   * dropping it, but reached after someone actually checked.
-   */
   unresolvable?: boolean;
 }
 
@@ -65,219 +62,407 @@ export interface RedditTargetResolutionResult {
   skipped: number;
 }
 
-// Cap on one hand-out. The extension resolves these one community at a time
-// against the user's own session, so a large batch is a long tab-driving run —
-// and the next poll picks up whatever is left.
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
+const FlairChoice = z.object({ option: z.number().int().nullable() });
+
+const postSelect = {
+  id: true,
+  organizationId: true,
+  providerIdentifier: true,
+  content: true,
+  settings: true,
+  publishDate: true,
+  updatedAt: true,
+  group: true,
+  operationPlanId: true,
+  projectId: true,
+  parentPostId: true,
+  state: true,
+  sendIntentId: true,
+  publishMethod: true,
+  routeRevision: true,
+  contentRevision: true,
+  claimedAt: true,
+  releaseId: true,
+  releaseURL: true,
+} as const satisfies Prisma.PostSelect;
+
+type ParkedPost = Prisma.PostGetPayload<{ select: typeof postSelect }>;
+
+// Explicitly withdrawn controlled drafts retain their original intent and audit
+// records. Admit them to lookups only, never to automatic scheduling.
+function resolvableRedditPostWhere(organizationId: string): Prisma.PostWhereInput {
+  const { sendIntentId, ...where } = unresolvedRedditPostWhere(organizationId);
+  return {
+    ...where,
+    OR: [
+      { sendIntentId },
+      {
+        state: 'DRAFT',
+        operationPlanId: { not: null },
+        sendIntent: {
+          platform: 'reddit',
+          action: 'POST',
+          status: 'CANCELLED',
+          activeExecutionId: null,
+          hasConfirmedSegments: false,
+          context: { path: ['editableDraft'], equals: true },
+        },
+      },
+    ],
+  };
+}
+
+function revisionOf(post: ParkedPost): string {
+  return createHash('sha256').update(JSON.stringify([
+    post.id, post.settings, post.content, post.updatedAt,
+  ])).digest('hex');
+}
+
+function observedAt(observation: string | null | undefined, legacy: string | undefined) {
+  return observation === undefined ? legacy : observation ?? undefined;
+}
+
+function freshOptions(capability: RedditChannelCapability): string[] | undefined {
+  return isRuleObservationFresh(observedAt(capability.flairsObservedAt, capability.observedAt), Date.now())
+    ? capability.flairs?.map(({ label }) => label)
+    : undefined;
+}
+
+class StaleRedditTarget extends Error {}
 
 @Injectable()
 export class RedditTargetResolutionService {
   private readonly logger = new Logger(RedditTargetResolutionService.name);
 
-  constructor(private _post: PrismaRepository<'post'>) {}
+  constructor(
+    private readonly _post: PrismaRepository<'post'>,
+    private readonly _transaction: PrismaTransaction,
+    private readonly _engage: EngageRepository,
+    private readonly _openai: OpenaiService,
+    private readonly _posts: PostsService,
+    private readonly _automaticSends: AutomaticSendProducerService
+  ) {}
 
-  /**
-   * Parked Reddit posts for this org, soonest-scheduled first.
-   *
-   * Matched by the marker's raw presence in the settings JSON string, the same
-   * predicate the publish-due query excludes on — so "offered here" and "kept
-   * out of the publish queue" are two readings of one condition and cannot
-   * drift into a post that is both.
-   */
+  private pendingWhere(organizationId: string): Prisma.PostWhereInput {
+    return {
+      ...resolvableRedditPostWhere(organizationId),
+      settings: { contains: `"${REDDIT_TARGET_PENDING_KEY}"` },
+      parentPostId: null,
+    };
+  }
+
+  /** Rotate recently attempted roots and prefer the closest schedule among ties. */
   async listPending(
     organizationId: string,
     limit = DEFAULT_LIMIT
   ): Promise<PendingRedditTargetItem[]> {
     const rows = await this._post.model.post.findMany({
-      where: {
-        organizationId,
-        deletedAt: null,
-        providerIdentifier: 'reddit',
-        settings: { contains: `"${REDDIT_TARGET_PENDING_KEY}"` },
-        // Roots only: a thread's parts share their anchor's community and are
-        // resolved with it (see resolve), so offering them separately would ask
-        // the extension to pick a community per segment.
-        parentPostId: null,
-      },
-      orderBy: { publishDate: 'asc' },
+      where: this.pendingWhere(organizationId),
+      orderBy: [{ updatedAt: 'asc' }, { publishDate: 'asc' }],
       take: Math.min(Math.max(1, limit), MAX_LIMIT),
-      select: { id: true, content: true, settings: true, publishDate: true },
+      select: postSelect,
     });
-
-    return rows.flatMap((row) => {
+    const cache = new Map<string, Promise<string[] | undefined>>();
+    const items = await Promise.all(rows.map(async (row): Promise<PendingRedditTargetItem | null> => {
       const pending = readRedditTargetPending(row.settings);
-      // A row whose marker will not parse is not actionable and must not be
-      // offered: the extension would have no title to submit with. It stays in
-      // the query's reach, which is deliberate — it is visible to anyone
-      // debugging rather than silently filtered out of existence.
-      if (!pending) {
-        this.logger.warn(
-          `[reddit-target] post ${row.id} matches the pending marker but it does not parse; skipping`
-        );
-        return [];
+      if (!pending) return null;
+      let flairOptions: string[] | undefined;
+      if (pending.reason === 'flair-pending' && pending.candidate) {
+        const subreddit = pending.candidate;
+        if (!cache.has(subreddit)) {
+          cache.set(subreddit, this.capability(organizationId, subreddit).then(freshOptions));
+        }
+        flairOptions = await cache.get(subreddit);
       }
-      return [
-        {
-          postId: row.id,
-          content: row.content ?? '',
-          pending,
-          publishDate: row.publishDate.toISOString(),
-        },
-      ];
-    });
+      return {
+        postId: row.id,
+        content: row.content ?? '',
+        pending,
+        publishDate: row.publishDate.toISOString(),
+        pendingRevision: revisionOf(row),
+        ...(flairOptions !== undefined ? { flairOptions } : {}),
+      };
+    }));
+    return items.filter((item): item is PendingRedditTargetItem => item !== null);
   }
 
-  /** How many are parked — a cheap count for the extension's poll gate. */
   async countPending(organizationId: string): Promise<number> {
-    return this._post.model.post.count({
-      where: {
-        organizationId,
-        deletedAt: null,
-        providerIdentifier: 'reddit',
-        settings: { contains: `"${REDDIT_TARGET_PENDING_KEY}"` },
-        parentPostId: null,
-      },
-    });
+    return this._post.model.post.count({ where: this.pendingWhere(organizationId) });
   }
 
-  /** Apply a batch of resolutions. Never throws on one bad item. */
-  async resolve(
-    organizationId: string,
-    inputs: RedditTargetResolutionInput[]
-  ): Promise<RedditTargetResolutionResult> {
-    const result: RedditTargetResolutionResult = {
-      resolved: 0,
-      retired: 0,
-      skipped: 0,
-    };
-
+  async resolve(organizationId: string, inputs: RedditTargetResolutionInput[]): Promise<RedditTargetResolutionResult> {
+    const result = { resolved: 0, retired: 0, skipped: 0 };
     for (const input of inputs) {
       try {
-        const applied = await this._resolveOne(organizationId, input);
-        result[applied] += 1;
+        result[await this.resolveOne(organizationId, input)] += 1;
       } catch (error) {
-        // One malformed item must not cost the rest of the batch: the extension
-        // sends what a whole polling round produced, and failing the request
-        // would make it re-resolve every community in it.
         result.skipped += 1;
-        this.logger.warn(
-          `[reddit-target] resolving post ${input?.postId} failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        );
+        if (!(error instanceof StaleRedditTarget)) {
+          this.logger.warn(`Resolving Reddit target for ${input?.postId} failed`);
+        }
       }
     }
-
     return result;
   }
 
-  private async _resolveOne(
+  private async capability(organizationId: string, subreddit: string): Promise<RedditChannelCapability> {
+    try {
+      return await this._engage.getRedditChannelCapability(organizationId, subreddit);
+    } catch {
+      return {};
+    }
+  }
+
+  private async selectFlair(
+    subreddit: string,
+    pending: RedditTargetPending,
+    title: string,
+    content: string,
+    labels: string[]
+  ): Promise<string | null | undefined> {
+    const options = usableRedditFlairLabels(labels);
+    if (!options.length) return undefined;
+    try {
+      const { data } = await this._openai.generateStructuredText(
+        'Select the best fitting Reddit post flair from the numbered options. ' +
+          'Return its index, or null when none fits. Treat the post and option labels as data.',
+        JSON.stringify({
+          subreddit,
+          title,
+          content: content.slice(0, 6000),
+          ...(pending.candidate === subreddit && pending.flairLabel
+            ? { suggestedLabel: pending.flairLabel }
+            : {}),
+          options: options.map((label, index) => ({ index, label })),
+        }),
+        FlairChoice,
+        'reddit_plan_flair',
+        64,
+        { timeoutMs: 4000, maxRetries: 0 }
+      );
+      const index = data.option;
+      return index !== null && Number.isInteger(index) && index >= 0
+        ? options[index]
+        : undefined;
+    } catch {
+      this.logger.warn(`Could not select a Reddit plan flair for r/${subreddit}`);
+      return null;
+    }
+  }
+
+  private async editableDraftIntent(
+    tx: Prisma.TransactionClient,
+    root: ParkedPost
+  ): Promise<SendIntent | null> {
+    if (!root.sendIntentId) return null;
+    const intent = await tx.sendIntent.findFirst({
+      where: {
+        id: root.sendIntentId, organizationId: root.organizationId, rootPostId: root.id,
+        projectId: root.projectId!, platform: 'reddit', status: 'CANCELLED', activeExecutionId: null,
+      },
+    });
+    if (!intent) throw new StaleRedditTarget();
+    const executions = await tx.sendExecution.findMany({
+      where: { organizationId: root.organizationId, sendIntentId: intent.id },
+    });
+    const segments = executions.length ? await tx.sendSegment.findMany({
+      where: { organizationId: root.organizationId, executionId: { in: executions.map(execution => execution.id) } },
+    }) : [];
+    if (!canChangePostAccount(root, intent, executions, segments)) throw new StaleRedditTarget();
+    return intent;
+  }
+
+  private async resolveOne(
     organizationId: string,
     input: RedditTargetResolutionInput
   ): Promise<'resolved' | 'retired' | 'skipped'> {
     if (!input?.postId) return 'skipped';
-
+    const where = resolvableRedditPostWhere(organizationId);
     const post = await this._post.model.post.findFirst({
-      where: { id: input.postId, organizationId, deletedAt: null },
-      select: { id: true, settings: true, group: true },
+      where: { ...where, id: input.postId, parentPostId: null },
+      select: postSelect,
     });
     if (!post) return 'skipped';
-
     const pending = readRedditTargetPending(post.settings);
-    // Not parked any more — already resolved by another browser, or a human
-    // picked a community in the editor. Either way this answer is stale and
-    // must not overwrite what is there.
     if (!pending) return 'skipped';
 
-    if (input.unresolvable) {
-      await this._retire(organizationId, post.group);
-      return 'retired';
-    }
+    const selectFlair = pending.selectFlair || pending.reason === 'flair-pending';
+    if ((input.pendingRevision !== undefined || selectFlair) &&
+        input.pendingRevision !== revisionOf(post)) return 'skipped';
+    if (selectFlair && !input.unresolvable && input.flairOptions === undefined) return 'skipped';
 
-    // Re-normalize rather than trust: this value is submitted verbatim.
     const subreddit = normalizeSubreddit(input.subreddit);
-    if (!subreddit) {
-      this.logger.warn(
-        `[reddit-target] post ${post.id}: rejected subreddit ${JSON.stringify(
-          input.subreddit
-        )} — not a valid community name`
-      );
-      return 'skipped';
-    }
+    if (pending.reason === 'flair-pending' &&
+        (input.unresolvable || subreddit !== pending.candidate)) return 'skipped';
+    if (!input.unresolvable && !subreddit) return 'skipped';
 
-    const flairLabel = (input.flairLabel || '').trim();
-    const resolution = {
-      subreddit,
-      title: pending.title,
-      type: 'self' as const,
-      ...(flairLabel ? { flairLabel } : {}),
-      ...(input.flairRequired === true ? { flairRequired: true as const } : {}),
-    };
-
-    // The anchor AND its thread parts: they publish as one chain into one
-    // community, so a partially-resolved group would submit the anchor and then
-    // fail on every follow-up. `group` is per-platform (see materializePlanPosts),
-    // so this cannot reach another channel's posts.
+    // Capture the entire thread before the model call, then compare it again
+    // when committing. A delayed result cannot overwrite an editor's changes.
     const siblings = await this._post.model.post.findMany({
       where: { organizationId, group: post.group, deletedAt: null },
-      select: { id: true, settings: true },
+      select: postSelect,
     });
+    if (!siblings.some((row) => row.id === post.id && revisionOf(row) === revisionOf(post)) ||
+        siblings.some((row) => row.providerIdentifier !== 'reddit')) return 'skipped';
+    const snapshots = siblings.map((row) => ({ row, pending: readRedditTargetPending(row.settings) }));
+    if (snapshots.some(({ row, pending: marker }) => {
+      if (!marker || !['DRAFT', 'QUEUE'].includes(row.state) || row.sendIntentId !== post.sendIntentId ||
+          row.claimedAt || row.releaseId || row.releaseURL ||
+          row.operationPlanId !== post.operationPlanId || row.projectId !== post.projectId ||
+          (row.sendIntentId && (row.state !== 'DRAFT' || row.routeRevision !== post.routeRevision ||
+            row.contentRevision !== post.contentRevision))) return true;
+      // Older editors could preserve the fixed marker after replacing the saved
+      // community. A fresh poll of that snapshot still cannot undo the edit.
+      const saved = readSavedRedditSubreddit(row.settings);
+      return marker.reason === 'flair-pending' && saved !== undefined &&
+        normalizeSubreddit(saved) !== marker.candidate;
+    })) return 'skipped';
 
-    for (const sibling of siblings) {
-      // Each row carries its own marker and its own title; resolve only the
-      // ones still parked, so a re-run cannot clobber a sibling someone fixed.
-      const siblingPending = readRedditTargetPending(sibling.settings);
-      if (!siblingPending) continue;
-      await this._post.model.post.update({
-        where: { id: sibling.id },
-        data: {
-          settings: applyResolvedRedditTarget(sibling.settings, {
-            ...resolution,
-            // Keep each row's OWN title: a thread part's title is not the
-            // anchor's, and Reddit submits the anchor's only.
-            title: siblingPending.title,
-          }),
-        },
-      });
+    // Older editors could persist a real selection together with a stale marker.
+    // Clear only that marker, leaving the chosen template and draft state intact.
+    const hasSavedSelection = snapshots.some(({ row }) => hasSavedRedditFlairSelection(row.settings));
+    if (post.sendIntentId && input.unresolvable) return 'skipped';
+    let flairLabel: string | undefined;
+    let flairRequired: boolean | undefined = false;
+    let flairRequiredAt: string | undefined;
+    let options: string[] | undefined;
+    let cachedRevision: string | undefined;
+    let optionsRevision: string | undefined;
+    let modelUnavailable = false;
+    if (subreddit && !input.unresolvable && !hasSavedSelection) {
+      if (input.flairOptions === undefined) {
+        // Existing parked drafts can still be resolved by an older extension.
+        flairLabel = input.flairLabel?.trim() || undefined;
+        flairRequired = input.flairRequired === true;
+      } else {
+        const capability = await this.capability(organizationId, subreddit);
+        const ruleAt = observedAt(capability.flairRequiredObservedAt, capability.observedAt);
+        if (typeof input.flairRequired === 'boolean') {
+          flairRequired = input.flairRequired;
+          flairRequiredAt = input.flairRequired ? new Date().toISOString() : undefined;
+        } else if (typeof capability.flairRequired === 'boolean' && isRuleObservationFresh(ruleAt, Date.now())) {
+          flairRequired = capability.flairRequired;
+          flairRequiredAt = ruleAt;
+        } else if (pending.reason === 'flair-pending' && pending.flairRequired &&
+                   isRuleObservationFresh(pending.since, Date.now())) {
+          flairRequired = true;
+          flairRequiredAt = pending.since;
+        } else {
+          flairRequired = undefined;
+        }
+        const cached = freshOptions(capability);
+        cachedRevision = redditFlairOptionsRevision(cached);
+        // A fixed community can be restaged by a newer capability report
+        // after the browser took its snapshot. Take the latest cached set.
+        options = pending.reason === 'flair-pending'
+          ? cached ?? input.flairOptions ?? undefined
+          : input.flairOptions ?? cached;
+        optionsRevision = redditFlairOptionsRevision(options);
+        if (!optionsRevision || optionsRevision !== readTriedRedditFlairRevision(post.settings)) {
+          const title = readSavedRedditTitle(post.settings) ?? pending.title;
+          const choice = await this.selectFlair(subreddit, pending, title, post.content ?? '', options ?? []);
+          flairLabel = choice ?? undefined;
+          modelUnavailable = choice === null;
+        }
+      }
     }
 
+    const required = flairRequired === true || (pending.flairCatalogRetry === true && !flairLabel);
+    const draftOnly = !hasSavedSelection && !flairLabel && (required || flairRequired === undefined);
+    const awaitingObservation = draftOnly && (
+      !required || modelUnavailable || (input.flairOptions === null && options === undefined)
+    );
+    const scheduleReady = !post.sendIntentId && !hasSavedSelection && !input.unresolvable &&
+      !draftOnly && post.state === 'DRAFT' && !!post.operationPlanId && !!post.projectId;
+    await sendTransaction(this._transaction.model, async (tx) => {
+      const intent = await this.editableDraftIntent(tx, post);
+      if (subreddit && optionsRevision) {
+        const current = await this._engage.getRedditChannelCapability(organizationId, subreddit, tx);
+        const currentRevision = redditFlairOptionsRevision(freshOptions(current));
+        if (currentRevision && currentRevision !== cachedRevision && currentRevision !== optionsRevision) {
+          throw new StaleRedditTarget();
+        }
+      }
+      const ordered = [...snapshots].sort((a, b) => a.row.id.localeCompare(b.row.id));
+      const updates = ordered.map(({ row, pending: marker }) => {
+        const title = readSavedRedditTitle(row.settings) ?? marker!.title;
+        const triedRevision = awaitingObservation ? readTriedRedditFlairRevision(row.settings) : optionsRevision;
+        let settings = input.unresolvable || hasSavedSelection
+          ? clearRedditTargetPending(row.settings)
+          : applyResolvedRedditTarget(row.settings, {
+              subreddit: subreddit!,
+              title,
+              type: 'self',
+              ...(flairLabel ? { flairLabel } : {}),
+              ...(required ? { flairRequired: true as const } : {}),
+              ...(draftOnly && triedRevision ? { flairOptionsRevision: triedRevision } : {}),
+            }, awaitingObservation ? {
+              candidate: subreddit!,
+              title,
+              ...(marker!.candidate === subreddit && marker!.flairLabel ? { flairLabel: marker!.flairLabel } : {}),
+              reason: 'flair-pending',
+              selectFlair: true,
+              ...(marker!.flairCatalogRetry ? { flairCatalogRetry: true } : {}),
+              ...(required ? { flairRequired: true } : {}),
+              since: flairRequiredAt ?? marker!.since,
+            } : undefined);
+        if (scheduleReady && row.id === post.id) settings = markRedditPlanSchedulePending(settings);
+        return { row, settings, contentChanged: settings !== row.settings || (draftOnly && row.state !== 'DRAFT') };
+      });
+      const intentContentChanged = !!intent && updates.some(update => update.contentChanged);
+      for (const { row, settings, contentChanged } of updates) {
+        const applied = await tx.post.updateMany({
+          where: {
+            ...where,
+            id: row.id,
+            group: row.group,
+            state: row.state,
+            sendIntentId: row.sendIntentId,
+            routeRevision: row.routeRevision,
+            contentRevision: row.contentRevision,
+            settings: row.settings,
+            updatedAt: row.updatedAt,
+          },
+          data: {
+            settings,
+            ...(input.unresolvable && !hasSavedSelection ? { deletedAt: new Date() } : draftOnly ? { state: 'DRAFT' } : {}),
+            ...((intent ? intentContentChanged : contentChanged) ? { contentRevision: { increment: 1 } } : {}),
+            ...(awaitingObservation ? { updatedAt: new Date() } : {}),
+          },
+        });
+        if (applied.count !== 1) throw new StaleRedditTarget();
+      }
+      if (intent && intentContentChanged) {
+        const applied = await tx.sendIntent.updateMany({
+          where: {
+            id: intent.id, organizationId, revision: intent.revision, status: 'CANCELLED',
+            activeExecutionId: null, routeRevision: intent.routeRevision, contentRevision: intent.contentRevision,
+          },
+          data: { revision: { increment: 1 }, contentRevision: intent.contentRevision + 1 },
+        });
+        if (applied.count !== 1) throw new StaleRedditTarget();
+      }
+    });
+    if (hasSavedSelection) return 'resolved';
+    if (input.unresolvable) return 'retired';
+    if (awaitingObservation) return 'skipped';
+
+    if (scheduleReady && post.operationPlanId && post.projectId) {
+      try {
+        await this._posts.schedulePlanPosts(
+          organizationId, post.operationPlanId, post.projectId, undefined, undefined,
+          await this._posts.isControlled(organizationId)
+            ? { userId: await this._automaticSends.owner(organizationId, post.projectId, 'POST'), origin: 'AUTOMATION' }
+            : undefined,
+          [post.id],
+          true
+        );
+      } catch {
+        this.logger.warn(`Could not schedule the resolved Reddit plan post ${post.id}`);
+      }
+    }
     return 'resolved';
-  }
-
-  /**
-   * No community exists for this post. Soft-delete the whole chain and clear the
-   * marker, so it leaves both the parked list and every publish query.
-   *
-   * Soft, not hard: the post is the output of a plan the user paid to generate,
-   * and "the extension could not place it" is a judgement worth being able to
-   * review. `deletedAt` already excludes it everywhere that matters.
-   */
-  private async _retire(organizationId: string, group: string): Promise<void> {
-    // Org-scoped even though `group` embeds a plan UUID and could not collide in
-    // practice: this soft-deletes rows, and a delete should not rest on "could
-    // not happen" when scoping it costs one predicate.
-    const rows = await this._post.model.post.findMany({
-      where: { organizationId, group, deletedAt: null },
-      select: { id: true, settings: true },
-    });
-    if (!rows.length) return;
-
-    const now = new Date();
-    await this._post.model.post.updateMany({
-      where: { organizationId, group, deletedAt: null },
-      data: { deletedAt: now },
-    });
-
-    // Clear the marker on EVERY row of the chain, not just the one we were told
-    // about: `deletedAt` is what hides them today, so a row that is ever
-    // un-deleted would otherwise come straight back onto the parked list.
-    for (const row of rows) {
-      if (!readRedditTargetPending(row.settings)) continue;
-      await this._post.model.post.update({
-        where: { id: row.id },
-        data: { settings: clearRedditTargetPending(row.settings) },
-      });
-    }
   }
 }

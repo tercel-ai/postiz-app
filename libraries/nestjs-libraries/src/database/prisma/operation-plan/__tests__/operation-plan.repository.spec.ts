@@ -101,28 +101,47 @@ describe('OperationPlanRepository', () => {
     });
   });
 
-  it('countPostsForPlan counts live (non-deleted) posts scoped to the plan id', async () => {
+  it('finds only ready unadmitted Reddit schedule handoffs without a plan age limit', async () => {
+    const postFindMany = vi.fn().mockResolvedValue([]);
+    const repo = createRepo({ postFindMany });
+    await repo.findPendingRedditPlanSchedule(20);
+    expect(postFindMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        state: 'DRAFT', providerIdentifier: 'reddit', deletedAt: null, parentPostId: null,
+        projectId: { not: null }, releaseId: null, releaseURL: null, claimedAt: null, sendIntentId: null,
+        operationPlan: { status: 'READY' },
+        settings: { contains: '"redditPlanSchedulePending":true' },
+      },
+      take: 20,
+    }));
+  });
+
+  it('countPostsForPlan includes deleted materialization evidence scoped to the plan id', async () => {
     const postCount = vi.fn().mockResolvedValue(3);
     const repo = createRepo({ postCount });
 
     const count = await repo.countPostsForPlan('plan-1');
 
     expect(postCount).toHaveBeenCalledWith({
-      where: { operationPlanId: 'plan-1', deletedAt: null },
+      where: { operationPlanId: 'plan-1' },
     });
     expect(count).toBe(3);
   });
 
-  it('countDraftPostsForPlan counts only live DRAFT posts scoped to the plan id', async () => {
-    const postCount = vi.fn().mockResolvedValue(2);
-    const repo = createRepo({ postCount });
+  it('counts only live draft roots the recovery sweeper can schedule', async () => {
+    const postFindMany = vi.fn().mockResolvedValue([
+      { providerIdentifier: 'reddit', settings: JSON.stringify({ redditTargetPending: { candidate: 'opensource' } }) },
+      { providerIdentifier: 'reddit', settings: JSON.stringify({ subreddit: [{ value: { flairRequired: true } }] }) },
+      { providerIdentifier: 'reddit', settings: JSON.stringify({ subreddit: [{ value: { flairRequired: true, flairLabel: 'Discussion' } }] }) },
+      { providerIdentifier: 'x', settings: '{}' },
+    ]);
+    const repo = createRepo({ postFindMany });
 
-    const count = await repo.countDraftPostsForPlan('plan-1');
-
-    expect(postCount).toHaveBeenCalledWith({
-      where: { operationPlanId: 'plan-1', deletedAt: null, state: 'DRAFT' },
+    expect(await repo.countDraftPostsForPlan('plan-1')).toBe(2);
+    expect(postFindMany).toHaveBeenCalledWith({
+      where: { operationPlanId: 'plan-1', deletedAt: null, state: 'DRAFT', parentPostId: null },
+      select: { providerIdentifier: true, settings: true },
     });
-    expect(count).toBe(2);
   });
 
   it('completeGeneration writes planPayload + data + status onto the row by id', async () => {
@@ -876,6 +895,7 @@ describe('OperationPlanRepository', () => {
         organizationId: 'org-1',
         projectId: 'proj-1',
         campaignId: 'campaign-1',
+        createdAt: new Date('2030-06-01T00:00:00.000Z'),
       } as any,
       {
         contentItems: [
@@ -906,11 +926,81 @@ describe('OperationPlanRepository', () => {
         projectId: 'proj-1',
         state: 'DRAFT',
         deletedAt: null,
-        operationPlanId: { not: null },
-        NOT: { operationPlanId: 'plan-2' },
+        operationPlan: { is: { createdAt: { lt: new Date('2030-06-01T00:00:00.000Z') } } },
       },
       data: { deletedAt: new Date('2030-06-01T00:00:00.000Z'), parentPostId: null },
     });
+  });
+
+  it('keeps a newer plan draft when an earlier parked plan is materialized again', async () => {
+    const plan = (id: string, createdAt: string) => ({
+      id, organizationId: 'org-1', projectId: 'proj-1', createdAt: new Date(createdAt),
+    });
+    const older = plan('older', '2030-05-01');
+    const newer = plan('newer', '2030-05-02');
+    const plans = new Map([[older.id, older], [newer.id, newer]]);
+    const rows = new Map<string, { id: string; operationPlanId: string; deletedAt: Date | null }>();
+    const repo = createRepo({
+      postFindMany: vi.fn(async ({ where }) => where.id.in.map((id: string) => rows.get(id)).filter(Boolean)),
+      postCreateMany: vi.fn(async ({ data }) => {
+        for (const row of data) rows.set(row.id, { ...row, deletedAt: null });
+        return { count: data.length };
+      }),
+      postUpdateMany: vi.fn(async ({ where, data }) => {
+        const cutoff: Date | undefined = where.operationPlan?.is?.createdAt?.lt;
+        const affected = [...rows.values()].filter(row => row.deletedAt === null &&
+          (cutoff ? plans.get(row.operationPlanId)!.createdAt < cutoff : row.operationPlanId !== where.NOT.operationPlanId));
+        for (const row of affected) Object.assign(row, data);
+        return { count: affected.length };
+      }),
+    });
+    const postId = '11111111-1111-4111-8111-111111111111';
+    const content = (platform: 'reddit' | 'x') => ({ contentItems: [{
+      contentId: 'D01', utcDate: '2030-06-02T00:00:00.000Z', themeKey: 'topic', themeTitle: 'Draft title',
+      platforms: [{
+        id: postId, platform, content: 'Draft',
+        ...(platform === 'reddit' ? {
+          redditTargetPending: { candidate: 'opensource', title: 'Draft title', reason: 'flair-pending', selectFlair: true },
+        } : {}),
+      }],
+    }] });
+    await repo.materializePlanPosts(older as any, content('reddit'));
+    await repo.materializePlanPosts(newer as any, content('x'));
+    const oldDraft = rows.get(deriveOperationPlanPostId(older.id, postId))!;
+    const newDraft = rows.get(deriveOperationPlanPostId(newer.id, postId))!;
+    expect(oldDraft.deletedAt).toBeInstanceOf(Date);
+
+    await repo.materializePlanPosts(older as any, content('reddit'));
+    expect(newDraft.deletedAt).toBeNull();
+
+    // Also exercise the cutoff when a previous partial run still has live rows.
+    oldDraft.deletedAt = null;
+    await repo.materializePlanPosts(older as any, content('reddit'));
+    expect(newDraft.deletedAt).toBeNull();
+  });
+
+  it('does not create rows when an older plan finishes after a materialized successor', async () => {
+    const newer = { id: 'newer' };
+    const planFindFirst = vi.fn().mockResolvedValue(newer);
+    const postCreateMany = vi.fn();
+    const postUpdateMany = vi.fn();
+    const repo = createRepo({ planFindFirst, postCreateMany, postUpdateMany });
+    const createdAt = new Date('2030-05-01');
+    const result = await repo.materializePlanPosts(
+      { id: 'older', organizationId: 'org-1', projectId: 'proj-1', createdAt } as any,
+      { contentItems: [{
+        contentId: 'D01', utcDate: '2030-06-02T00:00:00.000Z', themeKey: 'topic', themeTitle: 'Draft title',
+        platforms: [{ id: '11111111-1111-4111-8111-111111111111', platform: 'x', content: 'An older draft' }],
+      }] }
+    );
+
+    expect(result).toEqual({ count: 0, superseded: true });
+    expect(planFindFirst).toHaveBeenCalledWith({
+      where: { id: { not: 'older' }, organizationId: 'org-1', projectId: 'proj-1', createdAt: { gt: createdAt }, posts: { some: {} } },
+      select: { id: true },
+    });
+    expect(postCreateMany).not.toHaveBeenCalled();
+    expect(postUpdateMany).not.toHaveBeenCalled();
   });
 
   it('materializePlanPosts re-asserts the active plan on an idempotent re-materialize (all ids already exist → no create, still supersedes)', async () => {
@@ -922,14 +1012,16 @@ describe('OperationPlanRepository', () => {
         id: deriveOperationPlanPostId('plan-2', '11111111-1111-4111-8111-111111111111'),
         operationPlanId: 'plan-2',
         organizationId: 'org-1',
+        deletedAt: null,
       },
     ]);
     const postCreateMany = vi.fn().mockResolvedValue({ count: 0 });
     const postUpdateMany = vi.fn().mockResolvedValue({ count: 2 });
+    const postCount = vi.fn().mockResolvedValue(1);
     const integrationFindMany = vi.fn().mockResolvedValue([
       { id: 'integration-x', providerIdentifier: 'x' },
     ]);
-    const repo = createRepo({ postFindMany, postCreateMany, postUpdateMany, integrationFindMany });
+    const repo = createRepo({ postFindMany, postCreateMany, postUpdateMany, postCount, integrationFindMany });
 
     const result = await repo.materializePlanPosts(
       {
@@ -937,6 +1029,7 @@ describe('OperationPlanRepository', () => {
         organizationId: 'org-1',
         projectId: 'proj-1',
         campaignId: 'campaign-1',
+        createdAt: new Date('2030-06-01T00:00:00.000Z'),
       } as any,
       {
         contentItems: [

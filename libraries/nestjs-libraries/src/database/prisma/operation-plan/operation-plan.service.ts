@@ -28,6 +28,7 @@ import { AiseeCreditService } from '../ai-pricing/aisee-credit.service';
 import { SettingsService } from '../settings/settings.service';
 import { OpenaiService, AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
+import { hasRedditPlanSchedulePending, type RedditTargetPending } from '@gitroom/nestjs-libraries/engage/reddit-pending-target';
 import type { ScanPlatform } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import { OPERATION_PLAN_REPLY_VOLUME } from '@gitroom/nestjs-libraries/engage/engage-reply-schedule';
 import {
@@ -509,11 +510,12 @@ export class OperationPlanService implements OnApplicationBootstrap {
    * failed because its schedule could not be tidied.
    */
   private async _materializePlanPosts(plan: OperationPlan, planPayload: unknown) {
-    await this._repo.materializePlanPosts(
+    const result = await this._repo.materializePlanPosts(
       plan,
       planPayload,
       await this._resolvePublishTimeJitterMinutes()
     );
+    if (result?.superseded) return;
     // No projectId means no per-project windows to align against — the whole
     // publishing configuration is project-scoped.
     if (!this._postsService || !plan.projectId) return;
@@ -2096,12 +2098,24 @@ export class OperationPlanService implements OnApplicationBootstrap {
     outputs.forEach((output, index) => {
       const { post } = redditEntries[index];
       if (output.target) {
-        (post as { redditTarget?: unknown }).redditTarget = output.target;
+        const pending: RedditTargetPending = {
+          candidate: output.target.subreddit,
+          title: output.target.title,
+          ...(output.target.flairRequired ? { flairRequired: true } : {}),
+          selectFlair: true,
+          reason: 'flair-pending',
+          since: new Date().toISOString(),
+        };
+        (post as { redditTarget?: unknown }).redditTarget = {
+          ...output.target,
+          flairLabel: undefined,
+        };
+        (post as { redditTargetPending?: RedditTargetPending }).redditTargetPending = pending;
         return;
       }
       if (output.pending) {
         (post as { redditTargetPending?: unknown }).redditTargetPending =
-          output.pending;
+          { ...output.pending, selectFlair: true };
         return;
       }
       drop.add(post);
@@ -2555,6 +2569,33 @@ export class OperationPlanService implements OnApplicationBootstrap {
   ): Promise<void> {
     const plans = await this._repo.findStaleReadyPlans(olderThanMs, maxAgeMs, limit);
     await Promise.allSettled(plans.map((plan) => this._resumeMaterialization(plan)));
+    await this._resumeResolvedRedditScheduling(limit);
+  }
+
+  private async _resumeResolvedRedditScheduling(limit: number): Promise<void> {
+    if (!this._postsService) return;
+    const drafts = await this._repo.findPendingRedditPlanSchedule(limit);
+    for (const draft of drafts) {
+      const { id, organizationId, operationPlanId, projectId, settings } = draft;
+      if (!operationPlanId || !projectId || !settings || !hasRedditPlanSchedulePending(settings)) continue;
+      let retry = true;
+      try {
+        const result = await this._postsService.schedulePlanPosts(
+          organizationId, operationPlanId, projectId, undefined, undefined,
+          await this._postsService.isControlled(organizationId)
+            ? { userId: await this._automaticSends!.owner(organizationId, projectId, 'POST'), origin: 'AUTOMATION' }
+            : undefined,
+          [id],
+          true
+        );
+        // Disabled/superseded work is a normal no-op. It can still be scheduled
+        // through the ordinary automation settings or editor if eligible later.
+        retry = result.failed.some(item => item.id === id);
+      } catch (error) {
+        this.logger.warn(`Could not resume scheduling Reddit plan post ${id}: ${OperationPlanService.failureReason(error)}`);
+      }
+      await this._repo.settleRedditPlanSchedule({ ...draft, settings }, retry);
+    }
   }
 
   // A plan whose every content item got pruned (e.g. every Reddit item lost its
@@ -2570,10 +2611,8 @@ export class OperationPlanService implements OnApplicationBootstrap {
   private async _resumeMaterialization(plan: OperationPlan): Promise<void> {
     if (!this._planExpectsPosts(plan)) return;
     if ((await this._repo.countPostsForPlan(plan.id)) > 0) {
-      // Materialized already — only worth re-running if some rows never got
-      // past DRAFT (auto-commit crashed or never ran). Fully committed plans
-      // (draft count 0 — every row is QUEUE/PUBLISHED/ERROR) have nothing left
-      // for this method to do.
+      // Materialized already, including tombstones. Retry only if a live
+      // root can be admitted; a parked Reddit draft is intentional.
       if ((await this._repo.countDraftPostsForPlan(plan.id)) === 0) return;
     }
     try {

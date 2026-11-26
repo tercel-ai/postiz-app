@@ -497,6 +497,8 @@ describe('OperationPlanService.create', () => {
       findManyByTaskId: vi.fn().mockResolvedValue([]),
       findStuckGenerating: vi.fn().mockResolvedValue([]),
       findStaleReadyPlans: vi.fn().mockResolvedValue([]),
+      findPendingRedditPlanSchedule: vi.fn().mockResolvedValue([]),
+      settleRedditPlanSchedule: vi.fn(),
       countPostsForPlan: vi.fn().mockResolvedValue(0),
       countDraftPostsForPlan: vi.fn().mockResolvedValue(0),
       create: vi.fn().mockResolvedValue(generatingStub),
@@ -3201,6 +3203,49 @@ describe('OperationPlanService.create', () => {
       stuck.planPayload,
       expect.anything()
     );
+  });
+
+  it('does not realign or auto-commit when a slow plan loses to a newer materialized plan', async () => {
+    const { repo, service } = createGenerationDependencies({
+      contentItems: [], engagePolicies: [], warnings: [],
+    });
+    const plan = {
+      id: 'plan-1', organizationId: 'org-1', projectId: 'proj-1', status: 'READY',
+      planPayload: { contentItems: [{ contentId: 'c-1' }] },
+    };
+    const alignPlanDraftPublishDates = vi.fn();
+    const schedulePlanPosts = vi.fn();
+    Object.assign(service, { _postsService: { alignPlanDraftPublishDates, schedulePlanPosts } });
+    repo.findStaleReadyPlans.mockResolvedValue([plan]);
+    repo.materializePlanPosts.mockResolvedValue({ count: 0, superseded: true });
+
+    await service.resumeIncompleteMaterializations();
+
+    expect(repo.materializePlanPosts).toHaveBeenCalledWith(plan, plan.planPayload, expect.anything());
+    expect(alignPlanDraftPublishDates).not.toHaveBeenCalled();
+    expect(schedulePlanPosts).not.toHaveBeenCalled();
+  });
+
+  it('recovers only the eligible Reddit root after an older plan leaves the 48-hour window', async () => {
+    const { repo, service } = createGenerationDependencies({
+      contentItems: [], engagePolicies: [], warnings: [],
+    });
+    // The older plan cannot be returned by the regular 48-hour sweep.
+    repo.findStaleReadyPlans.mockResolvedValue([]);
+    const row = { id: 'reddit-root', organizationId: 'org-1', operationPlanId: 'older-plan',
+      projectId: 'proj-1', settings: JSON.stringify({ redditPlanSchedulePending: true }) };
+    repo.findPendingRedditPlanSchedule.mockResolvedValue([row]);
+    const schedulePlanPosts = vi.fn().mockResolvedValue({ total: 1, scheduled: [], failed: [{ id: row.id }] });
+    Object.assign(service, { _postsService: { isControlled: vi.fn().mockResolvedValue(false), schedulePlanPosts } });
+
+    await service.resumeIncompleteMaterializations();
+
+    expect(repo.findStaleReadyPlans).toHaveBeenCalledWith(600_000, 172_800_000, 20);
+    expect(repo.materializePlanPosts).not.toHaveBeenCalled();
+    expect(schedulePlanPosts).toHaveBeenCalledExactlyOnceWith(
+      row.organizationId, row.operationPlanId, row.projectId, undefined, undefined, undefined, [row.id], true
+    );
+    expect(repo.settleRedditPlanSchedule).toHaveBeenCalledExactlyOnceWith(row, true);
   });
 
   it('resumeIncompleteMaterializations skips a plan whose content was legitimately pruned to empty', async () => {

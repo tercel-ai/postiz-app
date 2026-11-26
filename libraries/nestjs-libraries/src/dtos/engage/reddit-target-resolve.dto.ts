@@ -33,7 +33,22 @@ export class RedditTargetResolveItemDto {
   @MaxLength(64)
   subreddit?: string;
 
-  /** Reddit's own text for the matched flair option. */
+  /** Snapshot revision returned by the pending endpoint. */
+  @IsOptional()
+  @IsString()
+  @MinLength(64)
+  @MaxLength(64)
+  pendingRevision?: string;
+
+  /** Null means Reddit did not return a usable snapshot. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(100)
+  @IsString({ each: true })
+  @MaxLength(128, { each: true })
+  flairOptions?: string[] | null;
+
+  /** Legacy extension-selected flair. */
   @IsOptional()
   @IsString()
   @MaxLength(128)

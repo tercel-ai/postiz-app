@@ -475,6 +475,114 @@ describe('PostsService.schedulePlanPosts', () => {
       ...over,
     });
 
+  const redditDraft = (id: string, value: Record<string, unknown>) => draft({
+    id,
+    group: id,
+    operationPlanId: 'plan-1',
+    providerIdentifier: 'reddit',
+    settings: JSON.stringify(value),
+  });
+
+  it.each([false, true])('leaves parked and required-Flair drafts alone while scheduling ready posts (controlled=%s)', async (controlled) => {
+    const pending = redditDraft('pending', { redditTargetPending: { title: 'A title' } });
+    const missing = redditDraft('missing', { subreddit: [{ value: { subreddit: 'subreddit', flairRequired: true } }] });
+    const ready = redditDraft('ready', { subreddit: [{ value: { subreddit: 'subreddit', flairRequired: true, flairLabel: 'Discussion' } }] });
+    const other = xDraft({ id: 'other', group: 'other' });
+    const posts = [pending, missing, ready, other];
+    const { service, getSchedulablePostsByIds, schedulePostGroupToQueue } = makeService(posts, posts);
+    const enqueue = vi.fn().mockResolvedValue({ publishMethod: 'EXTENSION' });
+    vi.spyOn(service, 'isControlled').mockResolvedValue(controlled);
+    Object.assign(service, { _sendCoordinator: { enqueue } });
+
+    const result = await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1', undefined, undefined,
+      controlled ? { userId: 'policy-owner', origin: 'AUTOMATION' } : undefined);
+
+    expect(getSchedulablePostsByIds).toHaveBeenCalledExactlyOnceWith('org-1', ['ready', 'other']);
+    expect(result).toEqual({
+      scheduled: [{ id: 'ready', publishMethod: 'extension' }, { id: 'other', publishMethod: 'extension' }],
+      failed: [],
+      total: 4,
+      alreadyScheduled: 0,
+    });
+    const scheduled = controlled ? enqueue : schedulePostGroupToQueue;
+    expect(scheduled.mock.calls.map(args => args[1])).toEqual(['ready', 'other']);
+    if (controlled) expect(enqueue).toHaveBeenCalledWith('org-1', 'ready', expect.objectContaining({
+      origin: 'AUTOMATION', userId: 'policy-owner',
+    }));
+  });
+
+  it.each([false, true])('checks current project activation before scheduling a resolved Reddit draft (controlled=%s)', async (controlled) => {
+    const ready = redditDraft('ready', { subreddit: [{ value: { subreddit: 'opensource', flairLabel: 'Discussion' } }] });
+    const { service, schedulePostGroupToQueue } = makeService([ready], [ready]);
+    const enqueue = vi.fn();
+    const assertProjectActive = vi.fn().mockRejectedValue(new Error('PROJECT_INACTIVE'));
+    vi.spyOn(service, 'isControlled').mockResolvedValue(controlled);
+    Object.assign(service, { _sendCoordinator: { enqueue }, _projectValidation: { assertProjectActive } });
+
+    await expect(service.schedulePlanPosts('org-1', 'plan-1', 'proj-1', undefined, undefined, undefined, ['ready']))
+      .rejects.toThrow('PROJECT_INACTIVE');
+    expect(assertProjectActive).toHaveBeenCalledExactlyOnceWith('org-1', 'proj-1');
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(schedulePostGroupToQueue).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('does not admit an already superseded X plan (controlled=%s)', async (controlled) => {
+    const post = xDraft({ id: 'old', group: 'old' });
+    const { service, assertPlanBelongsToProject, getSchedulablePostRootsByPlan, schedulePostGroupToQueue } = makeService([post], [post]);
+    const enqueue = vi.fn();
+    assertPlanBelongsToProject.mockResolvedValue({ superseded: true });
+    vi.spyOn(service, 'isControlled').mockResolvedValue(controlled);
+    Object.assign(service, { _sendCoordinator: { enqueue } });
+
+    await expect(service.schedulePlanPosts('org-1', 'plan-1', 'proj-1', undefined, undefined,
+      controlled ? { userId: 'policy-owner', origin: 'AUTOMATION' } : undefined
+    )).resolves.toEqual({ scheduled: [], failed: [], total: 0, alreadyScheduled: 0 });
+    expect(getSchedulablePostRootsByPlan).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(schedulePostGroupToQueue).not.toHaveBeenCalled();
+
+    enqueue.mockResolvedValue({ publishMethod: 'EXTENSION' });
+    await expect(service.schedulePosts('org-1', [{ id: 'old' }],
+      controlled ? { userId: 'policy-owner', origin: 'MANUAL' } : undefined
+    )).resolves.toMatchObject({ scheduled: [{ id: 'old', publishMethod: 'extension' }], failed: [] });
+  });
+
+  it('does not add an aisee-core check to ordinary autonomous X plan admission', async () => {
+    const post = xDraft({ id: 'x-root', group: 'x-root' });
+    const { service, schedulePostGroupToQueue } = makeService([post], [post]);
+    const assertProjectActive = vi.fn().mockRejectedValue(new Error('PROJECT_VALIDATION_UNAVAILABLE'));
+    vi.spyOn(service, 'isControlled').mockResolvedValue(false);
+    Object.assign(service, { _projectValidation: { assertProjectActive } });
+
+    await expect(service.schedulePlanPosts('org-1', 'plan-1', 'proj-1')).resolves.toMatchObject({
+      scheduled: [{ id: 'x-root', publishMethod: 'extension' }], failed: [],
+    });
+    expect(assertProjectActive).not.toHaveBeenCalled();
+    expect(schedulePostGroupToQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it('schedules only the resolved root when resuming the plan after asynchronous Reddit selection', async () => {
+    const ready = redditDraft('ready', { subreddit: [{ value: { subreddit: 'subreddit', flairLabel: 'Discussion' } }] });
+    const other = xDraft({ id: 'other', group: 'other' });
+    const { service, getSchedulablePostsByIds } = makeService([ready, other], [ready, other]);
+
+    const result = await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1', undefined, undefined, undefined, ['ready']);
+
+    expect(getSchedulablePostsByIds).toHaveBeenCalledExactlyOnceWith('org-1', ['ready']);
+    expect(result.scheduled).toEqual([{ id: 'ready', publishMethod: 'extension' }]);
+    expect(result.total).toBe(1);
+  });
+
+  it('reports a per-item reason if the draft changes before the normal scheduling step', async () => {
+    const draftWithoutFlair = redditDraft('missing', { subreddit: [{ value: { subreddit: 'subreddit', flairRequired: true } }] });
+    const { service, schedulePostGroupToQueue } = makeService([draftWithoutFlair]);
+
+    const result = await service.schedulePosts('org-1', [{ id: 'missing' }]);
+
+    expect(result).toMatchObject({ scheduled: [], failed: [{ id: 'missing', code: 'REDDIT_FLAIR_REQUIRED' }] });
+    expect(schedulePostGroupToQueue).not.toHaveBeenCalled();
+  });
+
   it('commits every DRAFT root of the plan and leaves the rest alone', async () => {
     const { service, getSchedulablePostsByIds, schedulePostGroupToQueue } = makeService(
       [xDraft({ id: 'p1', group: 'g1' }), xDraft({ id: 'p2', group: 'g2' })],

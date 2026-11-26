@@ -431,6 +431,80 @@ it.each(['now','schedule','draft'] as const)('fully edits an unclaimed autonomou
  await f.repo.editAutonomousQueuedPost('org',input);
  expect(f.db.rows('post')[0].contentRevision).toBe(2);expect(f.db.rows('sendIntent')).toHaveLength(0);
 });
+it.each(['schedule', 'now'] as const)('keeps a required-Flair Reddit plan draft out of the autonomous editor %s path', async (state) => {
+  const { db, repo, body } = fixture();
+  db.rows('settings')[0].value = { mode: 'AUTONOMOUS', revision: 2 };
+  const settings = { __type: 'reddit', subreddit: [{ value: {
+    subreddit: 'opensource', title: 'An original title', type: 'self', is_flair_required: false, flairRequired: true,
+  } }] };
+  Object.assign(db.rows('post')[0], { state: 'DRAFT', providerIdentifier: 'reddit', operationPlanId: 'plan', settings: JSON.stringify(settings) });
+  const request = body();
+  const post = { ...request.posts[0], providerIdentifier: 'reddit', settings, expectedRouteRevision: 0, expectedContentRevision: 1 };
+  delete post.integration;
+  await expect(repo.editAutonomousQueuedPost('org', {
+    state, date: request.date, body: post, tags: [], projectId: 'project', userId: 'user', requestId: 'reddit-edit',
+  })).rejects.toThrow('REDDIT_FLAIR_REQUIRED');
+  expect(db.rows('post')[0]).toMatchObject({ state: 'DRAFT', contentRevision: 1 });
+});
+
+it('keeps an explicit Flair and clears automatic selection when editing a parked Reddit draft', async () => {
+  const { db, repo, body } = fixture();
+  db.rows('settings')[0].value = { mode: 'AUTONOMOUS', revision: 2 };
+  const settings = { __type: 'reddit', redditTargetPending: {
+    candidate: 'opensource', title: 'An original title', reason: 'flair-pending', selectFlair: true,
+  }, subreddit: [{ value: {
+    subreddit: 'opensource', title: 'An original title', type: 'self', is_flair_required: false, flairRequired: true,
+  } }] };
+  Object.assign(db.rows('post')[0], { state: 'DRAFT', providerIdentifier: 'reddit', operationPlanId: 'plan', settings: JSON.stringify(settings) });
+  const request = body();
+  const flair = { id: 'template-chosen', name: 'Manual Choice' };
+  const post = { ...request.posts[0], providerIdentifier: 'reddit', settings: {
+    ...settings, subreddit: [{ value: { ...settings.subreddit[0].value, flair } }],
+  }, expectedRouteRevision: 0, expectedContentRevision: 1 };
+  delete post.integration;
+  const saved = await repo.editAutonomousQueuedPost('org', {
+    state: 'schedule', date: request.date, body: post, tags: [], projectId: 'project', userId: 'user', requestId: 'manual-flair-edit',
+  });
+  expect(saved.posts[0].state).toBe('QUEUE');
+  const written = JSON.parse(saved.posts[0].settings!);
+  expect(written.subreddit[0].value.flair).toEqual(flair);
+  expect(written).not.toHaveProperty('redditTargetPending');
+});
+
+it('consumes an autonomous Reddit scheduling handoff while queueing its root', async () => {
+  const { db, repo } = fixture();
+  db.rows('settings')[0].value = { mode: 'AUTONOMOUS', revision: 2 };
+  const settings = JSON.stringify({ redditPlanSchedulePending: true, subreddit: [{ value: { subreddit: 'opensource', flairLabel: 'Discussion' } }] });
+  Object.assign(db.rows('post')[0], { state: 'DRAFT', providerIdentifier: 'reddit', operationPlanId: 'plan', settings });
+  await expect(repo.schedulePostGroupToQueue('org', 'group', 'EXTENSION', undefined, undefined, undefined, { id: 'root', settings }))
+    .resolves.toMatchObject({ count: 1 });
+  const saved = db.rows('post')[0];
+  expect(saved.state).toBe('QUEUE');
+  expect(JSON.parse(saved.settings)).toEqual({
+    subreddit: [{ value: { subreddit: 'opensource', flairLabel: 'Discussion' } }],
+  });
+});
+
+it('restages a plan draft at the community explicitly saved by an older editor', async () => {
+  const { db, repo, body } = fixture();
+  db.rows('settings')[0].value = { mode: 'AUTONOMOUS', revision: 2 };
+  const reddit = (subreddit: string) => ({ __type: 'reddit', subreddit: [{ value: {
+    subreddit, title: 'An original title', type: 'self', is_flair_required: false,
+  } }] });
+  Object.assign(db.rows('post')[0], { state: 'DRAFT', providerIdentifier: 'reddit', operationPlanId: 'plan', settings: JSON.stringify(reddit('oldsite')) });
+  const request = body();
+  const post = { ...request.posts[0], providerIdentifier: 'reddit', settings: reddit('newsite'), expectedRouteRevision: 0, expectedContentRevision: 1 };
+  delete post.integration;
+  const saved = await repo.editAutonomousQueuedPost('org', {
+    state: 'draft', date: request.date, body: post, tags: [], projectId: 'project', userId: 'user', requestId: 'retarget',
+  });
+  expect(saved.posts[0].state).toBe('DRAFT');
+  expect(JSON.parse(saved.posts[0].settings!)).toMatchObject({
+    redditTargetPending: { candidate: 'newsite', title: 'An original title', reason: 'flair-pending', selectFlair: true },
+    subreddit: [{ value: { subreddit: 'newsite' } }],
+  });
+});
+
 it('edits a version-zero autonomous original once and rejects a stale version-zero request', async () => {
   const f = fixture();
   f.db.rows('settings')[0].value = { mode: 'AUTONOMOUS', revision: 2 };

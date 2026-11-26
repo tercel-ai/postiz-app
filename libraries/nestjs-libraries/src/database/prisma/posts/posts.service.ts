@@ -1,6 +1,8 @@
 import type { UpdateScheduledReplyDto } from '../../../engage/dtos/engage.dto';
 import { readPublishNowRequestedAt } from '../../../extension/send-dispatch';
 import { isCurrentSessionHandover } from '../../../extension/send-mode-handover';
+import { redditPlanScheduleBlock } from '../../../engage/reddit-plan-readiness';
+import { hasRedditPlanSchedulePending } from '../../../engage/reddit-pending-target';
 import { ProjectInactiveException } from '@gitroom/nestjs-libraries/projects/project.exception';
 import { SendModeService } from '../../../extension/send-mode.service';
 import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
@@ -1525,6 +1527,9 @@ export class PostsService {
           ...(Number.isSafeInteger(first.routeRevision)
             ? { expectedRouteRevision: first.routeRevision }
             : {}),
+          ...(first.operationPlanId && first.providerIdentifier === 'reddit' && Number.isSafeInteger(first.contentRevision)
+            ? { expectedContentRevision: first.contentRevision }
+            : {}),
           ...(first.providerIdentifier
             ? { providerIdentifier: first.providerIdentifier }
             : {}),
@@ -2989,7 +2994,8 @@ export class PostsService {
   async schedulePosts(
     orgId: string,
     items: Array<{ id: string; type?: 'now' | 'schedule'; publishMethod?: PublishMethod; date?: string; expectedRouteRevision?: number; expectedContentRevision?: number; integrationId?: string; requestId?: string }>,
-    sendContext?: { userId: string; origin: 'MANUAL' | 'AUTOMATION' }
+    sendContext?: { userId: string; origin: 'MANUAL' | 'AUTOMATION' },
+    requireRedditHandoff = false
   ) {
     const ids = [...new Set(items.map((i) => i.id))];
     const itemById = new Map(items.map((i) => [i.id, i]));
@@ -3005,6 +3011,19 @@ export class PostsService {
         failed.push({ id, code: 'NOT_FOUND', message: 'Post not found' });
         continue;
       }
+      if (requireRedditHandoff && (post.providerIdentifier !== 'reddit' || post.state !== 'DRAFT' ||
+          !hasRedditPlanSchedulePending(post.settings))) continue;
+      const blocked = post.state === 'DRAFT' && post.operationPlanId ? redditPlanScheduleBlock(post) : undefined;
+      if (blocked) {
+        failed.push({
+          id,
+          code: blocked,
+          message: blocked === 'REDDIT_FLAIR_REQUIRED'
+            ? 'Choose a required Reddit flair before scheduling this post.'
+            : 'This Reddit plan post is still waiting for its community or flair.',
+        });
+        continue;
+      }
       if (await this.isControlled(orgId)) {
         try {
           if (!this._sendCoordinator || !sendContext) throw new BadRequestException('SEND_POLICY_OWNER_REQUIRED');
@@ -3015,7 +3034,8 @@ export class PostsService {
           const choice = item.publishMethod ?? (post.publishMethod === 'API' ? 'api' : 'extension');
           const queued = post.sendIntentId && (publishNow || (item.date && (item.type === 'schedule' || item.expectedRouteRevision !== undefined || item.expectedContentRevision !== undefined)))
             ? await this._sendCoordinator.rescheduleQueuedPost(orgId, id, sendContext.userId, publishDate!, item.expectedRouteRevision, item.expectedContentRevision, publishNow, item.integrationId !== undefined ? { integrationId: item.integrationId, requestId: item.requestId! } : undefined)
-            : await this._sendCoordinator.enqueue(orgId, id, { ...sendContext, publishMethod: choice === 'api' ? 'API' : 'EXTENSION', ...(publishDate ? { publishDate } : {}), ...(item.type ? { publishNow } : {}) });
+            : await this._sendCoordinator.enqueue(orgId, id, { ...sendContext, publishMethod: choice === 'api' ? 'API' : 'EXTENSION', ...(publishDate ? { publishDate } : {}), ...(item.type ? { publishNow } : {}),
+                ...(requireRedditHandoff ? { requireRedditPlanSchedulePending: true as const } : {}) });
           if (queued.publishMethod === 'API') await this.startWorkflow(getSocialTaskQueue(queued.providerIdentifier!), id, orgId);
           scheduled.push({ id, publishMethod: queued.publishMethod === 'API' ? 'api' : 'extension', ...(item.integrationId !== undefined ? { integrationId: queued.integrationId, routeRevision: queued.routeRevision } : {}) });
         } catch (error) {
@@ -3116,9 +3136,16 @@ export class PostsService {
       const newDate = item.type === 'now' ? new Date().toISOString() : item.date;
       const publishMethod = method === 'api' ? 'API' : 'EXTENSION';
       const publishDate = newDate ? dayjs(newDate).toDate() : undefined;
-      const queued = item.type === undefined
-        ? await this._postRepository.schedulePostGroupToQueue(orgId, post.group, publishMethod, publishDate)
-        : await this._postRepository.schedulePostGroupToQueue(orgId, post.group, publishMethod, publishDate, undefined, item.type === 'now');
+      const publishNow = item.type === undefined ? undefined : item.type === 'now';
+      const plannedReddit = post.operationPlanId && platform === 'reddit';
+      const queued = plannedReddit
+        ? await this._postRepository.schedulePostGroupToQueue(
+            orgId, post.group, publishMethod, publishDate, undefined, publishNow,
+            { id: post.id, settings: post.settings }
+          )
+        : publishNow === undefined
+          ? await this._postRepository.schedulePostGroupToQueue(orgId, post.group, publishMethod, publishDate)
+          : await this._postRepository.schedulePostGroupToQueue(orgId, post.group, publishMethod, publishDate, undefined, publishNow);
 
       if (!queued.count) {
         failed.push({ id, code: 'SCHEDULE_CONFLICT', message: 'Post changed before scheduling; reload and retry' });
@@ -3551,7 +3578,9 @@ export class PostsService {
     projectId: string,
     publishMethod?: PublishMethod,
     platforms?: string[],
-    sendContext?: { userId: string; origin: 'MANUAL' | 'AUTOMATION' }
+    sendContext?: { userId: string; origin: 'MANUAL' | 'AUTOMATION' },
+    rootPostIds?: readonly string[],
+    requireRedditHandoff = false
   ) {
     if (!this._projectPublishingService) {
       // Only reachable if someone constructs this service positionally without
@@ -3567,11 +3596,12 @@ export class PostsService {
     // has already been authorized for the PROJECT, and the query below is
     // scoped to it.
     if (operationPlanId) {
-      await this._projectPublishingService.assertPlanBelongsToProject(
+      const plan = await this._projectPublishingService.assertPlanBelongsToProject(
         orgId,
         projectId,
         operationPlanId
       );
+      if (plan?.superseded) return { scheduled: [], failed: [], total: 0, alreadyScheduled: 0 };
     }
     const projectPublishing = await this._projectPublishingService.resolve(
       orgId,
@@ -3634,14 +3664,18 @@ export class PostsService {
     const platformSet = effectivePlatforms
       ? new Set(effectivePlatforms.map((p) => p.toLowerCase()))
       : null;
-    const roots = platformSet
-      ? allRoots.filter(
-          (p) =>
-            !!p.providerIdentifier &&
-            platformSet.has(p.providerIdentifier.toLowerCase())
-        )
-      : allRoots;
-    const drafts = roots.filter((p) => p.state === 'DRAFT');
+    const selectedRoots = rootPostIds ? new Set(rootPostIds) : null;
+    const roots = allRoots.filter(
+      post => (!selectedRoots || selectedRoots.has(post.id)) &&
+        (!platformSet || (!!post.providerIdentifier && platformSet.has(post.providerIdentifier.toLowerCase())))
+    );
+    const drafts = roots.filter(post => post.state === 'DRAFT' && !redditPlanScheduleBlock(post) &&
+      (!requireRedditHandoff || (post.providerIdentifier === 'reddit' && hasRedditPlanSchedulePending(post.settings))));
+    // The asynchronous Reddit resolver has no website project guard. Keep
+    // its activation re-check scoped to the roots it is handing off.
+    if (rootPostIds && drafts.some(post => post.providerIdentifier === 'reddit')) {
+      await this._projectValidation?.assertProjectActive(orgId, projectId);
+    }
     // Per-platform publish time windows — resolved once for the whole batch,
     // then applied per-post below. A platform absent from this map is
     // unconstrained: its posts keep their materialized time untouched.
@@ -3771,12 +3805,13 @@ export class PostsService {
           ...(dateOverride ? { date: dateOverride } : {}),
         };
       }),
-      sendContext
+      sendContext,
+      requireRedditHandoff
     );
     return {
       ...result,
       total: roots.length,
-      alreadyScheduled: roots.length - drafts.length,
+      alreadyScheduled: roots.filter(post => post.state !== 'DRAFT').length,
     };
   }
 

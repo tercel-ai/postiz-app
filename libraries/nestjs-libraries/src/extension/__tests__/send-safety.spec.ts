@@ -36,6 +36,27 @@ describe('execution safety across channels and recoveries', () => {
     ).rejects.toThrow('SEND_ALREADY_OWNED');
     expect(db.rows('sendExecution')).toHaveLength(1);
   });
+  it.each([
+    [{ redditTargetPending: { title: 'Planned Reddit post' } }, 'REDDIT_TARGET_PENDING'],
+    [{ subreddit: [{ value: { subreddit: 'subreddit', flairRequired: true } }] }, 'REDDIT_FLAIR_REQUIRED'],
+  ])('leaves a historical controlled queue protected when plan settings block sending (%j)', async (settings, reason) => {
+    const { service, create, db } = setupSend();
+    await create('root', 'EXTENSION');
+    const post = db.rows('post')[0];
+    Object.assign(post, { providerIdentifier: 'reddit', operationPlanId: 'plan', settings: JSON.stringify(settings) });
+    db.rows('sendIntent')[0].platform = 'reddit';
+
+    await expect(service.claimabilityReasonIn(
+      db as any, 'org', post, {} as any, 'POST', now
+    )).resolves.toBe(reason);
+    await expect(db.$transaction((tx: any) =>
+      service.reserveIn(tx, 'org', 'root', 'EXTENSION', 'new-claim', {}, now)
+    )).rejects.toThrow(reason);
+    expect(db.rows('post')[0].state).toBe('QUEUE');
+    expect(db.rows('sendExecution')).toEqual([]);
+    expect(db.rows('sendQuotaReservation')).toEqual([]);
+  });
+
   it('allows failover only for an expired reservation with no permit', async () => {
     const { service, create, db } = setupSend();
     await create();

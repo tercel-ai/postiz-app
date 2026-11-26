@@ -1,3 +1,4 @@
+import { hasMaterializedSuccessor } from '../database/prisma/operation-plan/operation-plan-supersession';
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import {
@@ -208,7 +209,7 @@ export class ProjectPublishingService {
   ) {}
 
   /**
-   * Assert `planId` is an operation plan of `projectId` within `organizationId`.
+   * Assert `planId` belongs to this project and report its supersession status.
    *
    * Deliberately 404s (not 403) for a plan of ANOTHER project: whether some
    * other project owns that id is not something this caller is entitled to
@@ -220,10 +221,10 @@ export class ProjectPublishingService {
     organizationId: string,
     projectId: string,
     planId: string
-  ): Promise<void> {
+  ): Promise<{ superseded: boolean }> {
     const plan = await this._operationPlan.model.operationPlan.findFirst({
       where: { id: planId, organizationId },
-      select: { projectId: true },
+      select: { projectId: true, createdAt: true },
     });
     if (!plan || (plan.projectId && plan.projectId !== projectId)) {
       throw new NotFoundException('Operation plan not found');
@@ -233,6 +234,10 @@ export class ProjectPublishingService {
         'This operation plan is not scoped to a project and cannot be scheduled through a project route'
       );
     }
+    const superseded = await hasMaterializedSuccessor(this._operationPlan.model, {
+      id: planId, organizationId, projectId, createdAt: plan.createdAt,
+    });
+    return { superseded };
   }
 
   /** The project's effective publishing settings (switches + platforms + windows). */

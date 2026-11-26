@@ -514,7 +514,12 @@ export async function resolveRedditTargets(
       // for why this field cannot carry it without breaking the settings DTO.
       is_flair_required: false,
       ...(capability.flairRequired === true &&
-      isRuleObservationFresh(capability.observedAt, now())
+      isRuleObservationFresh(
+        capability.flairRequiredObservedAt === undefined
+          ? capability.observedAt
+          : capability.flairRequiredObservedAt ?? undefined,
+        now()
+      )
         ? { flairRequired: true as const }
         : {}),
       ...(flairLabel ? { flairLabel } : {}),

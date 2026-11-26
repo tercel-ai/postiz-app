@@ -73,8 +73,13 @@ import {
   isEmptyRedditCapability,
   mergeRedditCapability,
   readRedditCapability,
+  redditFlairOptionsRevision,
   RedditChannelCapability,
 } from '@gitroom/nestjs-libraries/engage/reddit-channel-capability';
+import {
+  restageRedditFlairAfterCatalogChange,
+  unresolvedRedditPostWhere,
+} from '@gitroom/nestjs-libraries/engage/reddit-plan-readiness';
 import {
   classifyReplyMetric,
   normalizeReplyMetrics,
@@ -1809,7 +1814,8 @@ export class EngageRepository {
    */
   async getRedditChannelCapability(
     organizationId: string,
-    subreddit: string
+    subreddit: string,
+    client: Pick<Prisma.TransactionClient, 'engageTrackedAccount'> = this._trackedAccount.model
   ): Promise<RedditChannelCapability> {
     // `?? ''` before normalizeUsername, which dereferences its argument: this
     // is reachable from a query string, so a missing param must return the
@@ -1819,7 +1825,7 @@ export class EngageRepository {
     // One org can monitor the same subreddit from several projects (a row per
     // EngageConfig) and every one of them carries the same observation, so the
     // freshest row is enough — no need to materialize the rest.
-    const row = await this._trackedAccount.model.engageTrackedAccount.findFirst(
+    const row = await client.engageTrackedAccount.findFirst(
       {
       where: { organizationId, platform: 'reddit', username },
       select: { metadata: true },
@@ -1850,33 +1856,87 @@ export class EngageRepository {
     const username = normalizeUsername('reddit', subreddit);
     if (!username || isEmptyRedditCapability(patch)) return { updated: 0 };
 
-    const rows = await this._trackedAccount.model.engageTrackedAccount.findMany(
-      {
-      where: { organizationId, platform: 'reddit', username },
-      select: { id: true, metadata: true },
-      }
-    );
-    if (!rows.length) return { updated: 0 };
+    return sendTransaction(this._tx.model, async (tx) => {
+      const rows = await tx.engageTrackedAccount.findMany({
+        where: { organizationId, platform: 'reddit', username },
+        select: { id: true, metadata: true },
+        orderBy: { updatedAt: 'desc' },
+      });
+      if (!rows.length) return { updated: 0 };
 
-    const observedAt = new Date().toISOString();
-    // Per-row rather than one updateMany: the merge reads each row's existing
-    // metadata (to preserve description/url/avatar and any boolean this patch
-    // does not state), so the new value differs per row.
-    await Promise.all(
-      rows.map((row) =>
-        this._trackedAccount.model.engageTrackedAccount.update({
+      const observedAt = new Date().toISOString();
+      const incoming = readRedditCapability(mergeRedditCapability({}, patch, observedAt)).flairs;
+      const optionsRevision = redditFlairOptionsRevision(incoming?.map(({ label }) => label));
+      const previous = rows.map(row => readRedditCapability(row.metadata).flairs).find(flairs => flairs !== undefined);
+      const previousRevision = redditFlairOptionsRevision(previous?.map(({ label }) => label));
+
+      // Every monitored row gets the same observation, retaining its other metadata.
+      for (const row of rows) {
+        await tx.engageTrackedAccount.update({
           where: { id: row.id },
-          data: {
-            metadata: mergeRedditCapability(
-              row.metadata,
-              patch,
-              observedAt
-            ) as Prisma.InputJsonValue,
+          data: { metadata: mergeRedditCapability(row.metadata, patch, observedAt) as Prisma.InputJsonValue },
+        });
+      }
+      if (optionsRevision && optionsRevision !== previousRevision) {
+        await this.restageRedditPlanDrafts(tx, organizationId, username, optionsRevision, observedAt);
+      }
+      return { updated: rows.length };
+    });
+  }
+
+  private async restageRedditPlanDrafts(
+    tx: Prisma.TransactionClient,
+    organizationId: string,
+    subreddit: string,
+    optionsRevision: string,
+    observedAt: string
+  ) {
+    const scope = { ...unresolvedRedditPostWhere(organizationId), state: State.DRAFT };
+    const roots = await tx.post.findMany({
+      where: {
+        ...scope,
+        operationPlanId: { not: null },
+        projectId: { not: null },
+        parentPostId: null,
+        OR: [
+          { settings: { contains: '"flairRequired":true' } },
+          { settings: { contains: '"is_flair_required":true' } },
+        ],
+      },
+      select: { id: true, group: true, operationPlanId: true, projectId: true, settings: true },
+      orderBy: { id: 'asc' },
+    });
+    const restage = (settings: string | null) =>
+      restageRedditFlairAfterCatalogChange(settings, subreddit, optionsRevision, observedAt);
+
+    for (const root of roots) {
+      if (!restage(root.settings)) continue;
+      const thread = await tx.post.findMany({
+        where: { organizationId, group: root.group, deletedAt: null },
+        select: {
+          id: true, group: true, operationPlanId: true, projectId: true, settings: true, updatedAt: true,
+          state: true, providerIdentifier: true, sendIntentId: true, claimedAt: true, releaseId: true, releaseURL: true,
+        },
+        orderBy: { id: 'asc' },
+      });
+      if (!thread.some(row => row.id === root.id) || thread.some(row =>
+        row.state !== State.DRAFT || row.providerIdentifier !== 'reddit' ||
+        row.operationPlanId !== root.operationPlanId || row.projectId !== root.projectId ||
+        row.sendIntentId || row.claimedAt || row.releaseId || row.releaseURL
+      )) continue;
+      const changes = thread.map(row => ({ row, settings: restage(row.settings) }));
+      if (changes.some(change => change.settings === undefined)) continue;
+      for (const { row, settings } of changes) {
+        const applied = await tx.post.updateMany({
+          where: {
+            ...scope, id: row.id, group: row.group, operationPlanId: row.operationPlanId,
+            projectId: row.projectId, settings: row.settings, updatedAt: row.updatedAt,
           },
-        })
-      )
-    );
-    return { updated: rows.length };
+          data: { settings, contentRevision: { increment: 1 } },
+        });
+        if (applied.count !== 1) throw new ConflictException('REDDIT_TARGET_CHANGED');
+      }
+    }
   }
 
   /**

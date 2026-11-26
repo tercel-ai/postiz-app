@@ -6,15 +6,16 @@ import { EngageRepository } from '../engage.repository';
 // precisely because this layer had no tests: the read used to be cross-tenant,
 // and the read used to throw on a missing subreddit.
 //
-// `_trackedAccount` is constructor arg 3; nothing else on the repository is
-// exercised by either method under test.
-function buildRepo(engageTrackedAccount: any) {
+function buildRepo(engageTrackedAccount: any, post = { findMany: vi.fn(async () => []), updateMany: vi.fn() }) {
+  const db = { engageTrackedAccount, post };
   return new EngageRepository(
     {} as any,
     {} as any,
     { model: { engageTrackedAccount } } as any, {} as any, {} as any, {} as any, {} as any,
         {} as any,   // _integrationProject,
-    {} as any, {} as any, {} as any, {} as any
+    { model: db } as any,
+    { model: { $transaction: (work: (tx: typeof db) => unknown) => work(db) } } as any,
+    {} as any, {} as any
   );
 }
 
@@ -122,6 +123,67 @@ describe('EngageRepository.recordRedditChannelCapability', () => {
     expect(first.reddit.flairs).toEqual(FLAIRS);
     expect(first.reddit.flairRequired).toBe(true);
     expect(typeof first.reddit.observedAt).toBe('string');
+  });
+
+  it('restages only unselected plan drafts for the changed community, including their thread', async () => {
+    const target = (subreddit: string, extra = {}) => JSON.stringify({ subreddit: [{ value: {
+      subreddit, title: 'Saved title', flairRequired: true, ...extra,
+    } }] });
+    const root = (id: string, settings: string, overrides = {}) => ({
+      id, group: id, operationPlanId: 'plan', projectId: 'project', state: 'DRAFT', providerIdentifier: 'reddit',
+      claimedAt: null, sendIntentId: null, releaseId: null, releaseURL: null, settings,
+      parentPostId: null, updatedAt: new Date('2026-11-25'), ...overrides,
+    });
+    const empty = root('empty', target('programming'));
+    const rows = [
+      empty,
+      root('child', target('programming', { title: 'Saved second title' }), { parentPostId: empty.id, group: empty.group }),
+      root('selected-label', target('programming', { flairLabel: '📰News' })),
+      root('selected-id', target('programming', { flair: { id: 'reddit-template' } })),
+      root('different-community', target('opensource')),
+      root('manual', target('programming'), { operationPlanId: null }),
+      root('claimed', target('programming'), { claimedAt: new Date() }),
+      root('already-admitted', target('programming'), { sendIntentId: 'intent' }),
+      root('queued', target('programming'), { state: 'QUEUE' }),
+    ];
+    const post = {
+      findMany: vi.fn(async ({ where }) => where.group
+        ? rows.filter(row => row.group === where.group)
+        : rows.filter(row => !row.parentPostId && row.operationPlanId !== null)),
+      updateMany: vi.fn(async (_args) => ({ count: 1 })),
+    };
+    const repo = buildRepo({
+      findMany: vi.fn(async () => [{ id: 'row-1', metadata: { reddit: { flairs: [FLAIRS[0]] } } }]),
+      update: vi.fn(async () => ({})),
+    }, post as any);
+
+    await expect(repo.recordRedditChannelCapability('org-a', 'r/Programming', { flairs: FLAIRS }))
+      .resolves.toEqual({ updated: 1 });
+    expect(post.findMany.mock.calls[0][0].where).toMatchObject({
+      organizationId: 'org-a', state: 'DRAFT', deletedAt: null, sendIntentId: null, parentPostId: null,
+      operationPlanId: { not: null }, projectId: { not: null },
+    });
+    const writes = post.updateMany.mock.calls.map(([args]) => args);
+    expect(writes.map(write => write.where.id)).toEqual(['empty', 'child']);
+    for (const write of writes) {
+      expect(write.where).toMatchObject({ organizationId: 'org-a', state: 'DRAFT', sendIntentId: null });
+      expect(write.data).not.toHaveProperty('state');
+      expect(JSON.parse(write.data.settings).redditTargetPending).toMatchObject({
+        reason: 'flair-pending', candidate: 'programming', flairRequired: true, selectFlair: true,
+      });
+    }
+    expect(JSON.parse(writes[1].data.settings).subreddit[0].value.title).toBe('Saved second title');
+  });
+
+  it.each([[FLAIRS], [[...FLAIRS].reverse()], [undefined]])('does not reconsider drafts when the reported set is unchanged (%j)', async (flairs) => {
+    const post = { findMany: vi.fn(), updateMany: vi.fn() };
+    const repo = buildRepo({
+      findMany: vi.fn(async () => [{ id: 'row-1', metadata: { reddit: { flairs: FLAIRS } } }]),
+      update: vi.fn(async () => ({})),
+    }, post);
+    await repo.recordRedditChannelCapability('org-a', 'programming', { flairs, flairRequired: true });
+    expect(post.findMany).not.toHaveBeenCalled();
+    expect(post.updateMany).not.toHaveBeenCalled();
   });
 
   // The capability record is a cache attached to a monitoring relationship, not

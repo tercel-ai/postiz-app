@@ -24,6 +24,8 @@ describe('readRedditCapability', () => {
     ).toEqual({
       flairs: [{ label: '📰News' }, { label: 'Discussion' }],
       flairRequired: true,
+      flairsObservedAt: AT,
+      flairRequiredObservedAt: AT,
       observedAt: AT,
       source: 'extension',
     });
@@ -115,6 +117,61 @@ describe('mergeRedditCapability', () => {
     expect(readRedditCapability(merged).flairs).toEqual([{ label: 'News' }]);
   });
 
+  it('keeps a verified empty list and removes the previously cached options', () => {
+    const merged = mergeRedditCapability(
+      { reddit: { flairs: [{ label: 'Gone' }], flairRequired: false, observedAt: AT } },
+      { flairs: [] },
+      '2026-08-13T10:00:00.000Z'
+    );
+    expect(readRedditCapability(merged)).toMatchObject({
+      flairs: [],
+      flairsObservedAt: '2026-08-13T10:00:00.000Z',
+      flairRequired: false,
+      flairRequiredObservedAt: AT,
+    });
+  });
+
+  it('does not refresh the options when a live rule report updates their older record', () => {
+    const nextAt = '2026-08-13T10:00:00.000Z';
+    const merged = mergeRedditCapability(
+      { reddit: { flairs: [{ label: 'News' }], observedAt: AT } },
+      { flairRequired: true },
+      nextAt
+    );
+    expect(readRedditCapability(merged)).toMatchObject({
+      flairs: [{ label: 'News' }],
+      flairsObservedAt: AT,
+      flairRequired: true,
+      flairRequiredObservedAt: nextAt,
+    });
+  });
+
+  it('keeps undated legacy evidence undated when other fields are updated', () => {
+    const merged = mergeRedditCapability(
+      { reddit: { flairs: [{ label: 'Old' }], flairRequired: true } },
+      { titleTagRequired: true },
+      AT
+    );
+    expect(readRedditCapability(merged)).toMatchObject({
+      flairs: [{ label: 'Old' }],
+      flairsObservedAt: null,
+      flairRequired: true,
+      flairRequiredObservedAt: null,
+      observedAt: AT,
+    });
+  });
+
+  it('never treats a wholly malformed nonempty report as a verified empty list', () => {
+    const malformed = { flairs: [{ label: ' ' }] };
+    const merged = mergeRedditCapability(
+      { reddit: { flairs: [{ label: 'News' }], observedAt: AT } },
+      malformed,
+      '2026-08-13T10:00:00.000Z'
+    );
+    expect(readRedditCapability(merged)).toMatchObject({ flairs: [{ label: 'News' }], flairsObservedAt: AT });
+    expect(isEmptyRedditCapability(malformed)).toBe(true);
+  });
+
   it('stamps observedAt on every write and defaults source to extension', () => {
     const merged = mergeRedditCapability({}, { flairRequired: true }, AT);
     expect(readRedditCapability(merged)).toMatchObject({
@@ -132,11 +189,11 @@ describe('mergeRedditCapability', () => {
 describe('isEmptyRedditCapability', () => {
   it('is true when nothing was observed', () => {
     expect(isEmptyRedditCapability({})).toBe(true);
-    expect(isEmptyRedditCapability({ flairs: [] })).toBe(true);
     expect(isEmptyRedditCapability({ source: 'extension' })).toBe(true);
   });
 
   it('is false once anything was observed', () => {
+    expect(isEmptyRedditCapability({ flairs: [] })).toBe(false);
     expect(isEmptyRedditCapability({ flairs: [{ label: 'News' }] })).toBe(false);
     expect(isEmptyRedditCapability({ flairRequired: false })).toBe(false);
     expect(isEmptyRedditCapability({ titleTagRequired: true })).toBe(false);

@@ -2,6 +2,8 @@ import { ACCOUNT_CHANGE_CANCELLATION, canChangePostAccount, canEditUnsentReply, 
 import { preserveDispatchTarget, readPublishNowRequestedAt, withPublishNowRequestedAt } from './send-dispatch';
 import { assertAutonomousAccountIn, controlledBlockedPlatformsIn } from './send-mode-handover';
 import { SendModeService } from './send-mode.service';
+import { redditPlanScheduleBlock } from '../engage/reddit-plan-readiness';
+import { clearRedditPlanSchedulePending, hasRedditPlanSchedulePending } from '../engage/reddit-pending-target';
 import { CONTROLLED_SEND_PLATFORMS, CONTROLLED_REPLY_PLATFORMS, canonicalControlledPlatform, controlledReplySettings, hasControlledReplyTarget } from './controlled-platforms';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { hashSecret } from './extension-node.protocol';
@@ -74,6 +76,7 @@ export interface EnqueueSend {
   publishDate?: Date;
   publishNow?: boolean;
   sentReplyId?: string;
+  requireRedditPlanSchedulePending?: true;
   legacyRetry?: LegacyPostRetryReviewDto;
   // Internal handover adds provenance checks; it never relaxes enqueue policy.
   modeHandover?: true;
@@ -428,6 +431,8 @@ export class SendCoordinatorService {
     if (intent.routeRevision !== post.routeRevision || intent.contentRevision !== post.contentRevision) return 'SEND_INTENT_REVISION_MISMATCH';
     if (!['QUEUED', 'RESERVED'].includes(intent.status)) return 'SEND_INTENT_NOT_QUEUED';
     if (intent.hasConfirmedSegments) return 'SEND_INTENT_ALREADY_PARTIALLY_CONFIRMED';
+    const planBlock = action === 'POST' && post.operationPlanId ? redditPlanScheduleBlock(post) : undefined;
+    if (planBlock) return planBlock;
     if (action === 'REPLY' && await this.replyAlreadyPublishedIn(tx, post)) return 'CONTENT_ALREADY_SUBMITTED';
     if (!session.integrationId || session.verificationStatus !== 'VERIFIED') return 'SESSION_NOT_VERIFIED_OR_EXPIRED';
     const owner = (intent.policySnapshot as { policyOwnerUserId?: string }).policyOwnerUserId;
@@ -1149,6 +1154,9 @@ export class SendCoordinatorService {
       await this.assertControlledIn(tx, org);
       const posts = await this.chain(tx, org, rootId);
       const first = posts[0];
+      if (options.requireRedditPlanSchedulePending &&
+          (first.providerIdentifier !== 'reddit' || first.state !== 'DRAFT' ||
+            !hasRedditPlanSchedulePending(first.settings))) reject('SEND_DRAFT_CHANGED');
       const legacyKey = legacyRetry ? {
         organizationId: org, userId: options.userId, operation: `legacy-post-retry:${rootId}`, requestId: legacyRetry.requestId,
       } : null;
@@ -1280,6 +1288,8 @@ export class SendCoordinatorService {
       }
       const action =
         options.action ?? (first.source === 'engage' ? 'REPLY' : 'POST');
+      const planBlock = action === 'POST' && first.operationPlanId ? redditPlanScheduleBlock(first) : undefined;
+      if (planBlock) reject(planBlock);
       if (reply) {
         const target = reply.opportunity.externalPostId;
         if (!target) reject('REPLY_TARGET_REQUIRED');
@@ -1407,6 +1417,10 @@ export class SendCoordinatorService {
           },
           data: {
             contentUnitId: unit,
+            ...(action === 'POST' && first.providerIdentifier === 'reddit' && post.id === first.id &&
+                post.settings && hasRedditPlanSchedulePending(post.settings)
+              ? { settings: clearRedditPlanSchedulePending(post.settings) }
+              : {}),
             sendIntentId: intent.id,
             integrationId: route?.integrationId ?? null,
             executionProtocol: 'ACCOUNT_BOUND_V1',
@@ -1823,6 +1837,8 @@ export class SendCoordinatorService {
       },
     });
     if (prior) return prior;
+    const planBlock = intent.action === 'POST' && root.operationPlanId ? redditPlanScheduleBlock(root) : undefined;
+    if (planBlock) reject(planBlock);
     if (intent.action === 'REPLY' && await this.replyAlreadyPublishedIn(tx, root)) reject('CONTENT_NOT_SENDABLE');
     if (intent.activeExecutionId) {
       const previous = await tx.sendExecution.findUniqueOrThrow({

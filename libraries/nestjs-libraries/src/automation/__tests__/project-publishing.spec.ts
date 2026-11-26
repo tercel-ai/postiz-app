@@ -166,8 +166,8 @@ describe('mergePublishWindows', () => {
 // in the request, but nothing previously checked that the planId in the same
 // request was THAT project's plan.
 describe('ProjectPublishingService.assertPlanBelongsToProject', () => {
-  const makeService = (plan: { projectId: string | null } | null) => {
-    const findFirst = vi.fn().mockResolvedValue(plan);
+  const makeService = (plan: { projectId: string | null; createdAt?: Date } | null) => {
+    const findFirst = vi.fn().mockResolvedValueOnce(plan).mockResolvedValue(null);
     const service = new ProjectPublishingService(
       { model: { operationPlan: { findFirst } } } as any,
       { model: { engageConfig: { findFirst: vi.fn() } } } as any,
@@ -180,11 +180,24 @@ describe('ProjectPublishingService.assertPlanBelongsToProject', () => {
     const { service, findFirst } = makeService({ projectId: 'proj-1' });
     await expect(
       service.assertPlanBelongsToProject('org-1', 'proj-1', 'plan-1')
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ superseded: false });
     // Org-scoped at the query level too — a plan of another ORG is simply absent.
     expect(findFirst).toHaveBeenCalledWith({
       where: { id: 'plan-1', organizationId: 'org-1' },
-      select: { projectId: true },
+      select: { projectId: true, createdAt: true },
+    });
+  });
+
+  it('reports when another plan already materialized in the same project', async () => {
+    const createdAt = new Date('2030-05-01');
+    const { service, findFirst } = makeService({ projectId: 'proj-1', createdAt });
+    findFirst.mockResolvedValue({ id: 'newer' });
+    await expect(service.assertPlanBelongsToProject('org-1', 'proj-1', 'plan-1'))
+      .resolves.toEqual({ superseded: true });
+    expect(findFirst).toHaveBeenNthCalledWith(2, {
+      where: { id: { not: 'plan-1' }, organizationId: 'org-1', projectId: 'proj-1',
+        createdAt: { gt: createdAt }, posts: { some: {} } },
+      select: { id: true },
     });
   });
 

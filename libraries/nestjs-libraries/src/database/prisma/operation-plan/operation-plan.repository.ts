@@ -4,11 +4,16 @@ import { v5 as uuidv5 } from 'uuid';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { OperationPlan, Prisma } from '@prisma/client';
 import { postTitleFromTheme } from './theme-title';
+import { persistPlanDrafts } from './operation-plan-supersession';
 import { stripDuplicatedTitleFromContent } from '@gitroom/nestjs-libraries/integrations/title-body-split';
 import { TITLE_REQUIRED_PLATFORMS } from '@gitroom/helpers/extension/post-publish';
 import { COMMUNITY_TITLE_PLATFORMS } from '@gitroom/nestjs-libraries/database/prisma/posts/settings-title';
+import { redditPlanScheduleBlock } from '@gitroom/nestjs-libraries/engage/reddit-plan-readiness';
 import type { ResolvedRedditTarget as ResolverRedditTarget } from './reddit-target-resolver';
 import {
+  clearRedditPlanSchedulePending,
+  hasRedditPlanSchedulePending,
+  REDDIT_PLAN_SCHEDULE_PENDING_KEY,
   REDDIT_TARGET_PENDING_KEY,
   RedditTargetPending,
 } from '@gitroom/nestjs-libraries/engage/reddit-pending-target';
@@ -223,21 +228,47 @@ export class OperationPlanRepository {
     });
   }
 
-  // Live (non-deleted) DRAFT post count for a plan — tells "materialized but
-  // never committed" (crash between the createMany and the auto-commit)
-  // apart from "fully committed, nothing left to do".
-  countDraftPostsForPlan(planId: string) {
-    return this._post.model.post.count({
-      where: { operationPlanId: planId, deletedAt: null, state: 'DRAFT' },
+  /** Retry already resolved roots independently of the plan generation age. */
+  findPendingRedditPlanSchedule(limit: number) {
+    return this._post.model.post.findMany({
+      where: {
+        state: 'DRAFT', providerIdentifier: 'reddit', deletedAt: null, parentPostId: null,
+        projectId: { not: null }, releaseId: null, releaseURL: null, claimedAt: null, sendIntentId: null,
+        operationPlan: { status: 'READY' },
+        settings: { contains: `"${REDDIT_PLAN_SCHEDULE_PENDING_KEY}":true` },
+      },
+      select: { id: true, organizationId: true, projectId: true, operationPlanId: true, settings: true },
+      orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
+      take: limit,
     });
   }
 
-  // Live (non-deleted) Post count for a plan — the signal the materialization
-  // sweeper uses to tell "never materialized" apart from "materialized and
-  // just hasn't been touched since".
+  settleRedditPlanSchedule(
+    draft: { id: string; organizationId: string; settings: string },
+    retry: boolean
+  ) {
+    return this._post.model.post.updateMany({
+      where: { id: draft.id, organizationId: draft.organizationId, settings: draft.settings,
+        state: 'DRAFT', providerIdentifier: 'reddit', deletedAt: null, sendIntentId: null },
+      data: retry ? { updatedAt: new Date() } : { settings: clearRedditPlanSchedulePending(draft.settings) },
+    });
+  }
+
+  // Only drafts admission can act on indicate interrupted auto-commit.
+  async countDraftPostsForPlan(planId: string) {
+    const roots = await this._post.model.post.findMany({
+      where: { operationPlanId: planId, deletedAt: null, state: 'DRAFT', parentPostId: null },
+      select: { providerIdentifier: true, settings: true },
+    });
+    return roots.filter(root => !redditPlanScheduleBlock(root) &&
+      !(root.providerIdentifier === 'reddit' && hasRedditPlanSchedulePending(root.settings))).length;
+  }
+
+  // Tombstones are also materialization evidence. A superseded plan whose
+  // drafts were all retired must not be treated as an unfinished creation.
   countPostsForPlan(planId: string) {
     return this._post.model.post.count({
-      where: { operationPlanId: planId, deletedAt: null },
+      where: { operationPlanId: planId },
     });
   }
 
@@ -601,12 +632,12 @@ export class OperationPlanRepository {
                   ],
                 }
               : {}),
-            // Parked instead of resolved: there is no `subreddit` to write yet.
+            // A parked post may have a verified community awaiting flair.
             // This marker is what the extension's resolver looks for, and what
             // keeps the post out of the extension publish queue in the meantime
             // (PostsRepository.extensionRoutedWhere matches it as a substring,
             // which is why the key is a shared constant rather than a literal).
-            ...(platform === 'reddit' && !redditTarget && redditTargetPending
+            ...(platform === 'reddit' && redditTargetPending
               ? { [REDDIT_TARGET_PENDING_KEY]: redditTargetPending }
               : {}),
             // Dev.to's tag feeds are its distribution, so a generated article
@@ -630,41 +661,11 @@ export class OperationPlanRepository {
         };
       });
 
-    const result = postsToCreate.length
-      ? this._planExecution
-        ? await this._planExecution.materialize(plan.organizationId, plan.id, postsToCreate)
-        : await this._post.model.post.createMany({ data: postsToCreate, skipDuplicates: true })
-      : { count: 0 };
-
-    // Single-active-plan semantics: the latest materialized plan supersedes every
-    // earlier plan for this project. Soft-delete the prior plans' DRAFT posts so
-    // they leave the calendar (every read path filters deletedAt: null) and can no
-    // longer be published.
-    //   - Guard on planHasPosts: only supersede when THIS plan actually owns posts
-    //     — either just created (postsToCreate) or already present from an
-    //     idempotent re-materialize (existingById). A degenerate plan that resolved
-    //     to zero posts (e.g. every reddit item dropped) must not wipe the previous
-    //     valid plan and leave the project with an empty calendar.
-    //   - state DRAFT only: a post the user already scheduled (QUEUE) or that
-    //     already published/errored is committed work and must survive.
-    //   - operationPlanId IS NOT NULL: hand-authored drafts (no plan) are never a
-    //     stale plan and must be left untouched.
-    //   - NOT operationPlanId = plan.id: protect this plan's own rows.
-    const planHasPosts = postsToCreate.length > 0 || existingById.size > 0;
-    if (planHasPosts) {
-      await this._post.model.post.updateMany({
-        where: {
-          organizationId: plan.organizationId,
-          projectId: plan.projectId,
-          state: 'DRAFT',
-          deletedAt: null,
-          operationPlanId: { not: null },
-          NOT: { operationPlanId: plan.id },
-        },
-        data: { deletedAt: new Date(), parentPostId: null },
-      });
-    }
-
-    return result;
+    return this._planExecution
+      ? this._planExecution.materialize(plan.organizationId, plan.id, postsToCreate)
+      : persistPlanDrafts({
+        operationPlan: this._operationPlan.model.operationPlan,
+        post: this._post.model.post,
+      }, plan, postsToCreate);
   }
 }

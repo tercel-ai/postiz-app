@@ -112,6 +112,10 @@ describe('_resolveAndAttachRedditTargets wiring', () => {
       is_flair_required: false,
     });
 
+    expect(platforms[1].redditTargetPending).toMatchObject({
+      candidate: 'webdev', selectFlair: true, reason: 'flair-pending',
+    });
+
     // Tier-2 discovery persisted back into the project's Engage config.
     expect(getOrCreateConfig).toHaveBeenCalledWith('org-1', 'proj-1');
     expect(addMonitoredChannel).toHaveBeenCalledWith('config-1', 'org-1', {
