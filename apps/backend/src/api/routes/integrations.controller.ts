@@ -15,6 +15,7 @@ import {
   Query,
   Req,
   UseFilters,
+  UseGuards,
   Logger,
   Headers,
   Optional,
@@ -69,6 +70,7 @@ import { isExtensionSessionStale } from '@gitroom/nestjs-libraries/database/pris
 import { ExtensionNodeService } from '@gitroom/nestjs-libraries/extension/extension-node.service';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
 import { resolveUserProviderPolicy } from '@gitroom/nestjs-libraries/integrations/user-provider-policy';
+import { XUsernameLookupThrottleGuard } from './x-username-lookup-throttle.guard';
 
 @ApiTags('Integrations')
 @Controller('/integrations')
@@ -708,6 +710,7 @@ export class IntegrationsController {
   }
 
   @Post('/user-by-username')
+  @UseGuards(XUsernameLookupThrottleGuard)
   async fetchUserByUsername(
     @GetOrgFromRequest() org: Organization,
     @Body() body: UserByUsernameDto

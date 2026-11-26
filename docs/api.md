@@ -124,10 +124,17 @@ field for older clients and ignores it. The response keeps the public profile
 fields and the X payload in `raw`.
 
 The backend calls X with `X_BEARER_TOKEN`, or obtains an app-only token using
-`X_API_KEY` and `X_API_SECRET` if the bearer is unset. The lookup works without
-an X integration and runs independently of the Engage `X_API_ENABLED` switch.
-HTTP `404` indicates an invalid handle or missing account, `429` indicates X
-rate limiting, `503` with `x_lookup_not_configured` indicates missing app
+`X_API_KEY` and `X_API_SECRET` if the bearer is unset. Each backend process
+reuses the issued token and shares one exchange across concurrent lookups.
+The lookup works without an X integration and runs independently of the Engage
+`X_API_ENABLED` switch.
+The backend allows 30 requests per organization and 120 across all organizations
+per 15 minutes. The counters use the existing throttler storage and are shared
+across backend replicas when they use the same Redis. Local limit responses
+include `Retry-After` in seconds.
+
+HTTP `404` indicates an invalid handle or missing account, `429` indicates
+local or X rate limiting, `503` with `x_lookup_not_configured` indicates missing app
 credentials, and `502` indicates another upstream failure. A registered
 provider without public lookup support returns `501`. An unknown provider
 returns `400`.

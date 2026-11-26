@@ -53,6 +53,13 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 // cached; returns {} when no proxy is configured so direct connections are
 // unaffected on hosts that can reach X directly.
 let _xProxyAgent: HttpsProxyAgent<string> | null | undefined;
+const X_USERNAME_LOOKUP_TIMEOUT_MS = 15_000;
+type UsernameLookupAppToken = {
+  appKey: string;
+  appSecret: string;
+  bearer: Promise<string>;
+};
+
 function xClientSettings(signal?: AbortSignal): Partial<IClientSettings> {
   if (_xProxyAgent === undefined) {
     const proxyUrl =
@@ -93,6 +100,7 @@ function xVerificationSetting(verified: boolean, verifiedType: string | null) {
   'X can have maximum 4 pictures, or maximum one video, it can also be without attachments'
 )
 export class XProvider extends SocialAbstract implements SocialProvider {
+  private static usernameLookupAppToken: UsernameLookupAppToken | undefined;
   private static _prismaInstance: PrismaClient | null = null;
   private static get _prisma(): PrismaClient {
     if (!XProvider._prismaInstance) {
@@ -1765,22 +1773,47 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     return [];
   }
 
+  private static exchangeUsernameLookupAppToken(appKey: string, appSecret: string) {
+    const cached = this.usernameLookupAppToken;
+    if (cached?.appKey === appKey && cached.appSecret === appSecret) return cached;
+
+    const client = new TwitterApi({ appKey, appSecret },
+      xClientSettings(AbortSignal.timeout(X_USERNAME_LOOKUP_TIMEOUT_MS)));
+    const exchange: UsernameLookupAppToken = {
+      appKey,
+      appSecret,
+      bearer: client.appLogin().then(appClient => {
+        const tokens = appClient.getActiveTokens();
+        if (tokens.type !== 'oauth2' || !tokens.bearerToken) {
+          throw new Error('X returned no application bearer token');
+        }
+        return tokens.bearerToken;
+      }).catch(error => {
+        if (this.usernameLookupAppToken === exchange) this.usernameLookupAppToken = undefined;
+        throw error;
+      }),
+    };
+    this.usernameLookupAppToken = exchange;
+    return exchange;
+  }
+
   static async fetchPublicUserByUsername(username: string): Promise<
     SocialUserLookupSuccess | { notFound: true } | { missingCredentials: true }
   > {
     const handle = username.trim().replace(/^@+/, '');
     if (!/^[a-z0-9_]{1,15}$/i.test(handle)) return { notFound: true };
 
-    const bearer = process.env.X_BEARER_TOKEN?.trim();
-    const appKey = process.env.X_API_KEY?.trim();
-    const appSecret = process.env.X_API_SECRET?.trim();
-    if (!bearer && !(appKey && appSecret)) {
-      return { missingCredentials: true };
+    const signal = AbortSignal.timeout(X_USERNAME_LOOKUP_TIMEOUT_MS);
+    let bearer = process.env.X_BEARER_TOKEN?.trim();
+    let exchange: UsernameLookupAppToken | undefined;
+    if (!bearer) {
+      const appKey = process.env.X_API_KEY?.trim();
+      const appSecret = process.env.X_API_SECRET?.trim();
+      if (!appKey || !appSecret) return { missingCredentials: true };
+      exchange = this.exchangeUsernameLookupAppToken(appKey, appSecret);
+      bearer = await exchange.bearer;
     }
-    const settings = xClientSettings(AbortSignal.timeout(15000));
-    const client = bearer
-      ? new TwitterApi(bearer, settings)
-      : await new TwitterApi({ appKey: appKey!, appSecret: appSecret! }, settings).appLogin();
+    const client = new TwitterApi(bearer, xClientSettings(signal));
 
     try {
       const result = await client.v2.userByUsername(handle, {
@@ -1822,8 +1855,11 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         raw: user,
       };
     } catch (error) {
-      if (error instanceof ApiResponseError && error.code === 404) {
-        return { notFound: true };
+      if (error instanceof ApiResponseError) {
+        if (error.code === 404) return { notFound: true };
+        if (error.code === 401 && exchange && this.usernameLookupAppToken === exchange) {
+          this.usernameLookupAppToken = undefined;
+        }
       }
       throw error;
     }
