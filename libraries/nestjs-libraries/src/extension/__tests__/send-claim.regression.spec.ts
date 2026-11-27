@@ -119,6 +119,33 @@ it('rotates only expired challenges and never reauthorizes a spent segment', asy
   await expect(f.executions.preflight(auth, item.executionId, 0, item.leaseToken)).rejects.toThrow('SEGMENT_NOT_PENDING');
 });
 
+it('parks an unclaimed Reddit Plan post and reserves an independent X post', async () => {
+  const f = fixture();
+  await f.create('reddit-root', 'EXTENSION');
+  await f.create('x-root', 'EXTENSION');
+  const post = f.db.rows('post').find(row => row.id === 'reddit-root');
+  Object.assign(post, { providerIdentifier: 'reddit', operationPlanId: 'plan', integrationId: 'reddit-account',
+    settings: JSON.stringify({ subreddit: [{ value: { subreddit: 'test', title: 'Title', type: 'self' } }] }) });
+  const intent = f.db.rows('sendIntent').find(row => row.rootPostId === post.id);
+  Object.assign(intent, { platform: 'reddit', integrationId: 'reddit-account', canonicalAccountKey: 'reddit-key',
+    target: { id: 't2_abc', idNamespace: 'reddit.user_id' } });
+  f.db.seed('integration', { id: 'reddit-account', organizationId: 'org', providerIdentifier: 'reddit',
+    internalId: 't2_abc', identityNamespace: 'reddit.user_id', disabled: false, deletedAt: null });
+  f.db.seed('integrationProject', { id: 'reddit-rel', organizationId: 'org', projectId: 'project',
+    integrationId: 'reddit-account', disabled: false });
+  f.db.seed('accountWriteState', { id: 'reddit-key', organizationId: 'org', integrationId: 'reddit-account',
+    canonicalAccountKey: 'reddit-key', rolloutReady: true, revision: 0, activeExecutionId: null });
+  f.db.rows('extensionNode')[0].capabilities.reddit = { post: true, reply: true, strictAccountVerification: true };
+  f.db.seed('extensionNodeSession', { extensionNodeId: 'node', organizationId: 'org', platform: 'reddit',
+    integrationId: 'reddit-account', verificationStatus: 'VERIFIED',
+    verificationExpiresAt: new Date(sendNow.getTime() + 300_000), sessionRevision: 1,
+    accountIdentity: { id: 't2_abc', namespace: 'reddit.user_id' } });
+  const result = await f.claim();
+  expect(result.items[0]?.segments[0].id).toBe('x-root');
+  expect(JSON.parse(post.settings).redditTargetPending).toMatchObject({ reason: 'flair-pending', candidate: 'test' });
+  expect(f.db.rows('sendExecution').filter(row => row.sendIntentId === intent.id)).toHaveLength(0);
+});
+
 it('filters unsupported CURRENT_SESSION platforms before the candidate limit', async () => {
   const f = fixture();
   for (let i = 0; i < 26; i++) await f.create(`root-${String(i).padStart(3, '0')}`);

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   applyResolvedRedditTarget,
   clearRedditTargetPending,
@@ -160,5 +160,105 @@ describe('the publish-due guard contract', () => {
       type: 'self',
     });
     expect(resolved).not.toContain(`"${REDDIT_TARGET_PENDING_KEY}"`);
+  });
+});
+
+
+describe('legacy queued Reddit Flair staging', () => {
+  it('marks an untouched queued Plan post for the existing resolver', async () => {
+    const { stageLegacyRedditFlairIn } = await import('../reddit-plan-readiness');
+    const post: any = { id: 'p', organizationId: 'org', group: 'g', parentPostId: null,
+      operationPlanId: 'plan', projectId: 'project', providerIdentifier: 'reddit', state: 'QUEUE',
+      sendIntentId: null, claimedAt: null, releaseId: null, releaseURL: null, routeRevision: 0, contentRevision: 0,
+      settings: JSON.stringify({ subreddit: [{ value: { subreddit: 'test', title: 'Title', type: 'self' } }] }) };
+    const tx: any = { post: { findMany: vi.fn(async () => [post]), updateMany: vi.fn(async () => ({ count: 1 })) },
+      sendMutationReceipt: { findMany: vi.fn(async () => []) } };
+    expect(await stageLegacyRedditFlairIn(tx, post)).toBe(true);
+    const settings = JSON.parse(tx.post.updateMany.mock.calls[0][0].data.settings);
+    expect(settings).toMatchObject({ redditLegacyFlairResolution: true, redditTargetPending: {
+      candidate: 'test', title: 'Title', reason: 'flair-pending', selectFlair: true } });
+  });
+
+  it.each([false, true])('stages a prior controlled execution only when it has no submission permit (authorized=%s)', async authorized => {
+    const { stageLegacyRedditFlairIn } = await import('../reddit-plan-readiness');
+    const post: any = { id: 'p', organizationId: 'org', group: 'g', parentPostId: null,
+      operationPlanId: 'plan', projectId: 'project', providerIdentifier: 'reddit', state: 'QUEUE',
+      publishMethod: 'EXTENSION', sendIntentId: 'intent', claimedAt: null, releaseId: null, releaseURL: null,
+      routeRevision: 1, contentRevision: 2,
+      settings: JSON.stringify({ subreddit: [{ value: { subreddit: 'test', title: 'Title', type: 'self' } }] }) };
+    const intent = { id: 'intent', rootPostId: 'p', action: 'POST', status: 'QUEUED', activeExecutionId: null,
+      hasConfirmedSegments: false, routeRevision: 1, contentRevision: 2 };
+    const execution = { id: 'execution', kind: 'EXTENSION', action: 'POST', status: 'EXPIRED', startedAt: null,
+      context: { authorizationMode: 'NATIVE_FLOW_V1' }, routeRevision: 1, contentRevision: 2,
+      payload: [{ id: 'p', contentHash: 'hash' }] };
+    const segment = { executionId: 'execution', postId: 'p', segmentIndex: 0, contentHash: 'hash',
+      status: 'PENDING', result: null, authorizedAt: authorized ? new Date() : null,
+      permitHash: null, submitBefore: null, confirmedAt: null };
+    const tx: any = { post: { findMany: vi.fn(async () => [post]), updateMany: vi.fn(async () => ({ count: 1 })) },
+      sendIntent: { findFirst: vi.fn(async () => intent) }, sendExecution: { findMany: vi.fn(async () => [execution]) },
+      sendSegment: { findMany: vi.fn(async () => [segment]) }, sendMutationReceipt: { findMany: vi.fn(async () => []) } };
+    expect(await stageLegacyRedditFlairIn(tx, post)).toBe(!authorized);
+    expect(tx.post.updateMany).toHaveBeenCalledTimes(authorized ? 0 : 1);
+  });
+
+  it.each(['NOT_SUBMITTED', 'UNKNOWN', 'CONFIRMED'] as const)(
+    'stages an autonomous lease only with matching NOT_SUBMITTED proof (%s)', async status => {
+      const { stageLegacyRedditFlairIn } = await import('../reddit-plan-readiness');
+      const claimedAt = new Date('2026-10-01T10:00:00Z');
+      const post: any = { id: 'p', organizationId: 'org', group: 'g', parentPostId: null,
+        operationPlanId: 'plan', projectId: 'project', providerIdentifier: 'reddit', state: 'QUEUE',
+        sendIntentId: null, claimedAt, releaseId: 'lease', releaseURL: null, routeRevision: 0, contentRevision: 0,
+        settings: JSON.stringify({ subreddit: [{ value: { subreddit: 'test', title: 'Title', type: 'self' } }] }) };
+      const receipt = { result: { status, source: 'BROWSER', action: 'POST', platform: 'reddit',
+        postIds: ['p'], postClaim: { releaseId: 'lease', claimedAt: claimedAt.toISOString() } } };
+      const tx: any = { post: { findMany: vi.fn(async () => [post]), updateMany: vi.fn(async () => ({ count: 1 })) },
+        sendMutationReceipt: { findMany: vi.fn(async () => [receipt]) } };
+      expect(await stageLegacyRedditFlairIn(tx, post)).toBe(status === 'NOT_SUBMITTED');
+      if (status === 'NOT_SUBMITTED') {
+        const update = tx.post.updateMany.mock.calls[0][0];
+        expect(update.where).toMatchObject({ releaseId: 'lease', claimedAt });
+        expect(update.data).toMatchObject({ releaseId: null });
+        expect(update.data).not.toHaveProperty('claimedAt');
+      } else expect(tx.post.updateMany).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([undefined, 'other-lease'])('never infers the original claim from missing or changed binding (%s)', async boundLease => {
+    const { stageLegacyRedditFlairIn } = await import('../reddit-plan-readiness');
+    const claimedAt = new Date('2026-10-01T10:00:00Z');
+    const post: any = { id: 'p', organizationId: 'org', group: 'g', parentPostId: null,
+      operationPlanId: 'plan', projectId: 'project', providerIdentifier: 'reddit', state: 'QUEUE',
+      sendIntentId: null, claimedAt, releaseId: 'lease', releaseURL: null, routeRevision: 0, contentRevision: 0,
+      settings: JSON.stringify({ subreddit: [{ value: { subreddit: 'test', title: 'Title', type: 'self' } }] }) };
+    const tx: any = { post: { findMany: vi.fn(async () => [post]), updateMany: vi.fn() },
+      sendMutationReceipt: { findMany: vi.fn(async () => [{ result: { status: 'NOT_SUBMITTED', source: 'BROWSER',
+        action: 'POST', platform: 'reddit', postIds: ['p'], ...(boundLease ? { postClaim: {
+          releaseId: boundLease, claimedAt: claimedAt.toISOString() } } : {}) } }]) } };
+    expect(await stageLegacyRedditFlairIn(tx, post)).toBe(false);
+    expect(tx.post.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('preserves a post with any previous browser write receipt', async () => {
+    const { stageLegacyRedditFlairIn } = await import('../reddit-plan-readiness');
+    const post: any = { id: 'p', organizationId: 'org', group: 'g', parentPostId: null,
+      operationPlanId: 'plan', projectId: 'project', providerIdentifier: 'reddit', state: 'QUEUE',
+      sendIntentId: null, claimedAt: null, releaseId: null, releaseURL: null,
+      settings: JSON.stringify({ subreddit: [{ value: { subreddit: 'test', title: 'Title', type: 'self' } }] }) };
+    const tx: any = { post: { findMany: vi.fn(async () => [post]), updateMany: vi.fn() },
+      sendMutationReceipt: { findMany: vi.fn(async () => [{ result: { status: 'UNKNOWN', postIds: ['p'] } }]) } };
+    expect(await stageLegacyRedditFlairIn(tx, post)).toBe(false);
+    expect(tx.post.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('does not stage a claimed post or overwrite a selected Flair', async () => {
+    const { stageLegacyRedditFlairIn } = await import('../reddit-plan-readiness');
+    const tx: any = { post: { findMany: vi.fn(), updateMany: vi.fn() } };
+    const base: any = { id: 'p', organizationId: 'org', group: 'g', parentPostId: null,
+      operationPlanId: 'plan', projectId: 'project', providerIdentifier: 'reddit', state: 'QUEUE',
+      sendIntentId: null, releaseId: null, releaseURL: null, settings: JSON.stringify({ subreddit: [{ value: {
+        subreddit: 'test', title: 'Title', type: 'self', flairLabel: 'Discussion' } }] }) };
+    expect(await stageLegacyRedditFlairIn(tx, { ...base, claimedAt: null })).toBe(false);
+    expect(await stageLegacyRedditFlairIn(tx, { ...base, claimedAt: new Date(), settings: '{}' })).toBe(false);
+    expect(tx.post.updateMany).not.toHaveBeenCalled();
   });
 });

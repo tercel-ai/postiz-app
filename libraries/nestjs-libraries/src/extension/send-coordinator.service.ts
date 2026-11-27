@@ -3,7 +3,7 @@ import { preserveDispatchTarget, readPublishNowRequestedAt, withPublishNowReques
 import { assertAutonomousAccountIn, controlledBlockedPlatformsIn } from './send-mode-handover';
 import { SendModeService } from './send-mode.service';
 import { redditPlanScheduleBlock } from '../engage/reddit-plan-readiness';
-import { clearRedditPlanSchedulePending, hasRedditPlanSchedulePending } from '../engage/reddit-pending-target';
+import { clearRedditPlanSchedulePending, hasLegacyRedditFlairResolution, hasRedditPlanSchedulePending } from '../engage/reddit-pending-target';
 import { CONTROLLED_SEND_PLATFORMS, CONTROLLED_REPLY_PLATFORMS, canonicalControlledPlatform, controlledReplySettings, hasControlledReplyTarget } from './controlled-platforms';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { hashSecret } from './extension-node.protocol';
@@ -1195,6 +1195,26 @@ export class SendCoordinatorService {
             result.postIds.some(id => postIds.has(id));
         })) reject('AUTONOMOUS_EFFECT_RECONCILIATION_REQUIRED');
       }
+      // A reviewed legacy Reddit claim is an audit/pacing fact, not a claim
+      // on the new controlled intent. Clear it only with durable non-submission
+      // evidence while holding the same mode lock as the transition.
+      let clearReviewedRedditClaim = false;
+      if ((options.modeHandover || options.requireRedditPlanSchedulePending) && posts.length === 1 &&
+          first.claimedAt && !first.releaseId && !first.releaseURL && first.providerIdentifier === 'reddit' &&
+          hasLegacyRedditFlairResolution(first.settings)) {
+        const all = await tx.sendMutationReceipt.findMany({ where: { organizationId: org, operation: 'autonomous-side-effect' }, select: { result: true } });
+        const related = all.map(row => row.result as { status?: string; postIds?: string[]; postClaim?: { claimedAt?: string } } | null)
+          .filter(value => value?.postIds?.includes(first.id));
+        const reviews = await tx.sendMutationReceipt.findMany({ where: { organizationId: org, operation: 'browser-reddit-flair-recovery' }, select: { result: true } });
+        const reviewed = reviews.some(row => {
+          const result = row.result as { postId?: string; reviewConfirmed?: boolean; claimedAt?: string; routeRevision?: number } | null;
+          return result?.postId === first.id && result.reviewConfirmed === true &&
+            Date.parse(result.claimedAt ?? '') === first.claimedAt!.getTime();
+        });
+        const exact = related.length > 0 && related.every(value =>
+          Date.parse(value?.postClaim?.claimedAt ?? '') === first.claimedAt!.getTime());
+        clearReviewedRedditClaim = related.length > 0 && related.every(value => value?.status === 'NOT_SUBMITTED') && (reviewed || exact);
+      }
       const selection = options.selection;
       const receiptKey = {
         organizationId: org, userId: options.userId,
@@ -1432,7 +1452,7 @@ export class SendCoordinatorService {
             bindingSourceRevision: route?.bindingRevision ?? null,
             routeRevision,
             state: 'QUEUE',
-            ...(legacyRetry ? { error: null, claimedAt: null } : {}),
+            ...(legacyRetry ? { error: null, claimedAt: null } : clearReviewedRedditClaim ? { claimedAt: null } : {}),
             ...(options.publishNow && action === 'POST'
               ? { publishDate: requestedAt! }
               : options.publishDate ? { publishDate: options.publishDate } : {}),

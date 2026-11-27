@@ -38,7 +38,7 @@ function makePostStore(rows: any[], editableIntent?: Record<string, any>) {
     if (where.sendIntent && (row.sendIntentId !== editableIntent?.id ||
       editableIntent?.status !== where.sendIntent.status ||
       editableIntent?.action !== where.sendIntent.action ||
-      editableIntent?.context?.editableDraft !== true)) return false;
+      (where.sendIntent.status === 'CANCELLED' && editableIntent?.context?.editableDraft !== true))) return false;
     if (where.group && row.group !== where.group) return false;
     if ('deletedAt' in where && where.deletedAt === null && row.deletedAt !== null) return false;
     if (where.providerIdentifier && row.providerIdentifier !== where.providerIdentifier)
@@ -103,6 +103,8 @@ function makePostStore(rows: any[], editableIntent?: Record<string, any>) {
           return { count: 0 };
         editableIntent.contentRevision = data.contentRevision;
         editableIntent.revision += data.revision.increment;
+        if (data.status) editableIntent.status = data.status;
+        if (data.context) editableIntent.context = data.context;
         return { count: 1 };
       }),
     },
@@ -386,6 +388,15 @@ describe('asynchronous flair selection', () => {
     expect(posts.schedulePlanPosts).not.toHaveBeenCalled();
   });
 
+  it('preserves the legacy cache fence when a user edits or retargets the post', () => {
+    const previous = JSON.stringify({ redditLegacyFlairResolution: true,
+      subreddit: [{ value: { subreddit: 'old', title: 'Old', type: 'self' } }] });
+    for (const subreddit of ['old', 'new']) {
+      const next = JSON.stringify({ subreddit: [{ value: { subreddit, title: 'New', type: 'self' } }] });
+      expect(JSON.parse(prepareRedditPlanEdit(previous, next))).toMatchObject({ redditLegacyFlairResolution: true });
+    }
+  });
+
   it.each([['new-template', false], ['old-template', true]] as const)(
     'preserves a new explicit template on retarget and rejects a carried ID (%s)',
     (templateId, shouldRestage) => {
@@ -422,6 +433,57 @@ describe('asynchronous flair selection', () => {
     expect(written.subreddit).toEqual(settingsWithSelection.subreddit);
     expect(written.redditTargetPending).toBeUndefined();
     expect(openai.generateStructuredText).not.toHaveBeenCalled();
+    expect(posts.schedulePlanPosts).not.toHaveBeenCalled();
+  });
+
+  it('resolves a proven autonomous claim without erasing its original pacing timestamp', async () => {
+    const claimedAt = new Date('2026-09-30T10:00:00Z');
+    const currentSettings = JSON.stringify({ ...JSON.parse(settings()), redditLegacyFlairResolution: true,
+      subreddit: [{ value: { subreddit: 'claudeai', title: 'Saved title', type: 'self' } }] });
+    const { service, store } = makePostStore([anchor({ settings: currentSettings, state: 'QUEUE', claimedAt })]);
+    const [item] = await service.listPending(ORG);
+    expect(item).toBeDefined();
+    await expect(service.resolve(ORG, [{ postId: item.postId, pendingRevision: item.pendingRevision,
+      subreddit: 'claudeai', flairOptions: ['Discussion'], flairRequired: true }])).resolves.toMatchObject({ resolved: 1 });
+    expect(store.get(item.postId)).toMatchObject({ state: 'QUEUE', claimedAt,
+      publishDate: new Date('2026-10-01T10:00:00Z') });
+  });
+
+  it('keeps an autonomous queued root and schedule after optional Flair is observed', async () => {
+    const currentSettings = JSON.stringify({ ...JSON.parse(settings()), redditLegacyFlairResolution: true,
+      subreddit: [{ value: { subreddit: 'claudeai', title: 'Saved title', type: 'self' } }] });
+    const { service, store, openai, posts } = makePostStore([anchor({ settings: currentSettings, state: 'QUEUE' })]);
+    openai.generateStructuredText.mockResolvedValue({ data: { option: null } });
+    const [item] = await service.listPending(ORG);
+    await expect(service.resolve(ORG, [{ postId: item.postId, pendingRevision: item.pendingRevision,
+      subreddit: 'claudeai', flairOptions: ['Discussion'], flairRequired: false }]))
+      .resolves.toMatchObject({ resolved: 1 });
+    const row = store.get(item.postId);
+    expect(row).toMatchObject({ state: 'QUEUE', publishDate: new Date('2026-10-01T10:00:00.000Z') });
+    expect(JSON.parse(row.settings)).toMatchObject({ redditLegacyFlairResolution: true });
+    expect(readRedditTargetPending(row.settings)).toBeNull();
+    expect(posts.schedulePlanPosts).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('resolves an untouched controlled queued intent and preserves its schedule when selected=%s', async selected => {
+    const intent = { id: 'intent', organizationId: ORG, rootPostId: 'post-1', projectId: 'project-1',
+      platform: 'reddit', action: 'POST', activeExecutionId: null, hasConfirmedSegments: false,
+      status: 'QUEUED', context: {}, revision: 1, routeRevision: 2, contentRevision: 3 };
+    const currentSettings = JSON.stringify({ ...JSON.parse(settings()), redditLegacyFlairResolution: true,
+      subreddit: [{ value: { subreddit: 'claudeai', title: 'Saved title', type: 'self' } }] });
+    const { service, store, openai, posts } = makePostStore([anchor({
+      settings: currentSettings, state: 'QUEUE', sendIntentId: intent.id,
+      routeRevision: 2, contentRevision: 3, publishMethod: 'EXTENSION',
+    })], intent);
+    openai.generateStructuredText.mockResolvedValue({ data: { option: selected ? 0 : null } });
+    const [item] = await service.listPending(ORG);
+    await expect(service.resolve(ORG, [{ postId: item.postId, pendingRevision: item.pendingRevision,
+      subreddit: 'claudeai', flairOptions: ['Discussion'], flairRequired: true }]))
+      .resolves.toMatchObject({ resolved: 1 });
+    expect(store.get(item.postId)).toMatchObject({ state: selected ? 'QUEUE' : 'DRAFT', contentRevision: 4,
+      publishDate: new Date('2026-10-01T10:00:00.000Z') });
+    expect(intent).toMatchObject({ status: selected ? 'QUEUED' : 'CANCELLED', contentRevision: 4,
+      ...(selected ? {} : { context: { editableDraft: true } }) });
     expect(posts.schedulePlanPosts).not.toHaveBeenCalled();
   });
 

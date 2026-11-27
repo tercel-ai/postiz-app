@@ -74,6 +74,17 @@ export class SendModeController {
     return this.modes.settleBrowserWrite(org.id, user.id, id, body);
   }
 
+  @Get('/posts/:id/reddit-flair-recovery')
+  getBrowserRedditFlairRecovery(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User, @Param('id') id: string) {
+    return this.modes.getBrowserRedditFlairRecovery(org.id, user.id, id);
+  }
+
+  @Post('/posts/:id/reddit-flair-recovery')
+  resolveBrowserRedditFlairRecovery(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User,
+    @Param('id') id: string, @Body() body: BrowserReplyRecoveryDto) {
+    return this.modes.resolveBrowserRedditFlairRecovery(org.id, user.id, id, body);
+  }
+
   @Get('/replies/:id/browser-recovery')
   @ApiOperation({ summary: 'Inspect original-user non-submission proof for a historical reply' })
   getBrowserReplyRecovery(@GetOrgFromRequest() org: Organization, @GetUserFromRequest() user: User, @Param('id') id: string) {

@@ -112,6 +112,10 @@ function parseSettings(settings: string | null | undefined): Record<string, any>
   }
 }
 
+export function hasLegacyRedditFlairResolution(settings: string | null | undefined): boolean {
+  return parseSettings(settings)?.redditLegacyFlairResolution === true;
+}
+
 /** The parked marker on a post, or null when it carries none. */
 export function readRedditTargetPending(
   settings: string | null | undefined

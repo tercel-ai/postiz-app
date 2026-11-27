@@ -29,6 +29,11 @@ export class MarkExtensionPublishFailedDto {
   @MaxLength(2048)
   error?: string;
 
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  redditFlairRevision?: string;
+
   /**
    * Segments that DID publish before the failure, in publish order. An empty or
    * absent list means nothing went out (the classic total failure).

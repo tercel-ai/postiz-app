@@ -1,3 +1,4 @@
+import { legacyRedditFlairNeedsResolution, stageLegacyRedditFlairIn } from '../engage/reddit-plan-readiness';
 import { readPublishNowRequestedAt } from './send-dispatch';
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { Prisma, SendExecution } from '@prisma/client';
@@ -215,10 +216,19 @@ export async function claimControlledSend<T>(
           } });
           if (!session) { reason = 'VERIFIED_SESSION_UNAVAILABLE'; return null; }
           const claimabilityReason = await sends.claimabilityReasonIn(tx, auth.org, post, session, body.action, new Date());
-          if (claimabilityReason) {
+          if (claimabilityReason && claimabilityReason !== 'REDDIT_FLAIR_REQUIRED') {
             reason = claimabilityReason;
             return null;
           }
+          if (body.action === 'POST' && await stageLegacyRedditFlairIn(tx, post)) {
+            reason = 'REDDIT_TARGET_PENDING';
+            return null;
+          }
+          if (body.action === 'POST' && legacyRedditFlairNeedsResolution(post)) {
+            reason = 'REDDIT_FLAIR_RECOVERY_REQUIRED';
+            return null;
+          }
+          if (claimabilityReason) { reason = claimabilityReason; return null; }
           const intent = post.integrationId
             ? await tx.sendIntent.findUniqueOrThrow({ where: { id: post.sendIntentId! } })
             : await sends.bindCurrentActorIn(tx, auth.org, post.id, session, new Date());

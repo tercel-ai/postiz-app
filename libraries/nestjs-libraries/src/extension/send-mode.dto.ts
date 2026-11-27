@@ -104,6 +104,11 @@ export class BeginBrowserWriteDto extends BrowserWriteOwnerDto {
 
   @IsOptional()
   @IsString()
+  @Matches(/^[a-f0-9]{64}$/)
+  redditFlairRevision?: string;
+
+  @IsOptional()
+  @IsString()
   @Matches(/\S/)
   @MaxLength(128)
   postId?: string;

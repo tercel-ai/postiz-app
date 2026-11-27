@@ -66,6 +66,7 @@ export function memorySendDatabase() {
         if (op === 'equals') return expected === Prisma.AnyNull || expected === Prisma.DbNull || expected === Prisma.JsonNull
           ? actual == null : JSON.stringify(actual) === JSON.stringify(expected);
         if (op === 'startsWith') return typeof actual === 'string' && actual.startsWith(expected);
+        if (op === 'contains') return typeof actual === 'string' && actual.includes(expected);
         if (op === 'in') return expected.includes(actual);
         if (op === 'notIn') return !expected.includes(actual);
         if (op === 'not') return actual !== expected;

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PostsService } from '../posts.service';
+import { sendHash } from '../../../../extension/send-coordination.utils';
 
 // Smallest viable PostsService — markPublishFailedFromExtension touches the
 // repository (getPostById + changeState) and, once a partial thread has live
@@ -57,6 +58,20 @@ describe('PostsService.markPublishFailedFromExtension', () => {
       'ERROR',
       'HN rejected the submission'
     );
+  });
+
+  it('refuses an old failure callback after Reddit Flair recovery changed the content', async () => {
+    const settings = JSON.stringify({ redditLegacyFlairResolution: true, subreddit: [{ value: { subreddit: 'test', flairLabel: 'Discussion' } }] });
+    const { svc, repo } = makeService({ id: 'p1', state: 'QUEUE', providerIdentifier: 'reddit', settings });
+    expect(await svc.markPublishFailedFromExtension('org-1', 'p1', 'old failure')).toEqual({ ok: false, reason: 'stale-reddit-content' });
+    expect(repo.changeState).not.toHaveBeenCalled();
+  });
+
+  it('accepts the matching newer Reddit failure with a settings compare-and-swap', async () => {
+    const settings = JSON.stringify({ redditLegacyFlairResolution: true, subreddit: [{ value: { subreddit: 'test', flairLabel: 'Discussion' } }] });
+    const { svc, repo } = makeService({ id: 'p1', state: 'QUEUE', providerIdentifier: 'reddit', settings });
+    expect(await svc.markPublishFailedFromExtension('org-1', 'p1', 'new failure', undefined, sendHash(settings))).toEqual({ ok: true });
+    expect(repo.changeState).toHaveBeenCalledWith('p1', 'ERROR', 'new failure', undefined, settings, 'QUEUE');
   });
 
   it('never touches a post that already reached PUBLISHED', async () => {

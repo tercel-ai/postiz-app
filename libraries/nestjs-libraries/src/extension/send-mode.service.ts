@@ -1,3 +1,5 @@
+import { hasLegacyRedditFlairResolution } from '../engage/reddit-pending-target';
+import { legacyRedditFlairNeedsResolution, redditPlanScheduleBlock, stageLegacyRedditFlairIn } from '../engage/reddit-plan-readiness';
 import { preserveDispatchTarget } from './send-dispatch';
 import {
   BadRequestException,
@@ -66,6 +68,7 @@ interface AutonomousEffectResult {
   recurring?: boolean;
   confirmedAt?: string;
   legacyClaim?: { releaseId: string; claimedAt: string };
+  postClaim?: { releaseId: string; claimedAt: string };
   quotaWriteKind?: 'WRITE' | 'REPLY';
   quotaUnits?: number;
 }
@@ -1534,6 +1537,11 @@ export class SendModeService {
       !value.legacyClaim.releaseId || value.legacyClaim.releaseId.length > 2048 ||
       typeof value.legacyClaim.claimedAt !== 'string' || !Number.isFinite(Date.parse(value.legacyClaim.claimedAt))))
       throw new ServiceUnavailableException('AUTONOMOUS_EFFECT_RECORD_INVALID');
+    if (value.postClaim !== undefined && (value.source !== 'BROWSER' || value.action !== 'POST' ||
+      value.postIds?.length !== 1 || typeof value.postClaim?.releaseId !== 'string' ||
+      !value.postClaim.releaseId || value.postClaim.releaseId.length > 2048 ||
+      typeof value.postClaim.claimedAt !== 'string' || !Number.isFinite(Date.parse(value.postClaim.claimedAt))))
+      throw new ServiceUnavailableException('AUTONOMOUS_EFFECT_RECORD_INVALID');
     return value;
   }
 
@@ -1685,6 +1693,9 @@ export class SendModeService {
           parentPostId: true,
           intervalInDays: true,
           publishDate: true,
+          providerIdentifier: true,
+          settings: true,
+          operationPlanId: true,
         } as const;
         const posts = await tx.post.findMany({
           where: {
@@ -1700,6 +1711,7 @@ export class SendModeService {
             (post) =>
               post.state !== 'QUEUE' ||
               post.sendIntentId ||
+              (!!post.operationPlanId && !!redditPlanScheduleBlock(post)) ||
               !isLegacyExecution(post.executionProtocol)
           )
         )
@@ -2018,8 +2030,9 @@ export class SendModeService {
       postId: body.postId,
       sentReplyId: body.sentReplyId,
       contentHash: body.contentHash,
+      ...(body.redditFlairRevision ? { redditFlairRevision: body.redditFlairRevision } : {}),
     });
-    return sendTransaction(this.db, async (tx) => {
+    const admission = await sendTransaction(this.db, async (tx) => {
       await this.memberIn(tx, organizationId, userId);
       const state = await this.lockIn(tx, organizationId);
       const prior = await tx.sendMutationReceipt.findUnique({
@@ -2077,6 +2090,8 @@ export class SendModeService {
               id: true,
               providerIdentifier: true,
               integrationId: true,
+              projectId: true,
+              parentPostId: true,
               state: true,
               sendIntentId: true,
               executionProtocol: true,
@@ -2088,10 +2103,13 @@ export class SendModeService {
               sendTarget: true,
               contentUnitId: true,
               publishMethod: true,
+              settings: true,
+              operationPlanId: true,
             },
           })
         : null;
       let retryableError = false;
+      let retryMatchesClaim = false;
       if (post?.state === 'ERROR' && !post.releaseURL &&
           state.mode === 'AUTONOMOUS' && state.autonomousAllowed && !state.transition) {
         // A queue failure callback records ERROR even when the browser proved
@@ -2106,7 +2124,35 @@ export class SendModeService {
           return result.source === 'BROWSER' && result.browserUserId === userId &&
             result.status === 'NOT_SUBMITTED' && result.postIds?.includes(post.id);
         });
+        retryMatchesClaim = receipts.some(receipt => {
+          const result = this.effectResult(receipt.result);
+          return result.source === 'BROWSER' && result.browserUserId === userId &&
+            result.platform === 'reddit' && result.action === 'POST' && result.status === 'NOT_SUBMITTED' &&
+            result.postIds?.length === 1 && result.postIds[0] === post.id && !!post.claimedAt &&
+            !!result.postClaim && Date.parse(result.postClaim.claimedAt) === post.claimedAt.getTime() &&
+            (!post.releaseId || post.releaseId === result.postClaim.releaseId);
+        });
       }
+      if (post && !body.sentReplyId && post.operationPlanId) {
+        const flairBlock = redditPlanScheduleBlock(post);
+        if (post.state === 'DRAFT' && flairBlock === 'REDDIT_FLAIR_REQUIRED')
+          throw new ConflictException('REDDIT_FLAIR_REQUIRED_DRAFT');
+        if (flairBlock || legacyRedditFlairNeedsResolution(post.state === 'ERROR' ? { ...post, state: 'QUEUE' } : post)) {
+          if (platform === 'reddit' && retryableError && retryMatchesClaim && post.state === 'ERROR' &&
+              !post.sendIntentId && isLegacyExecution(post.executionProtocol)) {
+            const original = await tx.post.findFirst({ where: { id: post.id, organizationId, deletedAt: null } });
+            if (original && await stageLegacyRedditFlairIn(tx, original, userId))
+              return { flairStaged: true as const };
+          }
+          if (platform === 'reddit' && post.state === 'ERROR' &&
+              legacyRedditFlairNeedsResolution({ ...post, state: 'QUEUE' }))
+            throw new ConflictException('REDDIT_FLAIR_REVIEW_REQUIRED');
+          throw new ConflictException('REDDIT_FLAIR_PENDING');
+        }
+      }
+      if (post && !body.sentReplyId && post.providerIdentifier === 'reddit' &&
+          hasLegacyRedditFlairResolution(post.settings) && body.redditFlairRevision !== sendHash(post.settings))
+        throw new ConflictException('REDDIT_FLAIR_CONTENT_CHANGED');
       if (
         storedPostId &&
         (!post ||
@@ -2199,7 +2245,7 @@ export class SendModeService {
         action: body.sentReplyId ? 'COMMENT' : 'POST',
         integrationId,
         ...(post ? { postIds: [post.id], occurrenceKey, recurring } : {}),
-        ...(body.sentReplyId && post?.releaseId && post.claimedAt ? { legacyClaim: {
+        ...(post?.releaseId && post.claimedAt && (body.sentReplyId || (post.operationPlanId && platform === 'reddit')) ? { [body.sentReplyId ? 'legacyClaim' : 'postClaim']: {
           releaseId: post.releaseId, claimedAt: new Date(post.claimedAt).toISOString(),
         } } : {}),
       };
@@ -2222,6 +2268,10 @@ export class SendModeService {
         userId,
       };
     });
+    // Throw only after committing the pending marker; throwing inside the
+    // transaction would roll back the work the existing resolver needs to see.
+    if ('flairStaged' in admission) throw new ConflictException('REDDIT_FLAIR_PENDING');
+    return admission;
   }
 
   private async releaseUnsentReplyClaimIn(
@@ -2406,6 +2456,80 @@ export class SendModeService {
     // from the original outcome is suitable for releaseId.
     return typeof observed.commentId === 'string' && /^\S{1,2048}$/.test(observed.commentId)
       ? { releaseId: observed.commentId } : {};
+  }
+
+  private async redditFlairReviewIn(tx: Prisma.TransactionClient, organizationId: string, userId: string, postId: string) {
+    const post = await tx.post.findFirst({ where: { id: postId, organizationId, deletedAt: null } });
+    if (!post) throw new BadRequestException('LEGACY_POST_NOT_FOUND');
+    const state = await this.lockIn(tx, organizationId);
+    const setting = await tx.settings.findUnique({ where: { key: organizationSendModeKey(organizationId) } });
+    const captured = this.parseOrganization(setting?.value).legacyDrain;
+    const capturedPost = !!captured?.eligiblePostIds.includes(postId);
+    const rows = await tx.post.findMany({ where: { organizationId, group: post.group, deletedAt: null } });
+    const child = await tx.post.findFirst({ where: { organizationId, parentPostId: post.id } });
+    const receipts = (await this.autonomousRecordsIn(tx, organizationId))
+      .filter(({ result }) => result.postIds?.includes(postId));
+    const canReview = ((state.mode === 'AUTONOMOUS' && state.autonomousAllowed) || state.mode === 'CONTROLLED') && !state.transition &&
+      (!capturedPost || captured!.eligiblePostOccurrences[postId] === post.publishDate.toISOString()) &&
+      !post.sendIntentId && isLegacyExecution(post.executionProtocol) && !!post.claimedAt &&
+      (!!post.releaseId || post.state === 'ERROR') &&
+      legacyRedditFlairNeedsResolution(post.state === 'ERROR' ? { ...post, state: 'QUEUE' } : post) && rows.length === 1 && !child && receipts.length > 0 &&
+      receipts.every(({ row, result }) => row.userId === userId && result.browserUserId === userId &&
+        result.source === 'BROWSER' && result.platform === 'reddit' && result.action === 'POST' &&
+        result.status === 'NOT_SUBMITTED' && result.postIds?.length === 1 && result.postIds[0] === postId &&
+        (!result.postClaim || (!post.releaseId || result.postClaim.releaseId === post.releaseId) &&
+          Date.parse(result.postClaim.claimedAt) === post.claimedAt!.getTime()));
+    return { post, canReview, setting, captured, capturedPost, mode: state.mode, recoveryRevision: sendHash({ post, rows, child, receipts, mode: state.mode, transition: state.transition, setting: setting?.value }) };
+  }
+
+  async getBrowserRedditFlairRecovery(organizationId: string, userId: string, postId: string) {
+    return sendTransaction(this.db, async tx => {
+      await this.memberIn(tx, organizationId, userId);
+      const review = await this.redditFlairReviewIn(tx, organizationId, userId, postId);
+      return { organizationId, userId, postId, canReview: review.canReview, recoveryRevision: review.recoveryRevision };
+    });
+  }
+
+  async resolveBrowserRedditFlairRecovery(organizationId: string, userId: string, postId: string, body: BrowserReplyRecoveryDto) {
+    this.browserOwner(organizationId, userId, body);
+    if (!body.requestId?.trim() || body.requestId.length > 128 ||
+        !/^[a-f0-9]{64}$/.test(body.expectedRecoveryRevision ?? '') || body.reviewConfirmed !== true)
+      throw new BadRequestException('INVALID_LEGACY_POST_RECOVERY');
+    return sendTransaction(this.db, async tx => {
+      await this.memberIn(tx, organizationId, userId);
+      await this.lockIn(tx, organizationId, { write: true });
+      const key = { organizationId, userId, operation: 'browser-reddit-flair-recovery', requestId: body.requestId };
+      const requestHash = sendHash({ postId, body });
+      const prior = await tx.sendMutationReceipt.findUnique({ where: { organizationId_userId_operation_requestId: key } });
+      if (prior) {
+        if (prior.requestHash !== requestHash) throw new ConflictException('REQUEST_ID_CONFLICT');
+        return prior.result;
+      }
+      const review = await this.redditFlairReviewIn(tx, organizationId, userId, postId);
+      if (review.recoveryRevision !== body.expectedRecoveryRevision) throw new ConflictException('LEGACY_POST_RECOVERY_CHANGED');
+      if (!review.canReview || !await stageLegacyRedditFlairIn(tx, review.post, userId))
+        throw new ConflictException('LEGACY_POST_RECOVERY_UNSAFE');
+      if (review.mode === 'CONTROLLED' && review.setting) {
+        const value = review.setting.value as Prisma.JsonObject;
+        const occurrences = { ...(review.captured?.eligiblePostOccurrences ?? {}) };
+        delete occurrences[postId];
+        const reallocation = this.parseReallocation(value) ?? (review.post.state === 'QUEUE' ? {
+          version: 1 as const, requestedAt: new Date().toISOString(), requestedByUserId: userId, initialCount: 1, issues: [],
+        } : null);
+        const changed = await tx.settings.updateMany({ where: { key: organizationSendModeKey(organizationId),
+          value: { equals: review.setting.value as Prisma.InputJsonValue } }, data: { value: sendJson({ ...value,
+            ...(review.capturedPost ? { legacyDrain: { ...review.captured,
+              eligiblePostIds: review.captured!.eligiblePostIds.filter(id => id !== postId), eligiblePostOccurrences: occurrences } } : {}),
+            ...(reallocation ? { reallocation } : {}),
+          }) } });
+        if (changed.count !== 1) throw new ConflictException('LEGACY_POST_RECOVERY_CHANGED');
+      }
+      const result = { resolved: true, organizationId, userId, postId, reviewConfirmed: true, recoveryRevision: review.recoveryRevision,
+        claimFingerprint: sendHash({ releaseId: review.post.releaseId, claimedAt: review.post.claimedAt }),
+        claimedAt: review.post.claimedAt?.toISOString() ?? null, routeRevision: review.post.routeRevision };
+      await tx.sendMutationReceipt.create({ data: { ...key, requestHash, result: sendJson(result) } });
+      return result;
+    });
   }
 
   private async legacyPostRecoveryIn(tx: Prisma.TransactionClient, organizationId: string, postId: string) {

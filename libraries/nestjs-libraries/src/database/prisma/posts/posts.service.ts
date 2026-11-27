@@ -2,7 +2,7 @@ import type { UpdateScheduledReplyDto } from '../../../engage/dtos/engage.dto';
 import { readPublishNowRequestedAt } from '../../../extension/send-dispatch';
 import { isCurrentSessionHandover } from '../../../extension/send-mode-handover';
 import { redditPlanScheduleBlock } from '../../../engage/reddit-plan-readiness';
-import { hasRedditPlanSchedulePending } from '../../../engage/reddit-pending-target';
+import { hasLegacyRedditFlairResolution, hasRedditPlanSchedulePending } from '../../../engage/reddit-pending-target';
 import { ProjectInactiveException } from '@gitroom/nestjs-libraries/projects/project.exception';
 import { SendModeService } from '../../../extension/send-mode.service';
 import { isAccountBoundSendingEnabled } from '@gitroom/nestjs-libraries/extension/account-bound-sending.config';
@@ -717,13 +717,16 @@ export class PostsService {
     orgId: string,
     id: string,
     error?: string,
-    segments?: PublishedSegment[]
+    segments?: PublishedSegment[],
+    redditFlairRevision?: string
   ): Promise<{ ok: boolean; reason?: string; partial?: boolean; published?: number }> {
     const post = await this._postRepository.getPostById(id, orgId);
     if (!post) return { ok: false, reason: 'not-found' };
     if (!isLegacyExecution(post.executionProtocol)) return { ok: false, reason: 'account-bound-protocol-required' };
     if (post.state === 'PUBLISHED')
       return { ok: false, reason: 'already-published' };
+    if (hasLegacyRedditFlairResolution(post.settings) && redditFlairRevision !== sendHash(post.settings) && !segments?.length)
+      return { ok: false, reason: 'stale-reddit-content' };
     if (post.intervalInDays && post.intervalInDays > 0 && !post.parentPostId) {
       return { ok: false, reason: 'blocked-recurring-original' };
     }
@@ -749,7 +752,9 @@ export class PostsService {
         publishedAt
       );
     } else {
-      await this._postRepository.changeState(id, 'ERROR', reason);
+      if (hasLegacyRedditFlairResolution(post.settings))
+        await this._postRepository.changeState(id, 'ERROR', reason, undefined, post.settings, post.state);
+      else await this._postRepository.changeState(id, 'ERROR', reason);
     }
 
     // Children are never re-offered on their own (the due query is roots-only),
@@ -2840,6 +2845,8 @@ export class PostsService {
         id: p.id,
         publishNowRequestedAt: readPublishNowRequestedAt(p.sendTarget)?.toISOString() ?? null,
         platform,
+        ...(platform === 'reddit' && hasLegacyRedditFlairResolution(p.settings)
+          ? { redditFlairRevision: sendHash(p.settings) } : {}),
         // Post.title is the canonical field and createOrUpdatePost now
         // persists it, but rows written before that (and any caller that
         // shaped settings by hand) only carry the title inside settings —

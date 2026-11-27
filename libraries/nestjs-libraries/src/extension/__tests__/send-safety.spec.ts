@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupSend, sendNow as now } from './support/send-fixture';
 import { canonicalSendAccount, sendHash } from '../send-coordination.utils';
+import { canChangePostAccount } from '../send-account-change';
 import {
   controlledSubmit,
   withControlledSubmit,
@@ -55,6 +56,28 @@ describe('execution safety across channels and recoveries', () => {
     expect(db.rows('post')[0].state).toBe('QUEUE');
     expect(db.rows('sendExecution')).toEqual([]);
     expect(db.rows('sendQuotaReservation')).toEqual([]);
+  });
+
+  it('clears a reviewed Reddit claim only when transferring into controlled sending', async () => {
+    const { service, db } = setupSend();
+    const claimedAt = new Date('2026-10-14T10:00:00Z');
+    db.seed('post', { id: 'legacy-reddit', organizationId: 'org', projectId: 'project', operationPlanId: 'plan',
+      parentPostId: null, group: 'legacy-reddit', providerIdentifier: 'reddit', integrationId: 'account',
+      accountSelectionMode: 'EXPLICIT', routeRevision: 0, contentRevision: 1, state: 'DRAFT',
+      content: 'hello', image: '[]', settings: JSON.stringify({ redditLegacyFlairResolution: true,
+        redditPlanSchedulePending: true, subreddit: [{ value: { subreddit: 'test', title: 'Title', flairLabel: 'Discussion' } }] }),
+      publishDate: now, releaseId: null, releaseURL: null, claimedAt, deletedAt: null, publishMethod: 'EXTENSION' });
+    db.rows('integration')[0].providerIdentifier = 'reddit';
+    db.seed('sendMutationReceipt', { organizationId: 'org', userId: 'user', operation: 'autonomous-side-effect',
+      requestId: 'old', result: { source: 'BROWSER', platform: 'reddit', browserUserId: 'user', integrationId: 'browser:user:reddit', action: 'POST', occurrenceKey: 'single', recurring: false, revision: 2, status: 'NOT_SUBMITTED', postIds: ['legacy-reddit'] } });
+    db.seed('sendMutationReceipt', { organizationId: 'org', userId: 'user', operation: 'browser-reddit-flair-recovery',
+      requestId: 'review', result: { postId: 'legacy-reddit', reviewConfirmed: true, claimedAt: claimedAt.toISOString(), routeRevision: 99 } });
+    await service.enqueue('org', 'legacy-reddit', { userId: 'user', origin: 'AUTOMATION', requireRedditPlanSchedulePending: true, now });
+    const post = db.rows('post')[0], intent = db.rows('sendIntent')[0];
+    expect(post).toMatchObject({ state: 'QUEUE', claimedAt: null, executionProtocol: 'ACCOUNT_BOUND_V1' });
+    expect(canChangePostAccount(post, intent, [], [])).toBe(true);
+    await expect(service.rescheduleQueuedPost('org', post.id, 'user', new Date('2026-10-16T00:00:00Z'),
+      post.routeRevision, post.contentRevision)).resolves.toBeDefined();
   });
 
   it('allows failover only for an expired reservation with no permit', async () => {

@@ -147,6 +147,80 @@ describe('claimDueExtensionPublishPosts (lease)', () => {
     expect(res).toEqual([{ id: 'p1', content: 'a', settings: '{}' }]);
   });
 
+  it('stages an untouched Reddit root and still claims the next platform in the same batch', async () => {
+    const now = new Date('2026-07-27T00:10:00Z');
+    const reddit: any = { id: 'reddit', organizationId: 'org-1', group: 'g', parentPostId: null,
+      operationPlanId: 'plan', projectId: 'project', providerIdentifier: 'reddit', state: 'QUEUE',
+      sendIntentId: null, claimedAt: null, releaseId: null, releaseURL: null, routeRevision: 0, contentRevision: 0,
+      settings: JSON.stringify({ subreddit: [{ value: { subreddit: 'test', title: 'Title', type: 'self' } }] }) };
+    const x = { id: 'x', organizationId: 'org-1', providerIdentifier: 'x' };
+    const findMany = vi.fn().mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 'reddit', sendTarget: null, publishDate: now }])
+      .mockResolvedValueOnce([reddit]).mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 'x', sendTarget: null, publishDate: now }])
+      .mockResolvedValueOnce([x]);
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const tx: any = { post: { findMany, updateMany,
+      findFirst: vi.fn(async ({ where }: any) => where.id === 'reddit' ? reddit : x) },
+      sendMutationReceipt: { findMany: vi.fn(async () => []) } };
+    const result = await createRepo({}).claimDueExtensionPublishPosts('org-1', ['reddit', 'x'], now, 1,
+      'lease', new Date('2026-07-27T00:00:00Z'), [], tx);
+    expect(result).toEqual([x]);
+    expect(JSON.parse(updateMany.mock.calls[0][0].data.settings).redditTargetPending.reason).toBe('flair-pending');
+    expect(updateMany.mock.calls[1][0].data).toEqual({ releaseId: 'lease', claimedAt: now });
+  });
+
+  it('skips an unproven old Reddit claim and leases another platform without replaying it', async () => {
+    const now = new Date('2026-07-27T00:10:00Z');
+    const reddit: any = { id: 'reddit', organizationId: 'org-1', group: 'g', parentPostId: null,
+      operationPlanId: 'plan', projectId: 'project', providerIdentifier: 'reddit', state: 'QUEUE',
+      sendIntentId: null, claimedAt: new Date('2026-07-26T00:00:00Z'), releaseId: 'old-lease',
+      releaseURL: null, routeRevision: 0, contentRevision: 0,
+      settings: JSON.stringify({ subreddit: [{ value: { subreddit: 'test', title: 'Title', type: 'self' } }] }) };
+    const x = { id: 'x', organizationId: 'org-1', providerIdentifier: 'x' };
+    const findMany = vi.fn().mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 'reddit', sendTarget: null, publishDate: now }])
+      .mockResolvedValueOnce([reddit]).mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 'x', sendTarget: null, publishDate: now }]).mockResolvedValueOnce([x]);
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const tx: any = { post: { findMany, updateMany,
+      findFirst: vi.fn(async ({ where }: any) => where.id === 'reddit' ? reddit : x) },
+      sendMutationReceipt: { findMany: vi.fn(async () => []) } };
+    expect(await createRepo({}).claimDueExtensionPublishPosts('org-1', ['reddit', 'x'], now, 1,
+      'new-lease', new Date('2026-07-27T00:00:00Z'), [], tx)).toEqual([x]);
+    expect(updateMany).toHaveBeenCalledTimes(1);
+    expect(updateMany.mock.calls[0][0].where.AND).toContainEqual({ id: 'x' });
+  });
+
+  it('gives legacy accountless non-Reddit posts a chance after a full blocked Reddit scan', async () => {
+    const now = new Date('2026-07-27T00:10:00Z');
+    const findMany = vi.fn();
+    const posts = new Map<string, any>();
+    for (let i = 0; i < 10; i++) {
+      const id = `reddit-${i}`;
+      const post = { id, organizationId: 'org-1', group: id, parentPostId: null, operationPlanId: 'plan',
+        projectId: 'project', providerIdentifier: 'reddit', state: 'QUEUE', sendIntentId: null,
+        claimedAt: new Date('2026-07-26T00:00:00Z'), releaseId: 'old-lease', releaseURL: null,
+        routeRevision: 0, contentRevision: 0, settings: JSON.stringify({ subreddit: [{ value: {
+          subreddit: 'test', title: 'Title', type: 'self' } }] }) };
+      posts.set(id, post);
+      findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([{ id, sendTarget: null, publishDate: now }]).mockResolvedValueOnce([post]);
+    }
+    const x = { id: 'x', organizationId: 'org-1', providerIdentifier: null, integrationId: null,
+      settings: JSON.stringify({ __type: 'x' }) };
+    posts.set('x', x);
+    findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'x', sendTarget: null, publishDate: now }]).mockResolvedValueOnce([x]);
+    const tx: any = { post: { findMany, findFirst: vi.fn(async ({ where }: any) => posts.get(where.id)),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }) }, sendMutationReceipt: { findMany: vi.fn(async () => []) } };
+    expect(await createRepo({}).claimDueExtensionPublishPosts('org-1', ['reddit', 'x'], now, 1,
+      'lease', new Date('2026-07-27T00:00:00Z'), [], tx)).toEqual([x]);
+    expect(findMany.mock.calls[30][0].where.AND).toContainEqual({ OR: [
+      { providerIdentifier: { not: 'reddit' } },
+      { providerIdentifier: null, integration: { providerIdentifier: { not: 'reddit' } } },
+      { providerIdentifier: null, integrationId: null },
+    ] });
+  });
+
   it('claims nothing (no update / no read-back) when there are no candidates', async () => {
     const findMany = vi.fn().mockResolvedValue([]);
     const updateMany = vi.fn();

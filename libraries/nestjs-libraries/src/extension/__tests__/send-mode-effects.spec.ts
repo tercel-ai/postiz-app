@@ -35,6 +35,51 @@ beforeEach(() => vi.stubEnv('ACCOUNT_BOUND_SENDING_ENABLED', 'true'));
 afterEach(() => vi.unstubAllEnvs());
 
 describe('durable autonomous side effects', () => {
+  it('does not admit a cached Reddit post while its plan target is pending', async () => {
+    const { db, service } = setup();
+    db.seed('post', {
+      id: 'pending-reddit', organizationId: 'org', state: 'QUEUE',
+      executionProtocol: null, sendIntentId: null, group: 'reddit-group',
+      parentPostId: null, providerIdentifier: 'reddit', operationPlanId: 'plan',
+      settings: JSON.stringify({ redditTargetPending: { reason: 'flair-pending' } }),
+    });
+    const work = vi.fn();
+    await expect(service.autonomousEffect('org', 'pending-reddit', {
+      integrationId: 'account', action: 'POST', postIds: ['pending-reddit'],
+    }, work)).rejects.toThrow('AUTONOMOUS_EFFECT_CONTENT_CHANGED');
+    expect(work).not.toHaveBeenCalled();
+  });
+
+  it('does not admit a Reddit plan post with a known required but missing Flair', async () => {
+    const { db, service } = setup();
+    db.seed('post', {
+      id: 'missing-flair', organizationId: 'org', state: 'QUEUE',
+      executionProtocol: null, sendIntentId: null, group: 'reddit-group',
+      parentPostId: null, providerIdentifier: 'reddit', operationPlanId: 'plan',
+      settings: JSON.stringify({ subreddit: [{ value: { subreddit: 'test', flairRequired: true } }] }),
+    });
+    const work = vi.fn();
+    await expect(service.autonomousEffect('org', 'missing-flair', {
+      integrationId: 'account', action: 'POST', postIds: ['missing-flair'],
+    }, work)).rejects.toThrow('AUTONOMOUS_EFFECT_CONTENT_CHANGED');
+    expect(work).not.toHaveBeenCalled();
+  });
+
+  it('admits other platforms even if their settings contain a Reddit pending marker', async () => {
+    const { db, service } = setup();
+    db.seed('post', {
+      id: 'other-post', organizationId: 'org', state: 'QUEUE',
+      executionProtocol: null, sendIntentId: null, group: 'other-group',
+      parentPostId: null, providerIdentifier: 'linkedin',
+      settings: JSON.stringify({ redditTargetPending: { reason: 'flair-pending' } }),
+    });
+    const work = vi.fn().mockResolvedValue([{ postId: 'remote-post' }]);
+    await service.autonomousEffect('org', 'other-post', {
+      integrationId: 'account', action: 'POST', postIds: ['other-post'],
+    }, work);
+    expect(work).toHaveBeenCalledTimes(1);
+  });
+
   it.each([false, true])('follows the stored parent chain past unrelated same-group roots (recurring=%s)', async (recurring) => {
     const { db, service } = setup();
     const date = '2026-10-20T00:00:00.000Z';

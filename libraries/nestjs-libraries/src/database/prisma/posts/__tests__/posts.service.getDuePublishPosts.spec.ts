@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PostsService } from '../posts.service';
+import { sendHash } from '../../../../extension/send-coordination.utils';
 
 // Smallest viable PostsService — getDuePublishPosts only touches the
 // repository (claim), media resolution (updateMedia → mediaService) and the
@@ -355,6 +356,16 @@ describe('PostsService.getDuePublishPosts', () => {
     const { due } = await svc.getDuePublishPosts('org-1', 10);
 
     expect(due[0].flairLabel).toBe('Discussion');
+  });
+
+  it('forwards the resolved legacy Flair revision for browser admission', async () => {
+    const settings = JSON.stringify({ redditLegacyFlairResolution: true, subreddit: [{ value: {
+      subreddit: 'test', title: 'Title', flairLabel: 'Discussion', flairRequired: true,
+    } }] });
+    const { svc } = makeService({ rows: [{ id: 'post', content: 'body', image: '[]', settings,
+      title: 'Title', publishDate: new Date('2026-07-01T00:00:00Z'), providerIdentifier: 'reddit', integration: null }] });
+    const { due } = await svc.getDuePublishPosts('org-1');
+    expect(due[0]).toMatchObject({ redditFlairRevision: sendHash(settings), flairLabel: 'Discussion', flairRequired: true });
   });
 
   it('omits flairLabel entirely when the plan proposed none', async () => {

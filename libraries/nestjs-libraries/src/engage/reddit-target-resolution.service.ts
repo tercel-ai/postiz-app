@@ -22,6 +22,7 @@ import {
   applyResolvedRedditTarget,
   clearRedditTargetPending,
   hasSavedRedditFlairSelection,
+  hasLegacyRedditFlairResolution,
   markRedditPlanSchedulePending,
   readRedditTargetPending,
   readSavedRedditSubreddit,
@@ -93,12 +94,19 @@ type ParkedPost = Prisma.PostGetPayload<{ select: typeof postSelect }>;
 // Explicitly withdrawn controlled drafts retain their original intent and audit
 // records. Admit them to lookups only, never to automatic scheduling.
 function resolvableRedditPostWhere(organizationId: string): Prisma.PostWhereInput {
-  const { sendIntentId, ...where } = unresolvedRedditPostWhere(organizationId);
+  const { sendIntentId, claimedAt, ...where } = unresolvedRedditPostWhere(organizationId);
   return {
     ...where,
     OR: [
-      { sendIntentId },
+      { sendIntentId, OR: [{ claimedAt }, { settings: { contains: '"redditLegacyFlairResolution"' } }] },
       {
+        claimedAt,
+        state: 'QUEUE', operationPlanId: { not: null },
+        sendIntent: { platform: 'reddit', action: 'POST', status: 'QUEUED',
+          activeExecutionId: null, hasConfirmedSegments: false },
+      },
+      {
+        claimedAt,
         state: 'DRAFT',
         operationPlanId: { not: null },
         sendIntent: {
@@ -260,7 +268,8 @@ export class RedditTargetResolutionService {
     const intent = await tx.sendIntent.findFirst({
       where: {
         id: root.sendIntentId, organizationId: root.organizationId, rootPostId: root.id,
-        projectId: root.projectId!, platform: 'reddit', status: 'CANCELLED', activeExecutionId: null,
+        projectId: root.projectId!, platform: 'reddit',
+        status: root.state === 'QUEUE' && hasLegacyRedditFlairResolution(root.settings) ? 'QUEUED' : 'CANCELLED', activeExecutionId: null,
       },
     });
     if (!intent) throw new StaleRedditTarget();
@@ -309,9 +318,9 @@ export class RedditTargetResolutionService {
     const snapshots = siblings.map((row) => ({ row, pending: readRedditTargetPending(row.settings) }));
     if (snapshots.some(({ row, pending: marker }) => {
       if (!marker || !['DRAFT', 'QUEUE'].includes(row.state) || row.sendIntentId !== post.sendIntentId ||
-          row.claimedAt || row.releaseId || row.releaseURL ||
+          (row.claimedAt && (row.sendIntentId || !hasLegacyRedditFlairResolution(row.settings))) || row.releaseId || row.releaseURL ||
           row.operationPlanId !== post.operationPlanId || row.projectId !== post.projectId ||
-          (row.sendIntentId && (row.state !== 'DRAFT' || row.routeRevision !== post.routeRevision ||
+          (row.sendIntentId && ((row.state !== 'DRAFT' && !(row.state === 'QUEUE' && hasLegacyRedditFlairResolution(row.settings))) || row.routeRevision !== post.routeRevision ||
             row.contentRevision !== post.contentRevision))) return true;
       // Older editors could preserve the fixed marker after replacing the saved
       // community. A fresh poll of that snapshot still cannot undo the edit.
@@ -374,6 +383,8 @@ export class RedditTargetResolutionService {
     const awaitingObservation = draftOnly && (
       !required || modelUnavailable || (input.flairOptions === null && options === undefined)
     );
+    const holdQueued = post.state === 'QUEUE' && hasLegacyRedditFlairResolution(post.settings) && awaitingObservation;
+    const cancelQueued = !!post.sendIntentId && post.state === 'QUEUE' && draftOnly && !holdQueued;
     const scheduleReady = !post.sendIntentId && !hasSavedSelection && !input.unresolvable &&
       !draftOnly && post.state === 'DRAFT' && !!post.operationPlanId && !!post.projectId;
     await sendTransaction(this._transaction.model, async (tx) => {
@@ -420,6 +431,7 @@ export class RedditTargetResolutionService {
             group: row.group,
             state: row.state,
             sendIntentId: row.sendIntentId,
+            claimedAt: row.claimedAt,
             routeRevision: row.routeRevision,
             contentRevision: row.contentRevision,
             settings: row.settings,
@@ -427,7 +439,7 @@ export class RedditTargetResolutionService {
           },
           data: {
             settings,
-            ...(input.unresolvable && !hasSavedSelection ? { deletedAt: new Date() } : draftOnly ? { state: 'DRAFT' } : {}),
+            ...(input.unresolvable && !hasSavedSelection ? { deletedAt: new Date() } : draftOnly && !holdQueued ? { state: 'DRAFT' } : {}),
             ...((intent ? intentContentChanged : contentChanged) ? { contentRevision: { increment: 1 } } : {}),
             ...(awaitingObservation ? { updatedAt: new Date() } : {}),
           },
@@ -437,10 +449,11 @@ export class RedditTargetResolutionService {
       if (intent && intentContentChanged) {
         const applied = await tx.sendIntent.updateMany({
           where: {
-            id: intent.id, organizationId, revision: intent.revision, status: 'CANCELLED',
+            id: intent.id, organizationId, revision: intent.revision, status: intent.status,
             activeExecutionId: null, routeRevision: intent.routeRevision, contentRevision: intent.contentRevision,
           },
-          data: { revision: { increment: 1 }, contentRevision: intent.contentRevision + 1 },
+          data: { revision: { increment: 1 }, contentRevision: intent.contentRevision + 1,
+            ...(cancelQueued ? { status: 'CANCELLED', context: { ...((intent.context as Record<string, any> | null) ?? {}), editableDraft: true } } : {}) },
         });
         if (applied.count !== 1) throw new StaleRedditTarget();
       }

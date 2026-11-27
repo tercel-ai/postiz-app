@@ -13,7 +13,7 @@ import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-
 import { LocatePostInListDto } from '@gitroom/nestjs-libraries/dtos/posts/locate.post-in-list.dto';
 import { titleFromSettings } from '@gitroom/nestjs-libraries/database/prisma/posts/settings-title';
 import { clearRedditPlanSchedulePending, hasRedditPlanSchedulePending, REDDIT_TARGET_PENDING_KEY } from '@gitroom/nestjs-libraries/engage/reddit-pending-target';
-import { prepareRedditPlanEdit, redditPlanScheduleBlock } from '@gitroom/nestjs-libraries/engage/reddit-plan-readiness';
+import { prepareRedditPlanEdit, redditPlanScheduleBlock, stageLegacyRedditFlairIn, legacyRedditFlairNeedsResolution } from '@gitroom/nestjs-libraries/engage/reddit-plan-readiness';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import weekOfYear from 'dayjs/plugin/weekOfYear';
@@ -2054,12 +2054,14 @@ export class PostsRepository {
     });
   }
 
-  async changeState(id: string, state: State, err?: any, body?: any) {
+  async changeState(id: string, state: State, err?: any, body?: any, expectedSettings?: string | null, expectedState?: State) {
     const errorMessage = err ? this.extractErrorMessage(err) : undefined;
 
     const update = await this._post.model.post.update({
       where: {
         id,
+        ...(expectedSettings !== undefined ? { settings: expectedSettings } : {}),
+        ...(expectedState ? { state: expectedState } : {}),
         AND: [legacyExecutionWhere()],
       },
       data: {
@@ -3501,15 +3503,46 @@ export class PostsRepository {
     const dueWhere = { ...this.extensionDueWhere(organizationId, providerIdentifiers, now), ...(selectedIds ? { id: { in: selectedIds } } : {}), ...(blockedPlatforms.length ? { AND: [legacyExecutionWhere(), { NOT: { OR: [{ providerIdentifier: { in: blockedPlatforms } }, { integration: { providerIdentifier: { in: blockedPlatforms } } }] } }] } : {}) };
 
     const model = tx?.post ?? this._post.model.post;
-    const candidates = await this.publishDispatchCandidates(model, { AND: [dueWhere, available] }, limit);
+    const candidates: Awaited<ReturnType<PostsRepository['publishDispatchCandidates']>> = [];
+    // Staged Reddit roots leave the due query immediately. Continue scanning so
+    // they do not consume another platform's place in this claim batch.
+    const deferredIds: string[] = [];
+    for (let pass = 0; pass <= 10 && candidates.length < limit; pass++) {
+      // Bound the Reddit recovery scan; still give other platforms a final
+      // opportunity even when many Reddit roots lack evidence.
+      const otherPlatforms: Prisma.PostWhereInput[] = pass === 10 ? [{ OR: [
+        { providerIdentifier: { not: 'reddit' } },
+        { providerIdentifier: null, integration: { providerIdentifier: { not: 'reddit' } } },
+        { providerIdentifier: null, integrationId: null },
+      ] }] : [];
+      const page = await this.publishDispatchCandidates(model, { AND: [dueWhere, available,
+        ...otherPlatforms, ...(deferredIds.length ? [{ id: { notIn: deferredIds } }] : [])] }, Math.max(1, Math.min(50, limit - candidates.length + (deferredIds.length ? 10 : 0))));
+      if (!page.length) break;
+      let staged = false;
+      for (const candidate of page) {
+        const post = tx ? await tx.post.findFirst({ where: { id: candidate.id, organizationId } }) : null;
+        if (tx && post && await stageLegacyRedditFlairIn(tx, post)) { staged = true; continue; }
+        let readinessPost = post;
+        if (post && !post.providerIdentifier && post.settings) {
+          try {
+            const provider = JSON.parse(post.settings)?.__type;
+            if (typeof provider === 'string') readinessPost = { ...post, providerIdentifier: provider };
+          } catch { /* The normal publish validation owns malformed settings. */ }
+        }
+        if (readinessPost && legacyRedditFlairNeedsResolution(readinessPost)) { deferredIds.push(candidate.id); staged = true; continue; }
+        if (candidates.length >= limit) break;
+        candidates.push(candidate);
+        // Compare the captured dispatch/identity as well as route and lease eligibility.
+        await model.updateMany({
+          where: { AND: [dueWhere, available, { id: candidate.id },
+            { sendTarget: { equals: candidate.sendTarget ?? Prisma.AnyNull } }] },
+          data: { releaseId: leaseToken, claimedAt: now },
+        });
+      }
+      if (!staged) break;
+    }
     const ids = candidates.map(c => c.id);
     if (!ids.length) return [];
-    // Compare the captured dispatch/identity as well as route and lease eligibility.
-    for (const candidate of candidates) await model.updateMany({
-      where: { AND: [dueWhere, available, { id: candidate.id },
-        { sendTarget: { equals: candidate.sendTarget ?? Prisma.AnyNull } }] },
-      data: { releaseId: leaseToken, claimedAt: now },
-    });
     const rows = await model.findMany({
       where: { AND: [dueWhere, { id: { in: ids }, releaseId: leaseToken }] },
       select: PostsRepository.EXTENSION_DUE_SELECT,

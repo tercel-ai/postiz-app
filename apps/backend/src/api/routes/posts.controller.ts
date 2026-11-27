@@ -549,7 +549,8 @@ export class PostsController {
       org.id,
       id,
       body?.error,
-      body?.segments
+      body?.segments,
+      body?.redditFlairRevision
     );
   }
 
